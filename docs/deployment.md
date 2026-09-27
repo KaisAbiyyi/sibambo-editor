@@ -10,7 +10,7 @@ Keep the SvelteKit adapter's output handling. The app configuration selects `@sv
 
 ## Bun workspace installation
 
-The workspace manifest and `bun.lock` are at the repository root, above `apps/editor`. Vercel's automatic package-manager selection uses the lockfile, and Bun 1.3.10 successfully ran `bun install --frozen-lockfile` from `apps/editor` in the local checkout. The corresponding Vercel installation path has not been tested. Check the first hosted build log to confirm that Vercel recognizes the root `bun.lock` and resolves the `workspace:*` packages before sharing or promoting that deployment.
+The workspace manifest and `bun.lock` are at the repository root, above `apps/editor`. Bun 1.3.10 successfully ran `bun install --frozen-lockfile` from both the repository root and `apps/editor` in the local checkout. Vercel's documentation says package-manager selection uses lockfiles and the install path follows the configured Root Directory, but does not explicitly define this non-Turborepo Bun workspace case. The hosted installation remains unverified. Check the first hosted build log to confirm that Vercel recognizes the root `bun.lock` and resolves the `workspace:*` packages before sharing or promoting that deployment.
 
 Vercel's documentation confirms app-root projects and outside-root shared source, but does not explicitly describe this non-Turborepo Bun workspace install case. Do not treat the local install as proof of hosted installation behavior. The platform's published guidance is [Using Monorepos](https://vercel.com/docs/monorepos), [Monorepos FAQ](https://vercel.com/docs/monorepos/monorepo-faq), [Package Managers](https://vercel.com/docs/package-managers), and [Configuring a Build](https://vercel.com/docs/builds/configure-a-build).
 

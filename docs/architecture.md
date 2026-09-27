@@ -39,7 +39,7 @@ The application-specific route and worker live under apps/editor. The Editor pag
 
 ## Build identity and routes
 
-The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes non-test files under the app and declared package `src` trees, the workspace and package manifests, selected SvelteKit/Vite/TypeScript/Playwright configuration files, the root lockfile, and the build-identity helper. Files ending in `.test.*` or `.spec.*` under `src` are excluded. This is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
+The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes non-test files under `apps/editor/src` and the declared package `src` trees, the workspace and package manifests, selected SvelteKit/Vite/TypeScript/Playwright configuration files, the root lockfile, and the build-identity helper. Files ending in `.test.*` or `.spec.*` under `src` are excluded. This is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
 
 The Editor route tree contains the main page and the build-identity endpoint. There is no model upload, save, database, or collaboration API in this application source. Selecting the Vercel or Node adapter does not itself add authentication, hosted storage, or deployment controls.
 

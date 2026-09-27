@@ -10,7 +10,7 @@
 
 | Check | Result | Notes |
 | --- | --- | --- |
-| `bun install --frozen-lockfile` | **PASS** | Bun 1.3.10; resolved from the committed root `bun.lock`. |
+| `bun install --frozen-lockfile` | **PASS** | Bun 1.3.10; passed from repository root and `apps/editor`, resolving the committed root workspace and lockfile. |
 | `bun run build` | **PASS** | Built locally with the Node adapter. Vite reported client chunks larger than 500 kB; this is an advisory and the build completed. |
 | `bun run check` | **Not run** | Available at the repository root; no standalone check result is claimed. |
 | `bun run test` | **Not run** | Unit and Playwright suites are present but were not rerun in this standalone repository. |
