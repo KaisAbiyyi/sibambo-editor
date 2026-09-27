@@ -1,0 +1,32 @@
+{
+	"name": "@sibambo/editor",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev --host 127.0.0.1 --port 5175",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"build": "vite build",
+		"serve:build": "node build/index.js",
+		"test": "bun test ./unit/editor && playwright test --config ./playwright.config.ts"
+	},
+	"dependencies": {
+		"@sibambo/contracts": "workspace:*",
+		"@sibambo/e4-import": "workspace:*",
+		"@sibambo/provenance": "workspace:*",
+		"@sibambo/scene-runtime": "workspace:*",
+		"@sibambo/viewport": "workspace:*",
+		"three": "^0.184.0"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1.61.1",
+		"@sveltejs/adapter-node": "^5.5.7",
+		"@sveltejs/adapter-vercel": "^6.3.4",
+		"@sveltejs/kit": "^2.63.0",
+		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"svelte": "^5.56.2",
+		"svelte-check": "^4.6.0",
+		"typescript": "^6.0.3",
+		"vite": "^8.0.16"
+	}
+}

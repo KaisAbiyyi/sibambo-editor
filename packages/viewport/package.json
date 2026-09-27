@@ -1,0 +1,23 @@
+{
+	"name": "@sibambo/viewport",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./camera-navigation": "./src/camera-navigation.ts",
+		"./material-state": "./src/material-state.ts",
+		"./renderer-backend": "./src/renderer-backend.ts",
+		"./renderer-defaults": "./src/renderer-defaults.ts",
+		"./render-profile": "./src/render-profile.ts",
+		"./scene-clip-program": "./src/scene-clip-program.ts",
+		"./scene-visibility": "./src/scene-visibility.ts",
+		"./runtime-asset-resolver": "./src/runtime-asset-resolver.ts",
+		"./source-material-cache": "./src/source-material-cache.ts"
+	},
+	"dependencies": {
+		"@sibambo/contracts": "workspace:*",
+		"@sibambo/scene-runtime": "workspace:*",
+		"three": "^0.184.0"
+	}
+}

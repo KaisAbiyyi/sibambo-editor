@@ -1,0 +1,21 @@
+{
+	"name": "@sibambo/e4-import",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./binary-reader": "./src/binary-reader.ts",
+		"./bomc-loader": "./src/bomc-loader.ts",
+		"./codecs": "./src/codecs.ts",
+		"./container": "./src/container.ts",
+		"./jpeg-color-map": "./src/jpeg-color-map.ts",
+		"./progressive-bomc-load": "./src/progressive-bomc-load.ts",
+		"./types": "./src/types.ts"
+	},
+	"dependencies": {
+		"@sibambo/contracts": "workspace:*",
+		"@sibambo/scene-runtime": "workspace:*",
+		"three": "^0.184.0"
+	}
+}

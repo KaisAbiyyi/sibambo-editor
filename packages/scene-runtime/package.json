@@ -1,0 +1,18 @@
+{
+	"name": "@sibambo/scene-runtime",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./types": "./src/prepared-types.ts",
+		"./appearance": "./src/runtime-appearance.ts",
+		"./coplanar-resolution": "./src/solid-coplanar-resolution.ts",
+		"./coplanar-diagnostics": "./src/viewer-performance.ts",
+		"./geometry-policy": "./src/solid-geometry-policy.ts",
+		"./viewer-performance": "./src/viewer-performance.ts",
+		"./surface-batching": "./src/surface-batching.ts",
+		"./application-preparation": "./src/application-preparation.ts"
+	},
+	"dependencies": { "@sibambo/contracts": "workspace:*", "three": "^0.184.0" }
+}
