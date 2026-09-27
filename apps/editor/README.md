@@ -65,6 +65,7 @@ Editor package scripts are listed in [package.json](package.json).
 - [Workspace overview](../../README.md)
 - [Architecture](../../docs/architecture.md)
 - [Data handling and evidence limits](../../docs/data-and-evidence.md)
+- [Vercel deployment](../../docs/deployment.md)
 - [Verification and release status](../../docs/verification.md)
 - [Admission code](src/lib/e4-admission.ts)
 - [Worker lifecycle](src/lib/e4-worker-client.ts)

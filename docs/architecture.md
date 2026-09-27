@@ -1,7 +1,7 @@
 
 # Architecture
 
-Sibambo Editor is a separate SvelteKit application under apps/editor. Its route owns the file-selection, admission, worker, session, and viewport lifecycle. The package is configured with the Node adapter and its development server binds to the loopback interface on port 5175.
+Sibambo Editor is a separate SvelteKit application under apps/editor. Its route owns the file-selection, admission, worker, session, and viewport lifecycle. Its SvelteKit configuration selects the Vercel adapter when the Vercel build environment is present and the Node adapter for local builds. The development server binds to the loopback interface on port 5175.
 
 ## Import and render path
 
@@ -39,9 +39,9 @@ The application-specific route and worker live under apps/editor. The Editor pag
 
 ## Build identity and routes
 
-The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes non-test source files under the app and declared package closure, together with relevant manifests and build configuration. Files ending in `.test.*` or `.spec.*` are excluded. This is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
+The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes non-test files under the app and declared package `src` trees, the workspace and package manifests, selected SvelteKit/Vite/TypeScript/Playwright configuration files, the root lockfile, and the build-identity helper. Files ending in `.test.*` or `.spec.*` under `src` are excluded. This is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
 
-The Editor route tree contains the main page and the build-identity endpoint. There is no model upload, save, database, or collaboration API in this application source. The adapter-node configuration does not itself add authentication, hosted storage, or deployment controls.
+The Editor route tree contains the main page and the build-identity endpoint. There is no model upload, save, database, or collaboration API in this application source. Selecting the Vercel or Node adapter does not itself add authentication, hosted storage, or deployment controls.
 
 - [Build identity endpoint](../apps/editor/src/routes/__build.json/+server.ts)
 - [Build identity implementation](../tooling/research/build-identity.ts)
