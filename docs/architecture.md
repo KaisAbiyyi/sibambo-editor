@@ -39,7 +39,7 @@ The application-specific route and worker live under apps/editor. The Editor pag
 
 ## Build identity and routes
 
-The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes the application source and declared package closure together with relevant manifests and build configuration. It is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
+The page displays its source fingerprint, and GET /__build.json returns the app build identity. The identity code hashes non-test source files under the app and declared package closure, together with relevant manifests and build configuration. Files ending in `.test.*` or `.spec.*` are excluded. This is reproducibility metadata; it does not authenticate the server, prove that the running deployment matches a separately published artifact, or certify the E4 producer.
 
 The Editor route tree contains the main page and the build-identity endpoint. There is no model upload, save, database, or collaboration API in this application source. The adapter-node configuration does not itself add authentication, hosted storage, or deployment controls.
 
