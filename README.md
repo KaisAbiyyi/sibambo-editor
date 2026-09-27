@@ -46,5 +46,6 @@ The package-level scripts are listed in [apps/editor/package.json](apps/editor/p
 - [Editor guide](apps/editor/README.md)
 - [Architecture](docs/architecture.md)
 - [Data handling and evidence limits](docs/data-and-evidence.md)
+- [Verification and release status](docs/verification.md)
 - [License](LICENSE)
 
