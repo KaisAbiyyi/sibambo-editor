@@ -16,9 +16,9 @@ The imported source is read-only in the current interface. Editor-specific geome
 
 ## Open a model
 
-Choose a BOMC 1.2 file and its matching JSON provenance sidecar, then select **Open verified model**. After the first frame and requested textures settle, use **Save view** to download a PNG. **Cancel** stops the active import; **Unload** clears the current page session.
+Choose a BOMC 1.2 file and its matching JSON provenance sidecar, then select **Open verified model**. After the first frame and requested textures settle, use **Save view** to download a PNG. **Cancel** stops the active import: on first load, the page stays empty; during replacement, the current model and viewport stay available. A rejected replacement also leaves the current session in place. **Unload** clears the page session.
 
-Use files from trusted sources. The current 256 MiB artifact limit applies to the input file, but the importer does not enforce an aggregate decoded-size limit, and sidecar JSON has no explicit size limit. Hash verification binds the sidecar’s declared digest to the selected bytes; it does not cryptographically prove who produced the file.
+The selected artifact is capped at 256 MiB. The E4 importer also applies bounded section, count, geometry, and work checks, and sidecar JSON is read through a byte-bounded helper before parsing. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not authenticate files or guarantee safe processing. Hash verification binds the sidecar’s declared digest to the selected bytes; it does not cryptographically prove who produced the file.
 
 ## Status and evidence limits
 

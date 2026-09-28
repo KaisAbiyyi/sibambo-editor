@@ -4,24 +4,26 @@
 
 **Application:** Sibambo Editor
 
-**Status:** Local installation and production build passed. Unit, browser, and Vercel-hosted build gates remain unverified for this standalone snapshot.
+**Status:** The standalone Editor check, shared-package typecheck, production build, unit tests, and browser tests passed locally with the Node adapter.
 
 ## Checks run
 
 | Check | Result | Notes |
 | --- | --- | --- |
-| `bun install --frozen-lockfile` | **PASS** | Bun 1.3.10; passed from repository root and `apps/editor`, resolving the committed root workspace and lockfile. |
-| `bun run build` | **PASS** | Built locally with the Node adapter. Vite reported client chunks larger than 500 kB; this is an advisory and the build completed. |
-| `bun run check` | **Not run** | Available at the repository root; no standalone check result is claimed. |
-| `bun run test` | **Not run** | Unit and Playwright suites are present but were not rerun in this standalone repository. |
+| `bun run check` | **PASS** | Svelte check reported 0 errors and 0 warnings. |
+| `bun x tsc --project packages/tsconfig.json` | **PASS** | Typechecked the five shared packages with no diagnostics. |
+| `bun run build` | **PASS** | Built locally with the Node adapter. Vite reported client chunks larger than 500 kB; this advisory did not fail the build. |
+| `bun run test` | **PASS** | 36 app unit tests and 6 Playwright browser tests passed. Playwright also built and served the Node-adapter production output. |
 | Vercel adapter build/deployment | **Not verified** | No Vercel project or hosted deployment is established by this snapshot. Verify the Vercel adapter in the hosted builder before sharing a deployment as a release. |
 
-The build identity is available from **GET `/__build.json`**. It describes the commit used by the running build; a successful local Node-adapter build does not verify Vercel packaging or deployment behavior.
+The build identity is available from **GET `/__build.json`**. It describes the commit used by the running build; successful local gates with the Node adapter do not verify Vercel packaging or deployment behavior.
+
+The combined F4 app suite across Benchmark, Rooms, and Editor reported **146 unit tests and 32 browser tests passing**. Synthetic Editor regressions cover preserving the empty first-load state or current loaded model during cancellation, and mounting a candidate viewport before disposing the previous one. These checks do not establish real exporter behavior, cross-model parity, or deployment status.
 
 ## Release boundaries
 
 - Editor currently displays the imported source read-only; a complete CAD workflow and lossless BOMC save-back are not established capabilities.
-- The input-file cap does not impose an aggregate decoded-size limit, and the provenance sidecar has no explicit size limit. Use trusted files; see [Data handling and evidence limits](data-and-evidence.md).
+- E4 parser resource bounds and byte-bounded sidecar JSON reads are defensive controls, not authentication or a guarantee of safe processing. E4 caps remain provisional pending cross-model corpus validation; see [Data handling and evidence limits](data-and-evidence.md).
 - Imported model data stays in page memory. There is no hosted model database, account synchronization, or server-side edit history.
 - E4 remains **`candidate_pending_cross_model_validation`**. Local build success does not establish cross-viewer parity, representative-corpus correctness, or certification.
 - Earlier monorepo test results are not promoted to tests of this standalone checkout.

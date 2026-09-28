@@ -1,18 +1,24 @@
-import { BomcBinaryReader } from './binary-reader';
+import { assertBomcArrayBytes, assertExpectedBomcCount, BomcBinaryReader } from './binary-reader';
 
-export function decodePositionBlock(block: Uint8Array) {
+export function decodePositionBlock(block: Uint8Array, expectedCount?: number) {
 	if (block.byteLength < 60) throw new Error('BOMC invalid: truncated position block.');
 	const reader = new BomcBinaryReader(block);
 	if (reader.readUint8() !== 1) throw new Error('BOMC invalid: position block version.');
 	const codec = reader.readUint8();
 	if (reader.readUint16() !== 0) throw new Error('BOMC invalid: position block reserved fields.');
-	const count = reader.readUint32();
+	const count = reader.readCount('position');
+	assertExpectedBomcCount(count, expectedCount, 'position');
 	const payloadLength = reader.readUint32();
 	const origin = [reader.readFloat64(), reader.readFloat64(), reader.readFloat64()];
 	const scale = [reader.readFloat64(), reader.readFloat64(), reader.readFloat64()];
 	if (reader.remaining !== payloadLength) throw new Error('BOMC invalid: position block byte count.');
+	if (![1, 2, 3, 4, 5].includes(codec)) throw new Error(`BOMC invalid: unsupported position codec ${codec}.`);
+	const valueCount = assertBomcArrayBytes(count, 3, 4, 'positions');
+	const positionBytesByCodec: Record<number, number> = { 1: valueCount * 8, 2: valueCount * 4, 3: valueCount * 4, 4: valueCount * 2 };
+	if (codec in positionBytesByCodec && payloadLength !== positionBytesByCodec[codec]) throw new Error('BOMC invalid: position codec payload size.');
+	if (codec === 5 && payloadLength < valueCount) throw new Error('BOMC invalid: position codec payload is truncated.');
 	const payload = new BomcBinaryReader(reader.readBytes(payloadLength, 'position payload'));
-	const result = new Float32Array(count * 3);
+	const result = new Float32Array(valueCount);
 	let previous = 0;
 	for (let index = 0; index < result.length; index += 1) {
 		const axis = index % 3;
@@ -30,25 +36,30 @@ export function decodePositionBlock(block: Uint8Array) {
 	return { codec, positions: result };
 }
 
-export function decodeTopologyBlock(block: Uint8Array) {
+export function decodeTopologyBlock(block: Uint8Array, expectedLoopCount?: number, expectedTriangleCount?: number) {
 	if (block.byteLength < 20) throw new Error('BOMC invalid: truncated topology block.');
 	const reader = new BomcBinaryReader(block);
 	if (reader.readUint8() !== 1 || reader.readUint8() !== 0 || reader.readUint8() !== 0 || reader.readUint8() !== 0) {
 		throw new Error('BOMC invalid: topology block header.');
 	}
-	const loopCount = reader.readUint32();
-	const triangleCount = reader.readUint32();
+	const loopCount = reader.readCount('topology loop');
+	const triangleCount = reader.readCount('topology triangle');
+	assertExpectedBomcCount(loopCount, expectedLoopCount, 'topology loop');
+	assertExpectedBomcCount(triangleCount, expectedTriangleCount, 'topology triangle');
 	const loopLength = reader.readUint32();
 	const triangleLength = reader.readUint32();
 	if (reader.remaining !== loopLength + triangleLength) throw new Error('BOMC invalid: topology block byte count.');
+	if (loopCount > loopLength || triangleCount > triangleLength) throw new Error('BOMC invalid: topology count exceeds encoded payload.');
 	const loops = decodeDeltaIndices(reader.readBytes(loopLength), loopCount);
 	const triangles = decodeDeltaIndices(reader.readBytes(triangleLength), triangleCount);
 	return { loops, triangles };
 }
 
 function decodeDeltaIndices(bytes: Uint8Array, count: number) {
+	if (count > bytes.byteLength) throw new Error('BOMC invalid: topology count exceeds encoded payload.');
+	const checkedCount = assertBomcArrayBytes(count, 1, 4, 'topology indices');
 	const reader = new BomcBinaryReader(bytes);
-	const values = new Uint32Array(count);
+	const values = new Uint32Array(checkedCount);
 	let previous = 0;
 	for (let index = 0; index < count; index += 1) {
 		previous += reader.readZigZag();
@@ -59,10 +70,14 @@ function decodeDeltaIndices(bytes: Uint8Array, count: number) {
 	return values;
 }
 
-export function decodeNormalSection(bytes: Uint8Array) {
+export function decodeNormalSection(bytes: Uint8Array, expectedCount?: number) {
 	const { codec, count, payload } = decodeGenericCodecHeader(bytes, 'normal');
+	assertExpectedBomcCount(count, expectedCount, 'normal');
 	const reader = new BomcBinaryReader(payload);
-	const values = new Float32Array(count * 3);
+	const valueCount = assertBomcArrayBytes(count, 3, 4, 'normals');
+	const bytesPerNormal = codec === 1 ? 12 : codec === 2 ? 4 : codec === 3 ? 24 : undefined;
+	if (bytesPerNormal === undefined || reader.remaining !== count * bytesPerNormal) throw new Error('BOMC invalid: normal codec payload size.');
+	const values = new Float32Array(valueCount);
 	if (codec === 1) {
 		for (let index = 0; index < values.length; index += 1) values[index] = reader.readFloat32();
 	} else if (codec === 2) {
@@ -86,23 +101,30 @@ export function decodeNormalSection(bytes: Uint8Array) {
 	} else if (codec === 3) {
 		for (let index = 0; index < values.length; index += 1) values[index] = reader.readFloat64();
 	} else throw new Error(`BOMC invalid: unsupported normal codec ${codec}.`);
+	for (const value of values) if (!Number.isFinite(value)) throw new Error('BOMC invalid: non-finite normal value.');
 	reader.finish('normal payload');
 	return { codec, normals: values };
 }
 
-export function decodeUvBlock(block: Uint8Array) {
+export function decodeUvBlock(block: Uint8Array, expectedCount?: number) {
 	if (block.byteLength < 44) throw new Error('BOMC invalid: truncated UV block.');
 	const reader = new BomcBinaryReader(block);
 	if (reader.readUint8() !== 1) throw new Error('BOMC invalid: UV block version.');
 	const codec = reader.readUint8();
 	if (reader.readUint16() !== 0) throw new Error('BOMC invalid: UV block reserved fields.');
-	const count = reader.readUint32();
+	const count = reader.readCount('UV');
+	assertExpectedBomcCount(count, expectedCount, 'UV');
 	const payloadLength = reader.readUint32();
 	const origin = [reader.readFloat64(), reader.readFloat64()];
 	const scale = [reader.readFloat64(), reader.readFloat64()];
 	if (reader.remaining !== payloadLength) throw new Error('BOMC invalid: UV block byte count.');
+	if (![1, 2, 3, 4, 5].includes(codec)) throw new Error(`BOMC invalid: unsupported UV codec ${codec}.`);
+	const valueCount = assertBomcArrayBytes(count, 2, 4, 'UVs');
+	const bytesPerUv = codec === 1 ? 8 : codec === 2 || codec === 3 ? 4 : codec === 4 ? undefined : codec === 5 ? 16 : undefined;
+	if (bytesPerUv !== undefined && payloadLength !== count * bytesPerUv) throw new Error('BOMC invalid: UV codec payload size.');
+	if (codec === 4 && payloadLength < valueCount) throw new Error('BOMC invalid: UV codec payload is truncated.');
 	const payload = new BomcBinaryReader(reader.readBytes(payloadLength));
-	const values = new Float32Array(count * 2);
+	const values = new Float32Array(valueCount);
 	let previous = 0;
 	for (let index = 0; index < values.length; index += 1) {
 		const axis = index % 2;
@@ -120,10 +142,28 @@ export function decodeUvBlock(block: Uint8Array) {
 	return { codec, uvs: values };
 }
 
-export function decodeTransformSection(bytes: Uint8Array) {
+export function decodeTransformSection(bytes: Uint8Array, expectedCount?: number) {
 	const { codec, count, payload } = decodeGenericCodecHeader(bytes, 'transform');
+	assertExpectedBomcCount(count, expectedCount, 'transform');
 	const reader = new BomcBinaryReader(payload);
-	const transforms = new Float64Array(count * 16);
+	const valueCount = assertBomcArrayBytes(count, 16, 8, 'transforms');
+	const bytesBySubtype: Record<number, number> = { 0: 0, 1: 96, 2: 48, 3: 40, 4: 32, 6: 128 };
+	if (codec === 5) {
+		const preflight = new BomcBinaryReader(payload);
+		for (let index = 0; index < count; index += 1) {
+			const subtype = preflight.readUint8();
+			const byteLength = bytesBySubtype[subtype];
+			if (byteLength === undefined) throw new Error(`BOMC invalid: hybrid transform subtype ${subtype}.`);
+			preflight.readBytes(byteLength, `hybrid transform ${index} payload`);
+		}
+		preflight.finish('hybrid transform payload');
+	} else {
+		const byteLength = bytesBySubtype[codec];
+		if (byteLength === undefined || count * byteLength !== reader.remaining) {
+			throw new Error('BOMC invalid: transform codec payload size.');
+		}
+	}
+	const transforms = new Float64Array(valueCount);
 	for (let index = 0; index < count; index += 1) {
 		const subtype = codec === 5 ? reader.readUint8() : codec;
 		let matrix: number[];
@@ -146,6 +186,7 @@ export function decodeTransformSection(bytes: Uint8Array) {
 			matrix = new Array<number>(16);
 			for (let component = 0; component < 16; component += 1) matrix[component] = reader.readFloat64();
 		} else throw new Error(`BOMC invalid: ${codec === 5 ? 'hybrid transform subtype' : 'unsupported transform codec'} ${subtype}.`);
+		if (!matrix.every(Number.isFinite)) throw new Error(`BOMC invalid: transform ${index} contains a non-finite value.`);
 		transforms.set(matrix, index * 16);
 	}
 	reader.finish('transform payload');
@@ -158,7 +199,7 @@ function decodeGenericCodecHeader(bytes: Uint8Array, label: string) {
 	if (reader.readUint8() !== 1) throw new Error(`BOMC invalid: ${label} section version.`);
 	const codec = reader.readUint8();
 	if (reader.readUint16() !== 0) throw new Error(`BOMC invalid: ${label} section reserved fields.`);
-	const count = reader.readUint32();
+	const count = reader.readCount(`${label}`);
 	const payloadLength = reader.readUint32();
 	if (reader.remaining !== payloadLength) throw new Error(`BOMC invalid: ${label} section byte count.`);
 	return { codec, count, payload: reader.readBytes(payloadLength) };

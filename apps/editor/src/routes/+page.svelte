@@ -5,6 +5,7 @@
 	import { loadE4InWorker } from '$lib/e4-worker-client';
 	import { PreparedSceneViewport, type ViewMode, type ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
+	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
 
 	const build = __SIBAMBO_APP_BUILD__;
@@ -27,6 +28,48 @@
 	let sceneId = $state('');
 	let generation = 0;
 	let controller: AbortController | null = null;
+	let lastCancelledSnapshot: LoadedEditorState | null = null;
+	let lastCancelGeneration = -1;
+	type LoadedEditorState = {
+		provenance: ResearchProvenance | null;
+		artifactSha256: string;
+		result: AdaptedBomcResult | null;
+		session: EditorSession | null;
+		viewport: PreparedSceneViewport | null;
+		ready: boolean;
+		picked: ViewportPick | null;
+		sceneId: string;
+		hostChildren: Node[];
+	};
+	let activeLoadSnapshot: LoadedEditorState | null = null;
+
+	function snapshotLoadedState(): LoadedEditorState {
+		return {
+			provenance, artifactSha256, result, session, viewport, ready, picked, sceneId,
+			hostChildren: viewportHost ? Array.from(viewportHost.childNodes) : []
+		};
+	}
+
+	function restoreHostChildren(children: Node[]) {
+		if (viewportHost) viewportHost.replaceChildren(...children);
+	}
+	function isCurrentCancelledSnapshot(snapshot: LoadedEditorState) {
+		return lastCancelledSnapshot === snapshot && lastCancelGeneration === generation;
+	}
+
+	function restoreLoadedState(snapshot: LoadedEditorState) {
+		if (viewport && viewport !== snapshot.viewport) viewport.dispose();
+		if (session && session !== snapshot.session) session.dispose();
+		provenance = snapshot.provenance;
+		artifactSha256 = snapshot.artifactSha256;
+		result = snapshot.result;
+		session = snapshot.session;
+		viewport = snapshot.viewport;
+		ready = snapshot.ready;
+		picked = snapshot.picked;
+		sceneId = snapshot.sceneId;
+		restoreHostChildren(snapshot.hostChildren);
+	}
 
 	function stageSource(event: Event) {
 		sourceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
@@ -41,21 +84,20 @@
 		if (!sourceFile || !provenanceFile || busy) return;
 		const file = sourceFile;
 		const sidecar = provenanceFile;
+		const previous = snapshotLoadedState();
+		activeLoadSnapshot = previous;
 		const request = ++generation;
+		lastCancelledSnapshot = null;
+		lastCancelGeneration = -1;
 		controller?.abort();
 		controller = new AbortController();
+		let candidateSession: EditorSession | null = null;
+		let candidateViewport: PreparedSceneViewport | null = null;
 		busy = true;
 		loadStatus = 'Checking provenance and artifact hash…';
-		ready = false;
 		error = '';
-		picked = null;
-		viewport?.dispose();
-		viewport = null;
-		result = null;
-		session?.dispose();
-		session = null;
 		try {
-			const parsedSidecar = JSON.parse(await sidecar.text()) as unknown;
+			const parsedSidecar = JSON.parse(await readBoundedJsonText(sidecar, 'Provenance sidecar')) as unknown;
 			const admitted = await admitE4File(file, parsedSidecar);
 			if (request !== generation) return;
 			loadStatus = 'Starting E4 import worker…';
@@ -66,28 +108,62 @@
 				throw new Error('BOMC encoding profile does not match the admitted provenance profile.');
 			}
 			if (request !== generation) return;
-			sceneId = loaded.activeSceneId ?? loaded.scenes[0]?.id ?? '';
-			session = new EditorSession(file, admitted.provenance, admitted.artifactSha256);
-			provenance = admitted.provenance;
-			artifactSha256 = admitted.artifactSha256;
-			result = loaded;
+			const nextSceneId = loaded.activeSceneId ?? loaded.scenes[0]?.id ?? '';
+			const nextSession = new EditorSession(file, admitted.provenance, admitted.artifactSha256);
+			candidateSession = nextSession;
+			if (!previous.result) {
+				provenance = admitted.provenance;
+				artifactSha256 = admitted.artifactSha256;
+				result = loaded;
+				session = nextSession;
+				sceneId = nextSceneId;
+				ready = false;
+				picked = null;
+			}
 			await tick();
-			if (request !== generation || !viewportHost) return;
+			if (request !== generation) { nextSession.dispose(); return; }
+			if (!viewportHost) throw new Error('The Editor viewport host is unavailable.');
 			const nextViewport = await PreparedSceneViewport.mount(viewportHost, {
 				scene: loaded.preparedRuntimeScene,
 				appearance: loaded.appearance,
-				scenes: loaded.scenes, activeSceneId: sceneId, clipPlanes: loaded.clipPlanes,
+				scenes: loaded.scenes, activeSceneId: nextSceneId, clipPlanes: loaded.clipPlanes,
 				encodingProfile: loaded.encodingContract?.profile, editorMode: false
 			});
-			if (request !== generation) { nextViewport.dispose(); return; }
-			viewport = nextViewport;
-			const selectedScene = loaded.scenes.find((scene) => scene.id === sceneId);
+			candidateViewport = nextViewport;
+			if (request !== generation) {
+				nextViewport.dispose();
+				nextSession.dispose();
+				if (isCurrentCancelledSnapshot(previous)) restoreHostChildren(previous.hostChildren);
+				return;
+			}
+			const selectedScene = loaded.scenes.find((scene) => scene.id === nextSceneId);
 			nextViewport.setScene(selectedScene ?? null);
 			nextViewport.setViewMode(viewMode);
-			nextViewport.setOnPick((item) => picked = item);
-			nextViewport.setOnReady(() => { if (request === generation) ready = true; });
+			nextViewport.setOnPick((item) => { if (viewport === nextViewport && request === generation) picked = item; });
+			provenance = admitted.provenance;
+			artifactSha256 = admitted.artifactSha256;
+			result = loaded;
+			session = nextSession;
+			sceneId = nextSceneId;
+			viewport = nextViewport;
+			ready = false;
+			picked = null;
+			nextViewport.setOnReady(() => { if (viewport === nextViewport && request === generation) ready = true; });
+			if (previous.viewport && previous.viewport !== nextViewport) previous.viewport.dispose();
+			if (previous.session && previous.session !== nextSession) previous.session.dispose();
+			activeLoadSnapshot = null;
 		} catch (cause) {
-			if (request === generation && !(cause instanceof DOMException && cause.name === 'AbortError')) error = cause instanceof Error ? cause.message : 'The E4 model could not be opened.';
+			if (request === generation) {
+				if (candidateViewport && candidateViewport !== previous.viewport) {
+					candidateViewport.dispose();
+					if (viewport === candidateViewport) viewport = previous.viewport;
+				}
+				if (candidateSession && candidateSession !== previous.session) candidateSession.dispose();
+				if (session === candidateSession) session = previous.session;
+				restoreLoadedState(previous);
+				activeLoadSnapshot = null;
+				if (!(cause instanceof DOMException && cause.name === 'AbortError')) error = cause instanceof Error ? cause.message : 'The E4 model could not be opened.';
+			}
 		} finally {
 			if (request === generation) busy = false;
 		}
@@ -110,17 +186,11 @@
 		generation += 1;
 		controller?.abort();
 		controller = null;
-		viewport?.dispose();
-		viewport = null;
-		session?.dispose();
-		session = null;
-		result = null;
-		provenance = null;
-		artifactSha256 = '';
-		sceneId = '';
-		picked = null;
+		lastCancelledSnapshot = activeLoadSnapshot;
+		lastCancelGeneration = generation;
+		if (activeLoadSnapshot) restoreLoadedState(activeLoadSnapshot);
+		activeLoadSnapshot = null;
 		busy = false;
-		ready = false;
 		loadStatus = 'Model load cancelled.';
 		error = 'Model load cancelled.';
 	}
@@ -128,6 +198,7 @@
 		generation += 1;
 		controller?.abort();
 		controller = null;
+		activeLoadSnapshot = null;
 		viewport?.dispose();
 		viewport = null;
 		session?.dispose();
@@ -173,7 +244,7 @@
 			<label>Display<select value={viewMode} onchange={(event) => setMode((event.currentTarget as HTMLSelectElement).value as ViewMode)}><option value="solid">Solid</option><option value="xray">X-Ray</option><option value="wireframe">Wireframe</option></select></label>
 			{#if result.scenes.length}<label>Scene<select aria-label="Visible scene" value={sceneId} onchange={sceneChanged}>{#each result.scenes as scene}<option value={scene.id}>{scene.name || scene.id}</option>{/each}</select></label>{/if}
 			<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
-			<button type="button" class="secondary" onclick={unload}>Unload</button>
+			<button type="button" class="secondary" onclick={unload} disabled={busy}>Unload</button>
 		{/if}
 	</section>
 	{#if error}<p class="error" role="alert">{error}</p>{/if}

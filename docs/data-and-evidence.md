@@ -7,9 +7,9 @@ This document describes the current Editor file path and the claims supported by
 
 The page accepts one user-selected BOMC 1.2 artifact and one user-selected JSON provenance sidecar. It reads the sidecar, validates it against the app’s E4 provenance policy, checks the declared artifact byte count and SHA-256, and checks the BOMC marker and version before handing bytes to the import worker.
 
-The selected artifact is limited to 256 MiB. This is a compressed/input-file limit, not a bound on decoded memory. The current import path has no aggregate decoded-section limit. The sidecar is read with File.text() and parsed as JSON without an explicit sidecar-size limit. A small compressed file can still expand substantially, and a very large sidecar can consume memory during parsing.
+The selected artifact is limited to 256 MiB. The E4 importer also applies bounded section decoding and count, geometry, and work checks. These parser caps are provisional pending cross-model corpus validation. Sidecar JSON is read through a byte-bounded helper before parsing. These controls limit resource use but do not guarantee that every malformed file is safe to process.
 
-The worker can be cancelled and terminated, but cancellation does not supply the missing size bounds. Until decoded-data and sidecar-size limits are implemented and reviewed, open only artifacts and sidecars from trusted sources. Do not treat a matching hash as proof that a producer created the file.
+The worker can be cancelled and terminated, but cancellation does not replace parser bounds or authenticate input. Do not treat a matching hash as proof that a producer created the file.
 
 Editor has no separate JSON dataset or project import workflow. The JSON input on the current page is the provenance sidecar.
 

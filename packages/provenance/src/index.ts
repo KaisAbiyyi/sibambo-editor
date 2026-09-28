@@ -2,6 +2,15 @@ import type { EngineFormat, EngineId, ResearchProvenance } from '@sibambo/contra
 
 const hash64 = /^[a-f0-9]{64}$/;
 const nonempty = (value: unknown) => typeof value === 'string' && Boolean(value.trim());
+export const MAX_SELECTED_JSON_BYTES = 4 * 1024 * 1024;
+
+/** Read user-selected JSON only after enforcing a byte limit before the browser allocates text. */
+export async function readBoundedJsonText(file: Pick<Blob, 'size' | 'text'>, label = 'Selected JSON file', maxBytes = MAX_SELECTED_JSON_BYTES) {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > maxBytes) {
+		throw new Error(`${label} is empty or exceeds the ${(maxBytes / 1024 / 1024).toLocaleString('en-US')} MiB size limit.`);
+	}
+	return file.text();
+}
 
 export type EnginePolicy = {
 	engine: EngineId;

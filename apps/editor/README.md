@@ -27,7 +27,7 @@ These controls inspect the imported source. The app page does not expose drawing
 
 ## Import cancellation and session lifetime
 
-Import runs in an app-owned worker. Progress is shown while the worker decodes and prepares render data. **Cancel** aborts the request, terminates the worker, clears the current result, and prevents an earlier request from mounting a late viewport. **Unload** also clears the selected files and the in-memory session. Closing or reloading the page disposes the active viewport and session.
+Import runs in an app-owned worker. Progress is shown while the worker decodes and prepares render data. **Cancel** aborts the request and prevents stale progress or results from replacing the current state. On first load, cancellation leaves no loaded session; during replacement, it preserves the current model and viewport. Editor mounts a replacement candidate viewport before disposing the old session and viewport, so a candidate that is rejected or fails to mount leaves the current view available. **Unload** clears the selected files and in-memory session. Closing or reloading the page disposes the active viewport and session.
 
 The worker keeps heavy decoding and render preparation off the main UI thread, but that does not remove the resource limits described in [Data handling and evidence limits](../../docs/data-and-evidence.md).
 
@@ -39,9 +39,9 @@ The source model is displayed read-only. The [Editor session](src/lib/editor/Edi
 
 ## Security and evidence limits
 
-The app rejects mismatched sidecars and unsupported BOMC versions, and admission caps the selected artifact at 256 MiB. The current importer does not enforce an aggregate decoded-size limit, and the sidecar is read as text and parsed without an explicit byte-size cap. A crafted file can therefore consume substantial browser memory even when its compressed artifact is below the input limit.
+The app rejects mismatched sidecars and unsupported BOMC versions, and admission caps the selected artifact at 256 MiB. The E4 importer also applies bounded section, count, geometry, and work checks; sidecar JSON is read through a byte-bounded helper before parsing. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not guarantee safe processing of every malformed file.
 
-Until decoded-size and sidecar-size limits are added and reviewed, use only BOMC files and sidecars from trusted sources. Do not treat the sidecar hash as a security signature.
+The sidecar hash is not a security signature and does not prove producer authenticity. Resource limits do not authenticate files or certify E4 behavior.
 
 E4 remains **candidate_pending_cross_model_validation**. Cross-model viewer parity, universal fidelity, certification, complete editing, and lossless save-back are unproven. See [Data handling and evidence limits](../../docs/data-and-evidence.md).
 

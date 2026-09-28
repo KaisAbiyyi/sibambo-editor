@@ -21,9 +21,9 @@ Relevant implementation files:
 
 ## Cancellation and teardown
 
-Each load has a generation identifier and an AbortController. Cancel increments the generation, aborts the worker request, clears the result and session, and prevents stale progress or a late result from replacing the current page state. The worker client sends a cancellation message and terminates its Worker when the request settles. Page teardown also aborts work and disposes the viewport and session.
+Each load has a generation identifier and an AbortController. Cancel increments the generation and aborts the worker request, preventing stale progress or a late result from replacing current page state. On first load, cancellation leaves no session; during replacement, it preserves the current model, session, and viewport. A replacement candidate viewport is mounted before the old session and viewport are disposed, so a rejected candidate or mount failure leaves the current view active. The worker client sends a cancellation message and terminates its Worker when the request settles. Page teardown aborts work and disposes the active viewport and session.
 
-Worker cancellation limits how long a user-requested import continues. It is not a substitute for decoded-data limits or a guarantee that a resource-heavy file can be safely opened.
+Worker cancellation limits how long a user-requested import continues. It complements the importer's resource bounds but does not guarantee that every malformed file can be safely opened.
 
 ## Ownership boundaries
 

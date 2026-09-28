@@ -13,16 +13,18 @@ describe('shared viewport rendering defaults', () => {
 		expect(renderer).toEqual({ outputColorSpace: SRGBColorSpace, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1 });
 	});
 
-	test('uses the established background and light positions and intensities', () => {
-		const scene = new Scene();
-		expect(addRendererSceneLighting(scene)).toBe('#F2F3F5');
-		expect((scene.background as Color).getHexString()).toBe('f2f3f5');
-		const ambient = scene.children.find((child) => child instanceof AmbientLight) as AmbientLight;
-		const directional = scene.children.filter((child) => child instanceof DirectionalLight) as DirectionalLight[];
-		expect(ambient.intensity).toBe(2.2);
-		expect(directional.map((light) => [light.intensity, light.position.toArray()])).toEqual([
-			[2.4, [10, 14, 8]], [1.2, [-8, 6, -10]]
-		]);
+	test('matches the legacy light and background defaults in both color modes', () => {
+		for (const [darkMode, background] of [[false, '#F2F3F5'], [true, '#20242A']] as const) {
+			const scene = new Scene();
+			expect(addRendererSceneLighting(scene, darkMode)).toBe(background);
+			expect((scene.background as Color).getHexString()).toBe(background.slice(1).toLowerCase());
+			const ambient = scene.children.find((child) => child instanceof AmbientLight) as AmbientLight;
+			const directional = scene.children.filter((child) => child instanceof DirectionalLight) as DirectionalLight[];
+			expect([ambient.color.getHexString(), ambient.intensity]).toEqual(['f8fbff', 2.2]);
+			expect(directional.map((light) => [light.color.getHexString(), light.intensity, light.position.toArray()])).toEqual([
+				['fff2df', 2.4, [10, 14, 8]], ['8fc7d8', 1.2, [-8, 6, -10]]
+			]);
+		}
 	});
 
 	test('renders fallback labels into a disposable glyph texture', () => {
