@@ -1,6 +1,8 @@
 
 # Sibambo Editor
 
+The standalone workspace follows the versioned [Sibambo UI contract](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/sibambo-ui-contract-ui-reunification-001-v1.1.md), based on the production `model-eval` interface. Editor owns its layout and styles locally; shared appearance does not move model data or sessions between apps.
+
 Sibambo Editor is a browser-based E4 viewport and early editing foundation for inspecting BOMC 1.2 captures. The current page admits a model and sidecar, renders the imported source, and lets you inspect scenes and source geometry. It does not provide a complete CAD workflow or write edited geometry back to a BOMC file.
 
 ## What it currently does
