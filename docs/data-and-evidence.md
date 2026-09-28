@@ -5,13 +5,15 @@ This document describes the current Editor file path and the claims supported by
 
 ## Files admitted by the current page
 
-The page accepts one user-selected BOMC 1.2 artifact and one user-selected JSON provenance sidecar. It reads the sidecar, validates it against the app’s E4 provenance policy, checks the declared artifact byte count and SHA-256, and checks the BOMC marker and version before handing bytes to the import worker.
+The page accepts one user-selected BOMC 1.2 artifact. It always checks the 256 MiB size bound, BOMC marker and version, computes the artifact SHA-256, and then hands the bytes to the import worker. A JSON provenance sidecar is optional. If supplied before opening, Editor validates it against the E4 policy and checks its declared artifact byte count and SHA-256 against the selected file, then confirms its profile matches the parsed BOMC profile. A sidecar can also be added to an open file; the same checks run before the session evidence changes.
+
+Without a matching sidecar, the Editor session stores `provenance: null` and displays **File-only · source not recorded**. After all sidecar and parsed-profile checks pass, the current session may upgrade to **Provenance-matched · operator-attested source record** without remounting its viewport. A malformed or mismatched sidecar leaves the active model, camera, selection, and evidence level unchanged. File-only and provenance-matched are evidence labels; neither authenticates the producer or certifies the model.
 
 The selected artifact is limited to 256 MiB. The E4 importer also applies bounded section decoding and count, geometry, and work checks. These parser caps are provisional pending cross-model corpus validation. Sidecar JSON is read through a byte-bounded helper before parsing. These controls limit resource use but do not guarantee that every malformed file is safe to process.
 
 The worker can be cancelled and terminated, but cancellation does not replace parser bounds or authenticate input. Do not treat a matching hash as proof that a producer created the file.
 
-Editor has no separate JSON dataset or project import workflow. The JSON input on the current page is the provenance sidecar.
+Editor has no separate JSON dataset or project import workflow. Its optional JSON input is a provenance sidecar.
 
 ## Provenance and build identity
 
@@ -21,7 +23,7 @@ The page displays an application source fingerprint, and GET /__build.json retur
 
 ## Where data goes
 
-The selected file, decoded scene, provenance, and current Editor session are kept in page memory. The app source does not provide a hosted database, model upload endpoint, account sync, or collaborative editing service. Unloading the model or leaving the page clears the session.
+The selected file, decoded scene, optional provenance, and current Editor session are kept in page memory. The app source does not provide a hosted database, model upload endpoint, account sync, or collaborative editing service. Unloading the model or leaving the page clears the session.
 
 The only save action in the current page downloads a PNG view image after the viewport is ready. It does not save edits, rewrite BOMC, or persist a model to a server.
 

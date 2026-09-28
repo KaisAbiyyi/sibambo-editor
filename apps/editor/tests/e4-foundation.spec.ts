@@ -25,9 +25,9 @@ test('Editor verifies and imports an E4 artifact in its own worker', async ({ pa
 
 	await page.goto('/');
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'tiny-browser-test.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'tiny-browser-test.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
-	await expect(page.getByText('tiny-browser-test', { exact: true })).toBeVisible({ timeout: 30000 });
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'tiny-browser-test.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Imported source status').getByText('tiny-browser-test', { exact: true })).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	await expect(page.getByRole('alert')).toHaveCount(0);
 	const artifactHash = await page.locator('dd').nth(0).textContent();
@@ -74,12 +74,115 @@ test('Editor verifies and imports an E4 artifact in its own worker', async ({ pa
 
 	const replacement = { ...provenance, model: { id: 'tiny-browser-replacement' }, capture: { ...provenance.capture, id: 'tiny-editor-replacement-flow' } };
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'tiny-replacement.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'tiny-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
-	await expect(page.getByText('tiny-browser-replacement', { exact: true })).toBeVisible({ timeout: 30000 });
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'tiny-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Imported source status').getByText('tiny-browser-replacement', { exact: true })).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	await page.getByRole('button', { name: 'Unload' }).click();
-	await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Open a model file' })).toBeVisible();
+});
+
+test('file-only import saves a view and optional provenance upgrades the open session in place', async ({ page }, testInfo) => {
+	test.setTimeout(90000);
+	const bytes = Buffer.from(makeTinyBomc12());
+	const artifactHash = createHash('sha256').update(bytes).digest('hex');
+	const makeProvenance = (profile = 'exact', sha256 = artifactHash) => ({
+		schema: 'sibambo-research-provenance-v1', engine: 'e4',
+		artifact: { sha256, bytes: bytes.length, format: 'bomc-1.2', profile },
+		producer: { label: 'Synthetic browser worker fixture', sourceTreeSha256: E4_PROVENANCE_POLICY_V1.producer.sourceTreeSha256![0] },
+		model: { id: 'file-only-upgrade-model' },
+		capture: { id: 'file-only-upgrade-capture', exportedAt: new Date().toISOString(), evidence: 'Generated structural test fixture; not an exporter capture.', method: 'operator-attested' }
+	});
+
+	await page.goto('/?renderer=webgl2');
+	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'file-only-upgrade.bomc', mimeType: 'application/octet-stream', buffer: bytes });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'file-only');
+	await expect(page.getByLabel('Evidence level')).toHaveText('File-only · source not recorded');
+	await expect(page.locator('dd').nth(4)).toHaveText('Unknown (not recorded)');
+	await expect(page.locator('dd').nth(6)).toHaveText('Not provided');
+
+	const viewDownload = page.waitForEvent('download');
+	await page.getByRole('button', { name: 'Save view' }).click();
+	const savedView = await viewDownload;
+	const savedPath = testInfo.outputPath('file-only-view.png');
+	await savedView.saveAs(savedPath);
+	expect(readFileSync(savedPath).subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+
+	await page.getByRole('button', { name: 'Top', exact: true }).click();
+	const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');
+	const box = await canvas.boundingBox();
+	expect(box).not.toBeNull();
+	await page.mouse.click(box!.x + box!.width * 0.46, box!.y + box!.height * 0.51);
+	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible({ timeout: 5000 });
+	const canvasHash = async () => createHash('sha256').update(await canvas.screenshot()).digest('hex');
+	const initialCanvasHash = await canvasHash();
+	const originalScene = await page.getByLabel('Visible scene').inputValue();
+	await page.evaluate(() => Object.defineProperty(window, '__editorOriginalCanvas', { configurable: true, value: document.querySelector<HTMLCanvasElement>('canvas[aria-label="Interactive 3D model viewport"]') }));
+
+	await page.getByRole('button', { name: 'Add provenance JSON to this model' }).click();
+	await page.getByLabel('Provenance JSON for current model').setInputFiles({ name: 'malformed.provenance.json', mimeType: 'application/json', buffer: Buffer.from('{') });
+	await expect(page.getByRole('alert')).toBeVisible();
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'file-only');
+	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible();
+	expect(await canvasHash()).toBe(initialCanvasHash);
+
+	await page.getByRole('button', { name: 'Add provenance JSON to this model' }).click();
+	await page.getByLabel('Provenance JSON for current model').setInputFiles({ name: 'wrong-hash.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(makeProvenance('exact', 'b'.repeat(64)))) });
+	await expect(page.getByRole('alert')).toContainText('Artifact SHA-256 mismatch');
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'file-only');
+	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible();
+	await expect(page.getByLabel('Visible scene')).toHaveValue(originalScene);
+	expect(await canvasHash()).toBe(initialCanvasHash);
+
+	await page.getByRole('button', { name: 'Add provenance JSON to this model' }).click();
+	await page.getByLabel('Provenance JSON for current model').setInputFiles({ name: 'wrong-profile.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(makeProvenance('visual'))) });
+	await expect(page.getByRole('alert')).toContainText('encoding profile');
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'file-only');
+	expect(await canvasHash()).toBe(initialCanvasHash);
+
+	await page.getByRole('button', { name: 'Add provenance JSON to this model' }).click();
+	await page.getByLabel('Provenance JSON for current model').setInputFiles({ name: 'matched.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(makeProvenance())) });
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'provenance-matched');
+	await expect(page.getByLabel('Evidence level')).toContainText('Provenance-matched · operator-attested source record');
+	await expect(page.getByLabel('Imported source status').getByText('file-only-upgrade-model', { exact: true })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible();
+	await expect(page.getByLabel('Visible scene')).toHaveValue(originalScene);
+	expect(await canvasHash()).toBe(initialCanvasHash);
+	await expect.poll(() => page.evaluate(() => {
+		const original = (window as EditorInitializationTestWindow).__editorOriginalCanvas;
+		return !!original && original.isConnected && document.querySelector('canvas[aria-label="Interactive 3D model viewport"]') === original;
+	})).toBe(true);
+});
+
+test('selecting a replacement model clears the previous staged sidecar and opens file-only', async ({ page }) => {
+	const originalBytes = Buffer.from(makeTinyBomc12());
+	const replacementBytes = Buffer.from(makeTinyBomc12({ faceSurfaceCode: 1, faceRoleCode: 1 }));
+	const makeProvenance = (bytes: Buffer) => ({
+		schema: 'sibambo-research-provenance-v1', engine: 'e4',
+		artifact: { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, format: 'bomc-1.2', profile: 'exact' },
+		producer: { label: 'Synthetic browser worker fixture', sourceTreeSha256: E4_PROVENANCE_POLICY_V1.producer.sourceTreeSha256![0] },
+		model: { id: 'editor-replacement-sidecar-model' },
+		capture: { id: 'editor-replacement-sidecar-capture', exportedAt: new Date().toISOString(), evidence: 'Generated structural test fixture; not an exporter capture.', method: 'operator-attested' }
+	});
+
+	await page.goto('/?renderer=webgl2');
+	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'editor-original.bomc', mimeType: 'application/octet-stream', buffer: originalBytes });
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(makeProvenance(originalBytes))) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'provenance-matched');
+	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+
+	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'editor-replacement.bomc', mimeType: 'application/octet-stream', buffer: replacementBytes });
+	await expect(page.getByLabel('Provenance JSON for next model')).toHaveValue('');
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+	await expect(page.getByLabel('Evidence level')).toHaveAttribute('data-evidence-level', 'file-only');
+	await expect(page.getByLabel('Evidence level')).toHaveText('File-only · source not recorded');
+	await expect(page.locator('dd').nth(1)).toHaveText('editor-replacement.bomc');
+	await expect(page.locator('dd').nth(4)).toHaveText('Unknown (not recorded)');
+	await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test('a rejected replacement sidecar preserves the loaded Editor model and selection', async ({ page }) => {
@@ -94,9 +197,9 @@ test('a rejected replacement sidecar preserves the loaded Editor model and selec
 
 	await page.goto('/?renderer=webgl2');
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'editor-original.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
-	await expect(page.getByText('editor-transaction-original', { exact: true })).toBeVisible({ timeout: 30000 });
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Imported source status').getByText('editor-transaction-original', { exact: true })).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	const sceneId = await page.getByLabel('Visible scene').inputValue();
 	const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');
@@ -108,10 +211,10 @@ test('a rejected replacement sidecar preserves the loaded Editor model and selec
 	await page.evaluate(() => Object.defineProperty(window, '__editorOriginalCanvas', { configurable: true, value: document.querySelector<HTMLCanvasElement>('canvas[aria-label="Interactive 3D model viewport"]') }));
 
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'rejected-replacement.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'oversized-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.alloc(4 * 1024 * 1024 + 1, 0x20) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'oversized-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.alloc(4 * 1024 * 1024 + 1, 0x20) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
 	await expect(page.getByRole('alert')).toContainText('4 MiB');
-	await expect(page.getByText('editor-transaction-original', { exact: true })).toBeVisible();
+	await expect(page.getByLabel('Imported source status').getByText('editor-transaction-original', { exact: true })).toBeVisible();
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible();
 	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible();
 	await expect(page.locator('dd').nth(0)).toHaveText(originalHash);
@@ -146,9 +249,9 @@ test('cancelling a replacement restores the original Editor after its delayed mo
 	});
 	await page.goto('/?renderer=webgl2');
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'editor-cancel-original.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'editor-cancel-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(original)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
-	await expect(page.getByText('editor-cancel-original', { exact: true })).toBeVisible({ timeout: 30000 });
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'editor-cancel-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(original)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Imported source status').getByText('editor-cancel-original', { exact: true })).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');
 	const box = await canvas.boundingBox();
@@ -169,12 +272,12 @@ test('cancelling a replacement restores the original Editor after its delayed mo
 	});
 	await page.evaluate(() => history.replaceState(history.state, '', '/?renderer=webgpu'));
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'editor-cancel-replacement.bomc', mimeType: 'application/octet-stream', buffer: replacementBytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'editor-cancel-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'editor-cancel-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
 	await expect.poll(() => page.evaluate(() => (window as EditorInitializationTestWindow).__editorReplacementProbe?.pending ?? false)).toBe(true);
 	await page.getByRole('button', { name: 'Cancel' }).click();
 	await expect(page.getByRole('alert')).toHaveText('Model load cancelled.');
-	await expect(page.getByText('editor-cancel-original', { exact: true })).toBeVisible();
+	await expect(page.getByLabel('Imported source status').getByText('editor-cancel-original', { exact: true })).toBeVisible();
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible();
 	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible();
 	await expect(page.locator('dd').nth(0)).toHaveText(originalHash);
@@ -186,7 +289,7 @@ test('cancelling a replacement restores the original Editor after its delayed mo
 		const original = (window as EditorInitializationTestWindow).__editorOriginalCanvas;
 		return !!original && original.isConnected && document.querySelectorAll('canvas[aria-label="Interactive 3D model viewport"]').length === 1 && document.querySelector('canvas[aria-label="Interactive 3D model viewport"]') === original;
 	})).toBe(true);
-	await expect(page.getByText('editor-cancel-replacement', { exact: true })).toHaveCount(0);
+	await expect(page.getByLabel('Imported source status').getByText('editor-cancel-replacement', { exact: true })).toHaveCount(0);
 });
 
 test('cancelling delayed WebGPU initialization clears the source and allows a later load', async ({ page }) => {
@@ -202,7 +305,7 @@ test('cancelling delayed WebGPU initialization clears the source and allows a la
 	const setModel = async (modelId: string, captureId: string, fileName: string, artifactBytes = bytes) => {
 		const provenance = makeProvenance(modelId, captureId, artifactBytes);
 		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: `${fileName}.bomc`, mimeType: 'application/octet-stream', buffer: artifactBytes });
-		await page.getByLabel('Provenance sidecar').setInputFiles({ name: `${fileName}.provenance.json`, mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
+		await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: `${fileName}.provenance.json`, mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
 	};
 
 	await page.addInitScript(() => {
@@ -220,7 +323,7 @@ test('cancelling delayed WebGPU initialization clears the source and allows a la
 	});
 	await page.goto('/?renderer=webgpu');
 	await setModel('cancelled-route-model', 'editor-delayed-webgpu-cancel', 'cancelled-route-model');
-	await page.getByRole('button', { name: 'Open verified model' }).click();
+	await page.getByRole('button', { name: 'Open model file' }).click();
 	await expect(page.getByLabel('Imported source status')).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Preparing viewport')).toBeVisible();
 	await expect.poll(() => page.evaluate(() => (window as EditorInitializationTestWindow).__editorWebGpuProbe?.pending ?? false)).toBe(true);
@@ -240,10 +343,10 @@ test('cancelling delayed WebGPU initialization clears the source and allows a la
 
 	try {
 		await page.getByRole('button', { name: 'Cancel' }).click();
-		await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: 'Open a model file' })).toBeVisible();
 		await expect(page.getByLabel('Imported source status')).toHaveCount(0);
 		await expect(page.getByLabel('Source and selection information')).toHaveCount(0);
-		await expect(page.getByText('cancelled-route-model', { exact: true })).toHaveCount(0);
+		await expect(page.getByLabel('Imported source status').getByText('cancelled-route-model', { exact: true })).toHaveCount(0);
 		await expect(page.locator('canvas[aria-label="Interactive 3D model viewport"]')).toHaveCount(0);
 		await expect(page.getByRole('alert')).toHaveText('Model load cancelled.');
 		await expect.poll(() => page.evaluate(() => (window as EditorInitializationTestWindow).__editorViewportProbe?.host.isConnected ?? true)).toBe(false);
@@ -252,11 +355,11 @@ test('cancelling delayed WebGPU initialization clears the source and allows a la
 	await page.evaluate(() => history.replaceState(history.state, '', '/?renderer=webgl2'));
 	await expect.poll(() => page.evaluate(() => performance.timeOrigin)).toBe(pageTimeOrigin);
 	await setModel('after-cancel-model', 'editor-load-after-webgpu-cancel', 'after-cancel-source', retryBytes);
-	await page.getByRole('button', { name: 'Open verified model' }).click();
-	await expect(page.getByText('after-cancel-model', { exact: true })).toBeVisible({ timeout: 30000 });
+	await page.getByRole('button', { name: 'Open model file' }).click();
+	await expect(page.getByLabel('Imported source status').getByText('after-cancel-model', { exact: true })).toBeVisible({ timeout: 30000 });
 	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	await expect(page.getByRole('alert')).toHaveCount(0);
-	await expect(page.getByText('cancelled-route-model', { exact: true })).toHaveCount(0);
+	await expect(page.getByLabel('Imported source status').getByText('cancelled-route-model', { exact: true })).toHaveCount(0);
 	await expect(page.locator('dd').nth(0)).toHaveText(createHash('sha256').update(retryBytes).digest('hex'));
 	await expect(page.locator('dd').nth(1)).toHaveText('after-cancel-source.bomc');
 	await expect(page.locator('canvas[aria-label="Interactive 3D model viewport"]')).toHaveCount(1);
@@ -306,15 +409,15 @@ test('cancelling as imported source state first appears clears it before viewpor
 	});
 	await page.goto('/?renderer=webgpu');
 	await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'pre-mount-cancel.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-	await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'pre-mount-cancel.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
-	await page.getByRole('button', { name: 'Open verified model' }).click();
+	await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'pre-mount-cancel.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(provenance)) });
+	await page.getByRole('button', { name: 'Open model file' }).click();
 
 	await expect.poll(() => page.evaluate(() => (window as EditorInitializationTestWindow).__editorPreMountProbe?.cancelRequested ?? false)).toBe(true);
 	await expect(page.getByRole('alert')).toHaveText('Model load cancelled.');
 	await expect(page.getByLabel('Imported source status')).toHaveCount(0);
 	await expect(page.getByLabel('Source and selection information')).toHaveCount(0);
-	await expect(page.getByText('pre-mount-cancel-model', { exact: true })).toHaveCount(0);
+	await expect(page.getByLabel('Imported source status').getByText('pre-mount-cancel-model', { exact: true })).toHaveCount(0);
 	await expect(page.locator('canvas[aria-label="Interactive 3D model viewport"]')).toHaveCount(0);
 	await expect.poll(() => page.evaluate(() => (window as EditorInitializationTestWindow).__editorPreMountProbe?.adapterRequestsAtCancel ?? -1)).toBe(0);
-	await expect(page.getByRole('button', { name: 'Open verified model' })).toBeEnabled();
+	await expect(page.getByRole('button', { name: 'Open model file' })).toBeEnabled();
 });

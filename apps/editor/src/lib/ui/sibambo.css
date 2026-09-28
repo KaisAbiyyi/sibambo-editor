@@ -79,6 +79,8 @@ main[data-app="editor"] { min-height: 100dvh; display: flex; flex-direction: col
 .load-progress { color: var(--color-text-secondary); font-size: 11px; }
 .source-bar { display: flex; min-height: 38px; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 7px 14px; border-bottom: 1px solid var(--color-border); background: var(--color-surface-muted); color: var(--color-text-secondary); font-size: 11px; }
 .source-bar strong { color: var(--color-text); }
+.evidence-level { padding: 4px 8px; border: 1px solid var(--color-primary-border); border-radius: 999px; background: var(--color-primary-soft); color: var(--color-primary-strong); font-size: 10px; font-weight: 700; }
+.evidence-level[data-evidence-level="file-only"] { border-color: color-mix(in srgb, var(--color-warning) 34%, var(--color-border)); background: color-mix(in srgb, var(--color-warning) 9%, var(--color-surface)); color: var(--color-warning); }
 .ready { color: var(--color-success); }
 .workspace { display: grid; min-height: calc(100dvh - 146px); flex: 1; grid-template-columns: minmax(0, 1fr) 340px; background: var(--color-canvas); }
 .viewport-frame { position: relative; min-width: 0; min-height: 490px; }
@@ -95,6 +97,10 @@ main[data-app="editor"] { min-height: 100dvh; display: flex; flex-direction: col
 .workspace dl, .pick dl { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(0, 1.2fr); gap: 8px 12px; margin: 18px 0; font-size: 11px; }
 .workspace dt { color: var(--color-text-muted); }
 .workspace dd { min-width: 0; margin: 0; color: var(--color-text); overflow-wrap: anywhere; }
+.source-evidence-actions { display: grid; gap: 8px; margin: 14px 0 18px; }
+.source-evidence-actions button, .optional-provenance-content button { min-height: 40px; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-surface); color: var(--color-text-secondary); font-size: 11px; font-weight: 650; text-align: left; cursor: pointer; }
+.source-evidence-actions button:hover:not(:disabled), .optional-provenance-content button:hover:not(:disabled) { border-color: var(--color-primary-border); color: var(--color-primary-strong); }
+.source-evidence-actions span, .optional-provenance-content span { color: var(--color-text-muted); font-size: 10px; overflow-wrap: anywhere; }
 .pick { margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--color-border); }
 .pick h2 { font-size: 13px; }
 .empty-workspace { display: grid; min-height: calc(100dvh - 110px); flex: 1; grid-template-columns: minmax(0, 1fr) 340px; background: var(--color-canvas); }
@@ -107,6 +113,9 @@ main[data-app="editor"] { min-height: 100dvh; display: flex; flex-direction: col
 .file-pickers { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; margin: 18px 0; text-align: left; }
 .file-pickers button { min-height: 32px; padding: 6px 9px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-surface); color: var(--color-text-secondary); font-size: 10px; font-weight: 650; white-space: nowrap; cursor: pointer; }
 .file-pickers span { min-width: 0; color: var(--color-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.optional-provenance { margin: 0 0 16px; text-align: left; }
+.optional-provenance > summary { padding: 7px 0; color: var(--color-primary-strong); font-size: 11px; font-weight: 700; cursor: pointer; }
+.optional-provenance-content { display: grid; gap: 7px; }
 .guide { display: flex; flex-direction: column; justify-content: center; padding: 24px; border-left: 1px solid var(--color-border); background: var(--color-surface); }
 .guide .eyebrow, .empty .eyebrow { margin: 0 0 8px; color: var(--color-primary); font-size: 9px; font-weight: 750; letter-spacing: .13em; }
 .guide h2 { margin: 0 0 8px; color: var(--color-text); font-size: 18px; letter-spacing: -.02em; }
@@ -158,6 +167,7 @@ main[data-app="editor"] { min-height: 100dvh; display: flex; flex-direction: col
 	.file-pickers { grid-template-columns: minmax(0, 1fr); }
 	.file-pickers button { width: 100%; }
 	.file-pickers span { min-height: 14px; }
+	.optional-provenance > summary { display: flex; min-height: 44px; align-items: center; }
 	.source-bar { align-items: flex-start; flex-direction: column; }
 }
 @media(prefers-reduced-motion: reduce) {

@@ -3,14 +3,15 @@
 
 Editor is the E4-only viewport application in this self-contained Bun workspace. The workspace includes the five shared packages Editor depends on. Use the repository root for dependency installation and commands.
 
-## Open a verified model
+## Open a model file
 
-1. Select a BOMC 1.2 artifact and its matching JSON provenance sidecar.
-2. Choose **Open verified model**. Admission checks the E4 provenance policy, the sidecar’s declared byte count and SHA-256, and the BOMC 1.2 signature and version header.
-3. Wait for the import worker and viewport to finish. The status changes after the first frame is observed and requested textures settle.
-4. Choose a named scene, adjust the camera and display, inspect source geometry, or use **Save view** to download a PNG.
+1. Select one BOMC 1.2 file and choose **Open model file**.
+2. Editor checks the file size, BOMC marker, and version header, computes its SHA-256, and imports it through the bounded E4 worker.
+3. Without a sidecar the source is labelled **File-only · source not recorded**. You may choose a provenance JSON before opening or add one to the current model from source details.
+4. Editor labels a successfully matched record **Provenance-matched · operator-attested source record** after checking the E4 policy, declared byte count, SHA-256, and parsed encoding profile.
+5. Wait for the import worker and viewport to finish. The status changes after the first frame is observed and requested textures settle. Choose a named scene, adjust the camera and display, inspect source geometry, or use **Save view** to download a PNG.
 
-The sidecar is operator-attested metadata, not a cryptographic producer signature. A matching hash confirms that the selected bytes match the sidecar’s digest; it does not prove producer authorship or certify the model.
+The sidecar is optional operator-attested metadata, not a cryptographic producer signature. A matching hash confirms that the selected bytes match the sidecar’s digest; it does not prove producer authorship or certify the model. A malformed or mismatched sidecar leaves the current file, viewport, camera, and selection in place.
 
 ## Viewport controls
 
@@ -39,7 +40,7 @@ The source model is displayed read-only. The [Editor session](src/lib/editor/Edi
 
 ## Security and evidence limits
 
-The app rejects mismatched sidecars and unsupported BOMC versions, and admission caps the selected artifact at 256 MiB. The E4 importer also applies bounded section, count, geometry, and work checks; sidecar JSON is read through a byte-bounded helper before parsing. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not guarantee safe processing of every malformed file.
+The app rejects unsupported BOMC versions and caps the selected artifact at 256 MiB whether or not a sidecar is provided. When provided, sidecar JSON is read through a byte-bounded helper and checked for policy, byte count, hash, and parsed profile matches. The E4 importer also applies bounded section, count, geometry, and work checks. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not guarantee safe processing of every malformed file.
 
 The sidecar hash is not a security signature and does not prove producer authenticity. Resource limits do not authenticate files or certify E4 behavior.
 

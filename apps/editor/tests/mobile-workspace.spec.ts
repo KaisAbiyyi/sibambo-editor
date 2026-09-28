@@ -33,13 +33,13 @@ test('mobile file pickers are disabled while the first model is importing', asyn
 	try {
 		await page.goto('/?renderer=webgl2');
 		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-importing.bomc', mimeType: 'application/octet-stream', buffer: bytes });
-		await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'mobile-editor-importing.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) });
-		await page.getByRole('button', { name: 'Open verified model' }).click();
+		await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'mobile-editor-importing.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) });
+		await page.getByRole('button', { name: 'Open model file' }).click();
 		await workerRequested;
-		await expect(page.getByRole('button', { name: 'Choose BOMC 1.2 file' })).toBeDisabled();
-		await expect(page.getByRole('button', { name: 'Choose provenance sidecar' })).toBeDisabled();
+		await expect(page.getByRole('button', { name: 'Choose model file' })).toBeDisabled();
+		await expect(page.getByLabel('Provenance JSON for next model')).toBeDisabled();
 		releaseWorker();
-		await expect(page.getByText('mobile-editor-importing', { exact: true })).toBeVisible({ timeout: 30000 });
+		await expect(page.getByLabel('Imported source status').getByText('mobile-editor-importing', { exact: true })).toBeVisible({ timeout: 30000 });
 		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 	} finally {
 		releaseWorker();
@@ -86,12 +86,12 @@ test('mobile Editor keeps inspection actions, touch gestures, source replacement
 			});
 		});
 		await page.goto('/?renderer=webgl2');
-		await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
-		await expect(page.getByRole('button', { name: 'Open verified model' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: 'Open a model file' })).toBeVisible();
+		await expect(page.getByRole('button', { name: 'Open model file' })).toBeVisible();
 		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-original.bomc', mimeType: 'application/octet-stream', buffer: originalBytes });
-		await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'mobile-editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(original)) });
-		await page.getByRole('button', { name: 'Open verified model' }).click();
-		await expect(page.getByText('mobile-editor-original', { exact: true })).toBeVisible({ timeout: 30000 });
+		await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'mobile-editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(original)) });
+		await page.getByRole('button', { name: 'Open model file' }).click();
+		await expect(page.getByLabel('Imported source status').getByText('mobile-editor-original', { exact: true })).toBeVisible({ timeout: 30000 });
 		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 		await expect(page.getByTestId('touch-hint')).toBeVisible();
 
@@ -185,8 +185,8 @@ test('mobile Editor keeps inspection actions, touch gestures, source replacement
 		}
 		await source.getByRole('button', { name: 'Change artifact' }).click();
 		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-replacement.bomc', mimeType: 'application/octet-stream', buffer: replacementBytes });
-		await source.getByRole('button', { name: 'Change sidecar' }).click();
-		await page.locator('input[type="file"][accept*="application/json"]').setInputFiles({ name: 'mobile-editor-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
+		await source.getByRole('button', { name: 'Choose sidecar for next model (optional)' }).click();
+		await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'mobile-editor-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
 
 		await page.evaluate(() => {
 			const probe = (window as Window & { __mobileEditorAdapterProbe?: { hold: boolean } }).__mobileEditorAdapterProbe;
@@ -194,12 +194,12 @@ test('mobile Editor keeps inspection actions, touch gestures, source replacement
 			probe.hold = true;
 			history.replaceState(history.state, '', '/?renderer=webgpu');
 		});
-		await source.getByRole('button', { name: 'Open verified model' }).click();
+		await source.getByRole('button', { name: 'Open model file' }).click();
 		await expect.poll(() => page.evaluate(() => (window as Window & { __mobileEditorAdapterProbe?: { pending: boolean } }).__mobileEditorAdapterProbe?.pending ?? false)).toBe(true);
 		await expect(mobileControls.getByRole('button', { name: 'Cancel' })).toBeVisible();
 		await mobileControls.getByRole('button', { name: 'Cancel' }).click();
 		await expect(page.getByRole('alert')).toHaveText('Model load cancelled.');
-		await expect(page.getByText('mobile-editor-original', { exact: true })).toBeVisible();
+		await expect(page.getByLabel('Imported source status').getByText('mobile-editor-original', { exact: true })).toBeVisible();
 		await expect(canvas).toHaveCount(1);
 		await page.evaluate(() => (window as Window & { __mobileEditorAdapterProbe?: { release?: () => void } }).__mobileEditorAdapterProbe?.release?.());
 		await expect.poll(() => canvas.evaluate((element) => (element as HTMLCanvasElement).isConnected)).toBe(true);
@@ -210,8 +210,8 @@ test('mobile Editor keeps inspection actions, touch gestures, source replacement
 			probe.hold = false;
 			history.replaceState(history.state, '', '/?renderer=webgl2');
 		});
-		await source.getByRole('button', { name: 'Open verified model' }).click();
-		await expect(page.getByText('mobile-editor-replacement', { exact: true })).toBeVisible({ timeout: 30000 });
+		await source.getByRole('button', { name: 'Open model file' }).click();
+		await expect(page.getByLabel('Imported source status').getByText('mobile-editor-replacement', { exact: true })).toBeVisible({ timeout: 30000 });
 		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
 		const save = mobileControls.locator('details').filter({ has: page.getByText('Save', { exact: true }) });
 		await save.locator('summary').click();
@@ -227,7 +227,7 @@ test('mobile Editor keeps inspection actions, touch gestures, source replacement
 		expect({ width: pngWidth, height: pngHeight }).toEqual(captureSize);
 
 		await source.getByRole('button', { name: 'Unload' }).click();
-		await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: 'Open a model file' })).toBeVisible();
 		await expect(canvas).toHaveCount(0);
 	} finally {
 		await context.close();

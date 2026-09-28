@@ -3,8 +3,8 @@
 	import SibamboHeader from '$lib/components/SibamboHeader.svelte';
 	import '$lib/ui/sibambo.css';
 	import type { AdaptedBomcResult } from '@sibambo/e4-import';
-import { EditorSession } from '$lib/editor/EditorSession';
-import { loadE4InWorker } from '$lib/e4-worker-client';
+	import { EditorSession } from '$lib/editor/EditorSession';
+	import { loadE4InWorker } from '$lib/e4-worker-client';
 	import type { PreparedSceneViewport, ViewMode, ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
@@ -20,14 +20,17 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 	let viewportHost = $state<HTMLDivElement | null>(null);
 	let sourceInput: HTMLInputElement;
 	let provenanceInput: HTMLInputElement;
+	let provenanceUpgradeInput: HTMLInputElement;
 	let busy = $state(false);
-	let loadStatus = $state('Choose a BOMC 1.2 file and its provenance sidecar.');
+	let loadStatus = $state('Choose a BOMC 1.2 model file.');
 	let ready = $state(false);
 	let error = $state('');
+	let activeOperation: 'import' | 'provenance' = 'import';
 	let picked = $state<ViewportPick | null>(null);
 	let viewMode = $state<ViewMode>('solid');
 	let sceneId = $state('');
 	let generation = 0;
+	let evidenceGeneration = 0;
 	let controller: AbortController | null = null;
 	let lastCancelledSnapshot: LoadedEditorState | null = null;
 	let lastCancelGeneration = -1;
@@ -74,20 +77,37 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 
 	function stageSource(event: Event) {
 		sourceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
+		// A staged source record belongs to the previously selected artifact.
+		// Clear it when the artifact changes so replacement can fall back to file-only.
+		provenanceFile = null;
+		if (provenanceInput) provenanceInput.value = '';
 		error = '';
 	}
 	function stageProvenance(event: Event) {
 		provenanceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
 		error = '';
 	}
+	function stageUpgradeProvenance(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const sidecar = input.files?.[0] ?? null;
+		input.value = '';
+		error = '';
+		if (sidecar) void attachProvenance(sidecar);
+	}
+	function clearStagedProvenance() {
+		provenanceFile = null;
+		if (provenanceInput) provenanceInput.value = '';
+		error = '';
+	}
 
 	async function openModel() {
-		if (!sourceFile || !provenanceFile || busy) return;
+		if (!sourceFile || busy) return;
 		const file = sourceFile;
 		const sidecar = provenanceFile;
 		const previous = snapshotLoadedState();
 		activeLoadSnapshot = previous;
 		const request = ++generation;
+		evidenceGeneration += 1;
 		lastCancelledSnapshot = null;
 		lastCancelGeneration = -1;
 		controller?.abort();
@@ -95,22 +115,23 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 		let candidateSession: EditorSession | null = null;
 		let candidateViewport: PreparedSceneViewport | null = null;
 		busy = true;
-		loadStatus = 'Checking provenance and artifact hash…';
+		activeOperation = 'import';
+		loadStatus = sidecar ? 'Checking BOMC and provenance…' : 'Checking BOMC format and artifact hash…';
 		error = '';
 		try {
-			const parsedSidecar = JSON.parse(await readBoundedJsonText(sidecar, 'Provenance sidecar')) as unknown;
+			const parsedSidecar = sidecar ? JSON.parse(await readBoundedJsonText(sidecar, 'Provenance sidecar')) as unknown : undefined;
 			const admitted = await admitE4File(file, parsedSidecar);
 			if (request !== generation) return;
 			loadStatus = 'Starting E4 import worker…';
 			const loaded = await loadE4InWorker(admitted.buffer, file.name, controller.signal, (progress) => {
 				if (request === generation) loadStatus = progress.message;
 			});
-			if (loaded.encodingContract?.profile !== admitted.provenance.artifact.profile) {
+			if (admitted.provenance && loaded.encodingContract?.profile !== admitted.provenance.artifact.profile) {
 				throw new Error('BOMC encoding profile does not match the admitted provenance profile.');
 			}
 			if (request !== generation) return;
 			const nextSceneId = loaded.activeSceneId ?? loaded.scenes[0]?.id ?? '';
-			const nextSession = new EditorSession(file, admitted.provenance, admitted.artifactSha256);
+			const nextSession = new EditorSession(file, admitted.provenance, admitted.artifactSha256, loaded.encodingContract?.profile ?? null);
 			candidateSession = nextSession;
 			if (!previous.result) {
 				provenance = admitted.provenance;
@@ -172,6 +193,36 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 		}
 	}
 
+	async function attachProvenance(sidecar: File) {
+		const activeSession = session;
+		const activeResult = result;
+		if (!activeSession || !activeResult || provenance || busy) return;
+		const parsedProfile = activeResult.encodingContract?.profile ?? null;
+		const request = ++evidenceGeneration;
+		busy = true;
+		activeOperation = 'provenance';
+		loadStatus = 'Checking provenance against the open model…';
+		error = '';
+		try {
+			const parsedSidecar = JSON.parse(await readBoundedJsonText(sidecar, 'Provenance sidecar')) as unknown;
+			const admitted = await admitE4File(activeSession.source.file, parsedSidecar);
+			if (!admitted.provenance) throw new Error('Provenance JSON is required to match a source record.');
+			if (!parsedProfile || parsedProfile !== admitted.provenance.artifact.profile) {
+				throw new Error('BOMC encoding profile does not match the admitted provenance profile.');
+			}
+			if (request !== evidenceGeneration || session !== activeSession) return;
+			activeSession.attachProvenance(admitted.provenance);
+			provenance = admitted.provenance;
+			loadStatus = 'Provenance matched to the open BOMC file.';
+		} catch (cause) {
+			if (request === evidenceGeneration && session === activeSession) {
+				error = cause instanceof Error ? cause.message : 'The provenance record could not be matched.';
+			}
+		} finally {
+			if (request === evidenceGeneration) busy = false;
+		}
+	}
+
 	function setMode(mode: ViewMode) { viewMode = mode; viewport?.setViewMode(mode); }
 	function sceneChanged(event: Event) {
 		sceneId = (event.currentTarget as HTMLSelectElement).value;
@@ -186,7 +237,9 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 		link.click();
 	}
 	function cancelLoad() {
+		const cancelledOperation = activeOperation;
 		generation += 1;
+		evidenceGeneration += 1;
 		controller?.abort();
 		controller = null;
 		lastCancelledSnapshot = activeLoadSnapshot;
@@ -194,11 +247,12 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 		if (activeLoadSnapshot) restoreLoadedState(activeLoadSnapshot);
 		activeLoadSnapshot = null;
 		busy = false;
-		loadStatus = 'Model load cancelled.';
-		error = 'Model load cancelled.';
+		loadStatus = cancelledOperation === 'provenance' ? 'Provenance check cancelled.' : 'Model load cancelled.';
+		error = loadStatus;
 	}
 	function unload() {
 		generation += 1;
+		evidenceGeneration += 1;
 		controller?.abort();
 		controller = null;
 		activeLoadSnapshot = null;
@@ -215,32 +269,34 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 		busy = false;
 		if (sourceInput) sourceInput.value = '';
 		if (provenanceInput) provenanceInput.value = '';
+		if (provenanceUpgradeInput) provenanceUpgradeInput.value = '';
 		sourceFile = null;
 		provenanceFile = null;
-		loadStatus = 'Choose a BOMC 1.2 file and its provenance sidecar.';
+		loadStatus = 'Choose a BOMC 1.2 model file.';
 	}
-	onDestroy(() => { generation += 1; controller?.abort(); viewport?.dispose(); session?.dispose(); });
+	onDestroy(() => { generation += 1; evidenceGeneration += 1; controller?.abort(); viewport?.dispose(); session?.dispose(); });
 </script>
 
 <svelte:head>
 	<title>Sibambo Editor</title>
-	<meta name="description" content="Open a verified BOMC 1.2 model and inspect it with basic camera and navigation controls." />
+	<meta name="description" content="Open a local BOMC 1.2 file and inspect it with basic camera and navigation controls. Provenance matching is optional." />
 </svelte:head>
 
 <main data-app="editor">
 	<SibamboHeader current="editor" />
 	<div class="visually-hidden">
 		<label>BOMC 1.2 file<input bind:this={sourceInput} type="file" accept=".bomc,application/octet-stream" onchange={stageSource} disabled={busy} tabindex="-1" /></label>
-		<label>Provenance sidecar<input bind:this={provenanceInput} type="file" accept=".json,application/json" onchange={stageProvenance} disabled={busy} tabindex="-1" /></label>
+		<label>Provenance JSON for next model<input bind:this={provenanceInput} type="file" accept=".json,application/json" onchange={stageProvenance} disabled={busy} tabindex="-1" /></label>
+		<label>Provenance JSON for current model<input bind:this={provenanceUpgradeInput} type="file" accept=".json,application/json" onchange={stageUpgradeProvenance} disabled={busy || !session || !!provenance} tabindex="-1" /></label>
 	</div>
 	{#if result || busy}
 		<section class="toolbar" aria-label="Model and camera controls">
 			{#if busy}<button type="button" class="secondary" onclick={cancelLoad}>Cancel</button><output class="load-progress">{loadStatus}</output>{/if}
 			{#if result}
-			<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile || !provenanceFile}>{busy ? 'Verifying…' : 'Open verified model'}</button>
+			<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 			<span class="divider"></span>
 			<button type="button" class="secondary" onclick={() => sourceInput?.click()}>Change artifact</button>
-			<button type="button" class="secondary" onclick={() => provenanceInput?.click()}>Change sidecar</button>
+			<button type="button" class="secondary" onclick={() => provenanceInput?.click()}>Choose sidecar for next model</button>
 			<button type="button" onclick={() => { viewport?.fit(); }}>Fit</button>
 			<button type="button" onclick={() => viewport?.view('top')}>Top</button>
 			<button type="button" onclick={() => viewport?.view('front')}>Front</button>
@@ -280,9 +336,10 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 						<div class="mobile-control-panel">
 							<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact</button>
 							<output aria-label="Replacement artifact filename">{sourceFile?.name ?? 'No replacement artifact selected'}</output>
-							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Change sidecar</button>
-							<output aria-label="Replacement sidecar filename">{provenanceFile?.name ?? 'No replacement sidecar selected'}</output>
-							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile || !provenanceFile}>{busy ? 'Verifying…' : 'Open verified model'}</button>
+							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose sidecar for next model (optional)</button>
+							<output aria-label="Replacement sidecar filename">{provenanceFile?.name ?? 'No sidecar selected for next model'}</output>
+							{#if provenanceFile}<button type="button" class="secondary" onclick={clearStagedProvenance} disabled={busy}>Remove sidecar for next model</button>{/if}
+							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 							<button type="button" class="secondary" onclick={unload} disabled={busy}>Unload</button>
 						</div>
 					</details>
@@ -299,7 +356,8 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 	{#if result}
 		<section class="source-bar" aria-label="Imported source status">
-			<strong>{provenance?.model.id ?? result.modelName ?? sourceFile?.name}</strong>
+			<strong>{provenance?.model.id ?? result.modelName ?? session?.source.file.name}</strong>
+			<span class="evidence-level" aria-label="Evidence level" data-evidence-level={session?.source.evidenceLevel ?? 'file-only'}>{provenance ? 'Provenance-matched · operator-attested source record' : 'File-only · source not recorded'}</span>
 			<span>{result.encodingContract?.profile?.toUpperCase()} · BOMC {result.diagnostics.version}</span>
 			<span>{result.counts.faces.toLocaleString()} faces · {result.counts.instances.toLocaleString()} instances · {result.counts.meshes.toLocaleString()} meshes</span>
 			<span class:ready>{ready ? 'Textures settled and first frame observed' : 'Preparing viewport'}</span>
@@ -312,7 +370,12 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 					<div class="inspection-content">
 						<h1>Model inspection</h1>
 						<p>This imported source is read-only. Editor-owned edits use a separate store and keep this source reference unchanged.</p>
-						<dl><dt>Artifact SHA-256</dt><dd>{session?.source.artifactSha256 ?? artifactSha256}</dd><dt>Source</dt><dd>{session?.source.file.name ?? sourceFile?.name}</dd><dt>Source bytes</dt><dd>{session?.source.file.size.toLocaleString() ?? sourceFile?.size.toLocaleString()}</dd><dt>Profile</dt><dd>{session?.source.profile ?? result.encodingContract?.profile ?? 'Unavailable'}</dd><dt>Provenance</dt><dd>{session?.source.provenance.capture.method ?? provenance?.capture.method ?? 'Unavailable'}</dd></dl>
+						<dl><dt>Artifact SHA-256</dt><dd>{session?.source.artifactSha256 ?? artifactSha256}</dd><dt>Source</dt><dd>{session?.source.file.name ?? 'Unavailable'}</dd><dt>Evidence level</dt><dd>{session?.source.evidenceLevel ?? 'file-only'}</dd><dt>Source bytes</dt><dd>{session?.source.file.size.toLocaleString() ?? 'Unavailable'}</dd><dt>Model ID</dt><dd>{session?.source.modelId ?? 'Unknown (not recorded)'}</dd><dt>Profile</dt><dd>{session?.source.profile ?? result.encodingContract?.profile ?? 'Unknown'}</dd><dt>Provenance method</dt><dd>{session?.source.provenance?.capture.method ?? 'Not provided'}</dd></dl>
+						<div class="source-evidence-actions">
+							{#if !provenance}<button type="button" class="secondary" onclick={() => provenanceUpgradeInput?.click()} disabled={busy}>Add provenance JSON to this model</button>{/if}
+							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose sidecar for next model (optional)</button>
+							{#if provenanceFile}<span>Next model sidecar: {provenanceFile.name}</span><button type="button" class="secondary" onclick={clearStagedProvenance} disabled={busy}>Remove sidecar for next model</button>{/if}
+						</div>
 						{#if picked}<section class="pick"><h2>Picked geometry</h2><dl><dt>Source mesh</dt><dd>{picked.sourceMeshIndex}</dd><dt>Definition</dt><dd>{picked.definitionIndex}</dd><dt>Occurrence</dt><dd>{picked.occurrenceHandle ?? picked.occurrenceIndex ?? 'Unavailable'}</dd><dt>Source face</dt><dd>{picked.sourceFaceIndex ?? 'Unavailable'}</dd></dl></section>{/if}
 					</div>
 				</details>
@@ -324,20 +387,27 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 				<div class="empty-dropzone">
 					<span class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-9 5-9-5V8l9-5 9 5v8Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg></span>
 					<p class="eyebrow">MODEL INSPECTION</p>
-					<h1 id="empty-editor-title">Open a verified model</h1>
-					<p>Choose a BOMC 1.2 artifact and its hash-bound provenance sidecar to inspect the model in 3D.</p>
+					<h1 id="empty-editor-title">Open a model file</h1>
+					<p>Choose one BOMC 1.2 file to inspect it in 3D. A matching provenance JSON is optional.</p>
 					<div class="file-pickers">
-						<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Choose BOMC 1.2 file</button><span>{sourceFile?.name ?? 'No artifact selected'}</span>
-						<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose provenance sidecar</button><span>{provenanceFile?.name ?? 'No sidecar selected'}</span>
+						<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Choose model file</button><span>{sourceFile?.name ?? 'No model file selected'}</span>
 					</div>
-					<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile || !provenanceFile}>{busy ? 'Verifying…' : 'Open verified model'}</button>
-					<p class="validation-note">Older BOMC versions, unsigned engine claims, and unverified files are rejected.</p>
+					<details class="optional-provenance">
+						<summary>Source record (optional)</summary>
+						<div class="optional-provenance-content">
+							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose provenance JSON (optional)</button>
+							<span>{provenanceFile?.name ?? 'No provenance JSON selected'}</span>
+							{#if provenanceFile}<button type="button" class="secondary" onclick={clearStagedProvenance} disabled={busy}>Remove optional sidecar</button>{/if}
+						</div>
+					</details>
+					<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
+					<p class="validation-note">Editor checks the BOMC 1.2 format and resource limits before loading. A matching source record is shown separately.</p>
 				</div>
 			</section>
 			<aside class="guide" aria-label="Editor workflow">
 				<p class="eyebrow">EDITOR WORKSPACE</p><h2>Inspect the model</h2>
-				<p>Use the viewport to review the verified source and its geometry.</p>
-				<ol class="workflow-steps"><li><strong>Choose both files</strong><span>The artifact must have its matching provenance sidecar.</span></li><li><strong>Verify and open</strong><span>Hash and producer policy are checked before loading the model.</span></li><li><strong>Explore the view</strong><span>Change camera, scene, display mode, and inspect source geometry.</span></li></ol>
+				<p>Use the viewport to inspect the checked file and its available source evidence.</p>
+				<ol class="workflow-steps"><li><strong>Choose one BOMC file</strong><span>A matching provenance JSON is optional.</span></li><li><strong>Open the model</strong><span>The file format and resource limits are checked before loading.</span></li><li><strong>Explore the view</strong><span>Change camera, scene, display mode, and inspect source geometry.</span></li></ol>
 				<p class="note">The imported source stays read-only. Editor does not load Rooms or Benchmark sessions.</p>
 			</aside>
 		</div>
