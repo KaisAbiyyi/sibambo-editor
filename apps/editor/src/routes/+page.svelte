@@ -3,9 +3,9 @@
 	import SibamboHeader from '$lib/components/SibamboHeader.svelte';
 	import '$lib/ui/sibambo.css';
 	import type { AdaptedBomcResult } from '@sibambo/e4-import';
-	import { EditorSession } from '$lib/editor/EditorSession';
-	import { loadE4InWorker } from '$lib/e4-worker-client';
-	import { PreparedSceneViewport, type ViewMode, type ViewportPick } from '@sibambo/viewport';
+import { EditorSession } from '$lib/editor/EditorSession';
+import { loadE4InWorker } from '$lib/e4-worker-client';
+	import type { PreparedSceneViewport, ViewMode, ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
@@ -124,6 +124,8 @@
 			await tick();
 			if (request !== generation) { nextSession.dispose(); return; }
 			if (!viewportHost) throw new Error('The Editor viewport host is unavailable.');
+			const { PreparedSceneViewport } = await import('@sibambo/viewport');
+			if (request !== generation) { nextSession.dispose(); return; }
 			const nextViewport = await PreparedSceneViewport.mount(viewportHost, {
 				scene: loaded.preparedRuntimeScene,
 				appearance: loaded.appearance,
@@ -250,6 +252,50 @@
 		{/if}
 		</section>
 	{/if}
+	{#if result || busy}
+		<section class="mobile-toolbar" aria-label="Mobile model controls">
+			{#if busy}<div class="mobile-progress"><output class="load-progress">{loadStatus}</output><button type="button" class="secondary" onclick={cancelLoad}>Cancel</button></div>{/if}
+			{#if result}
+				<div class="mobile-primary-actions">
+					<button type="button" class="secondary" onclick={() => viewport?.fit()}>Fit</button>
+					<details class="mobile-control-group">
+						<summary>Views</summary>
+						<div class="mobile-control-panel" aria-label="Standard camera views">
+							<button type="button" onclick={() => viewport?.view('top')}>Top</button>
+							<button type="button" onclick={() => viewport?.view('front')}>Front</button>
+							<button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
+						</div>
+					</details>
+					<details class="mobile-control-group">
+						<summary>Display / scene</summary>
+						<div class="mobile-control-panel">
+							<label>Display<select aria-label="Display mode" value={viewMode} onchange={(event) => setMode((event.currentTarget as HTMLSelectElement).value as ViewMode)}><option value="solid">Solid</option><option value="xray">X-Ray</option><option value="wireframe">Wireframe</option></select></label>
+							{#if result.scenes.length}<label>Scene<select value={sceneId} onchange={sceneChanged}>{#each result.scenes as scene}<option value={scene.id}>{scene.name || scene.id}</option>{/each}</select></label>{/if}
+						</div>
+					</details>
+				</div>
+				<div class="mobile-secondary-actions">
+					<details class="mobile-control-group">
+						<summary>Source</summary>
+						<div class="mobile-control-panel">
+							<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact</button>
+							<output aria-label="Replacement artifact filename">{sourceFile?.name ?? 'No replacement artifact selected'}</output>
+							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Change sidecar</button>
+							<output aria-label="Replacement sidecar filename">{provenanceFile?.name ?? 'No replacement sidecar selected'}</output>
+							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile || !provenanceFile}>{busy ? 'Verifying…' : 'Open verified model'}</button>
+							<button type="button" class="secondary" onclick={unload} disabled={busy}>Unload</button>
+						</div>
+					</details>
+					<details class="mobile-control-group">
+						<summary>Save</summary>
+						<div class="mobile-control-panel">
+							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
+						</div>
+					</details>
+				</div>
+			{/if}
+		</section>
+	{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 	{#if result}
 		<section class="source-bar" aria-label="Imported source status">
@@ -259,12 +305,17 @@
 			<span class:ready>{ready ? 'Textures settled and first frame observed' : 'Preparing viewport'}</span>
 		</section>
 		<div class="workspace">
-			<div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div>
+			<div class="viewport-frame"><div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div><p class="touch-hint" data-testid="touch-hint">One finger rotates; two fingers pan and pinch to zoom. Scroll outside the model to move the page.</p></div>
 			<aside aria-label="Source and selection information">
-				<h1>Model inspection</h1>
-				<p>This imported source is read-only. Editor-owned edits use a separate store and keep this source reference unchanged.</p>
-				<dl><dt>Artifact SHA-256</dt><dd>{session?.source.artifactSha256 ?? artifactSha256}</dd><dt>Source</dt><dd>{session?.source.file.name ?? sourceFile?.name}</dd><dt>Source bytes</dt><dd>{session?.source.file.size.toLocaleString() ?? sourceFile?.size.toLocaleString()}</dd><dt>Profile</dt><dd>{session?.source.profile ?? result.encodingContract?.profile ?? 'Unavailable'}</dd><dt>Provenance</dt><dd>{session?.source.provenance.capture.method ?? provenance?.capture.method ?? 'Unavailable'}</dd></dl>
-				{#if picked}<section class="pick"><h2>Picked geometry</h2><dl><dt>Source mesh</dt><dd>{picked.sourceMeshIndex}</dd><dt>Definition</dt><dd>{picked.definitionIndex}</dd><dt>Occurrence</dt><dd>{picked.occurrenceHandle ?? picked.occurrenceIndex ?? 'Unavailable'}</dd><dt>Source face</dt><dd>{picked.sourceFaceIndex ?? 'Unavailable'}</dd></dl></section>{/if}
+				<details class="inspection-details" open>
+					<summary>Model and selection details</summary>
+					<div class="inspection-content">
+						<h1>Model inspection</h1>
+						<p>This imported source is read-only. Editor-owned edits use a separate store and keep this source reference unchanged.</p>
+						<dl><dt>Artifact SHA-256</dt><dd>{session?.source.artifactSha256 ?? artifactSha256}</dd><dt>Source</dt><dd>{session?.source.file.name ?? sourceFile?.name}</dd><dt>Source bytes</dt><dd>{session?.source.file.size.toLocaleString() ?? sourceFile?.size.toLocaleString()}</dd><dt>Profile</dt><dd>{session?.source.profile ?? result.encodingContract?.profile ?? 'Unavailable'}</dd><dt>Provenance</dt><dd>{session?.source.provenance.capture.method ?? provenance?.capture.method ?? 'Unavailable'}</dd></dl>
+						{#if picked}<section class="pick"><h2>Picked geometry</h2><dl><dt>Source mesh</dt><dd>{picked.sourceMeshIndex}</dd><dt>Definition</dt><dd>{picked.definitionIndex}</dd><dt>Occurrence</dt><dd>{picked.occurrenceHandle ?? picked.occurrenceIndex ?? 'Unavailable'}</dd><dt>Source face</dt><dd>{picked.sourceFaceIndex ?? 'Unavailable'}</dd></dl></section>{/if}
+					</div>
+				</details>
 			</aside>
 		</div>
 	{:else}

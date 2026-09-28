@@ -1,0 +1,192 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { E4_PROVENANCE_POLICY_V1 } from '@sibambo/provenance/policies/e4-v1';
+import { makeTinyBomc12 } from '../../../tooling/test-fixtures/tiny-bomc';
+
+test('mobile Editor keeps inspection actions, touch gestures, source replacement, and save reachable', async ({ browser }) => {
+	test.setTimeout(120000);
+	const context = await browser.newContext({
+		baseURL: 'http://127.0.0.1:5175',
+		viewport: { width: 390, height: 844 },
+		deviceScaleFactor: 2,
+		isMobile: true,
+		hasTouch: true
+	});
+	const page = await context.newPage();
+	const originalBytes = Buffer.from(makeTinyBomc12());
+	const replacementBytes = Buffer.from(makeTinyBomc12({ faceSurfaceCode: 1, faceRoleCode: 1 }));
+	const makeProvenance = (bytes: Buffer, modelId: string, captureId: string) => ({
+		schema: 'sibambo-research-provenance-v1', engine: 'e4',
+		artifact: { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, format: 'bomc-1.2', profile: 'exact' },
+		producer: { label: 'Synthetic browser worker fixture', sourceTreeSha256: E4_PROVENANCE_POLICY_V1.producer.sourceTreeSha256![0] },
+		model: { id: modelId },
+		capture: { id: captureId, exportedAt: new Date().toISOString(), evidence: 'Generated structural test fixture; not an exporter capture.', method: 'operator-attested' }
+	});
+	const original = makeProvenance(originalBytes, 'mobile-editor-original', 'mobile-editor-original-capture');
+	const replacement = makeProvenance(replacementBytes, 'mobile-editor-replacement', 'mobile-editor-replacement-capture');
+	try {
+		await page.addInitScript(() => {
+			const probe: { hold: boolean; pending: boolean; release?: () => void } = { hold: false, pending: false };
+			Object.defineProperty(window, '__mobileEditorAdapterProbe', { configurable: true, value: probe });
+			Object.defineProperty(navigator, 'gpu', {
+				configurable: true,
+				value: {
+					requestAdapter: () => {
+						if (!probe.hold) return Promise.resolve(null);
+						return new Promise<null>((resolve) => {
+							probe.pending = true;
+							probe.release = () => { probe.pending = false; resolve(null); };
+						});
+					}
+				}
+			});
+		});
+		await page.goto('/?renderer=webgl2');
+		await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
+		await expect(page.getByRole('button', { name: 'Open verified model' })).toBeVisible();
+		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-original.bomc', mimeType: 'application/octet-stream', buffer: originalBytes });
+		await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'mobile-editor-original.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(original)) });
+		await page.getByRole('button', { name: 'Open verified model' }).click();
+		await expect(page.getByText('mobile-editor-original', { exact: true })).toBeVisible({ timeout: 30000 });
+		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+		await expect(page.getByTestId('touch-hint')).toBeVisible();
+
+		const mobileControls = page.getByRole('region', { name: 'Mobile model controls' });
+		await expect(mobileControls).toBeVisible();
+		for (const label of ['Views', 'Display / scene', 'Source', 'Save']) {
+			await expect(mobileControls.getByText(label, { exact: true })).toBeVisible();
+		}
+		const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');
+		const mobileTargets = page.locator('.sibambo-header a, .sibambo-header button, .sibambo-header summary, .mobile-toolbar button:visible, .mobile-toolbar select:visible, .mobile-toolbar summary:visible');
+		for (const target of await mobileTargets.all()) {
+			const rect = await target.boundingBox();
+			expect(rect).not.toBeNull();
+			expect(rect!.width).toBeGreaterThanOrEqual(44);
+			expect(rect!.height).toBeGreaterThanOrEqual(44);
+		}
+		const initialBounds = await canvas.boundingBox();
+		expect(initialBounds).not.toBeNull();
+		expect(initialBounds!.width).toBeGreaterThanOrEqual(350);
+		expect(initialBounds!.height).toBeGreaterThanOrEqual(320);
+		await expect.poll(() => canvas.evaluate((element) => getComputedStyle(element).touchAction)).toBe('none');
+
+		for (const viewport of [
+			{ width: 195, height: 844 }, { width: 320, height: 720 }, { width: 390, height: 844 }, { width: 430, height: 932 },
+			{ width: 768, height: 1024 }, { width: 844, height: 390 }
+		]) {
+			await page.setViewportSize(viewport);
+			const dimensions = await page.evaluate(() => ({ width: innerWidth, documentWidth: document.documentElement.scrollWidth }));
+			expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.width);
+			const responsiveCanvas = await canvas.boundingBox();
+			expect(responsiveCanvas).not.toBeNull();
+			expect(responsiveCanvas!.height).toBeGreaterThanOrEqual(280);
+		}
+		await page.setViewportSize({ width: 390, height: 844 });
+		const touch = await context.newCDPSession(page);
+		let bounds = await canvas.boundingBox();
+		expect(bounds).not.toBeNull();
+		const tapX = bounds!.x + bounds!.width * 0.46;
+		const tapY = bounds!.y + bounds!.height * 0.51;
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: tapX, y: tapY, id: 0 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+		await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible({ timeout: 5000 });
+
+		await page.getByRole('button', { name: 'Fit' }).click();
+		const views = mobileControls.locator('details').filter({ has: page.getByText('Views', { exact: true }) });
+		await views.locator('summary').focus();
+		await page.keyboard.press('Enter');
+		await views.getByRole('button', { name: 'Top', exact: true }).click();
+		await views.locator('summary').click();
+		const display = mobileControls.locator('details').filter({ has: page.getByText('Display / scene', { exact: true }) });
+		await display.locator('summary').click();
+		await display.getByLabel('Display mode').selectOption('wireframe');
+		await display.getByLabel('Scene').selectOption({ index: 0 });
+		await display.getByLabel('Display mode').selectOption('solid');
+
+		bounds = await canvas.boundingBox();
+		expect(bounds).not.toBeNull();
+		const canvasImageHash = async () => createHash('sha256').update(await canvas.screenshot()).digest('hex');
+		const selectionBeforeTouch = await canvasImageHash();
+		const orbitStart = { x: bounds!.x + bounds!.width * 0.70, y: bounds!.y + bounds!.height * 0.50, id: 0 };
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [orbitStart] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...orbitStart, x: orbitStart.x + 48, y: orbitStart.y - 20 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+		await expect.poll(canvasImageHash).not.toBe(selectionBeforeTouch);
+		const imageAfterOrbit = await canvasImageHash();
+		const panCenterX = bounds!.x + bounds!.width * 0.5;
+		const panCenterY = bounds!.y + bounds!.height * 0.5;
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: panCenterX - 28, y: panCenterY, id: 0 }, { x: panCenterX + 28, y: panCenterY, id: 1 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: panCenterX - 28 + 24, y: panCenterY + 16, id: 0 }, { x: panCenterX + 28 + 24, y: panCenterY + 16, id: 1 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+		await expect.poll(canvasImageHash).not.toBe(imageAfterOrbit);
+		const imageAfterPan = await canvasImageHash();
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: panCenterX - 30, y: panCenterY, id: 0 }, { x: panCenterX + 30, y: panCenterY, id: 1 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: panCenterX - 55, y: panCenterY, id: 0 }, { x: panCenterX + 55, y: panCenterY, id: 1 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+		await expect.poll(canvasImageHash).not.toBe(imageAfterPan);
+		await page.evaluate(() => window.scrollTo(0, 0));
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 22, y: 150, id: 0 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 22, y: 80, id: 0 }] });
+		await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+		await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+		const source = mobileControls.locator('details').filter({ has: page.getByText('Source', { exact: true }) });
+		await source.locator('summary').click();
+		const actionButtons = source.getByRole('button');
+		for (const button of await actionButtons.all()) {
+			const rect = await button.boundingBox();
+			expect(rect).not.toBeNull();
+			expect(rect!.width).toBeGreaterThanOrEqual(44);
+			expect(rect!.height).toBeGreaterThanOrEqual(44);
+		}
+		await source.getByRole('button', { name: 'Change artifact' }).click();
+		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-replacement.bomc', mimeType: 'application/octet-stream', buffer: replacementBytes });
+		await source.getByRole('button', { name: 'Change sidecar' }).click();
+		await page.locator('input[type="file"][accept*="application/json"]').setInputFiles({ name: 'mobile-editor-replacement.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(replacement)) });
+
+		await page.evaluate(() => {
+			const probe = (window as Window & { __mobileEditorAdapterProbe?: { hold: boolean } }).__mobileEditorAdapterProbe;
+			if (!probe) throw new Error('Mobile adapter test probe was not initialized.');
+			probe.hold = true;
+			history.replaceState(history.state, '', '/?renderer=webgpu');
+		});
+		await source.getByRole('button', { name: 'Open verified model' }).click();
+		await expect.poll(() => page.evaluate(() => (window as Window & { __mobileEditorAdapterProbe?: { pending: boolean } }).__mobileEditorAdapterProbe?.pending ?? false)).toBe(true);
+		await expect(mobileControls.getByRole('button', { name: 'Cancel' })).toBeVisible();
+		await mobileControls.getByRole('button', { name: 'Cancel' }).click();
+		await expect(page.getByRole('alert')).toHaveText('Model load cancelled.');
+		await expect(page.getByText('mobile-editor-original', { exact: true })).toBeVisible();
+		await expect(canvas).toHaveCount(1);
+		await page.evaluate(() => (window as Window & { __mobileEditorAdapterProbe?: { release?: () => void } }).__mobileEditorAdapterProbe?.release?.());
+		await expect.poll(() => canvas.evaluate((element) => (element as HTMLCanvasElement).isConnected)).toBe(true);
+
+		await page.evaluate(() => {
+			const probe = (window as Window & { __mobileEditorAdapterProbe?: { hold: boolean } }).__mobileEditorAdapterProbe;
+			if (!probe) throw new Error('Mobile adapter test probe was not initialized.');
+			probe.hold = false;
+			history.replaceState(history.state, '', '/?renderer=webgl2');
+		});
+		await source.getByRole('button', { name: 'Open verified model' }).click();
+		await expect(page.getByText('mobile-editor-replacement', { exact: true })).toBeVisible({ timeout: 30000 });
+		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+		const save = mobileControls.locator('details').filter({ has: page.getByText('Save', { exact: true }) });
+		await save.locator('summary').click();
+		const downloadPromise = page.waitForEvent('download');
+		await save.getByRole('button', { name: 'Save view' }).click();
+		const download = await downloadPromise;
+		expect(download.suggestedFilename()).toBe('mobile-editor-replacement-editor-view.png');
+		const png = readFileSync((await download.path())!);
+		expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+		const pngWidth = png.readUInt32BE(16);
+		const pngHeight = png.readUInt32BE(20);
+		const captureSize = await canvas.evaluate((element) => ({ width: (element as HTMLCanvasElement).width, height: (element as HTMLCanvasElement).height }));
+		expect({ width: pngWidth, height: pngHeight }).toEqual(captureSize);
+
+		await source.getByRole('button', { name: 'Unload' }).click();
+		await expect(page.getByRole('heading', { name: 'Open a verified model' })).toBeVisible();
+		await expect(canvas).toHaveCount(0);
+	} finally {
+		await context.close();
+	}
+});
