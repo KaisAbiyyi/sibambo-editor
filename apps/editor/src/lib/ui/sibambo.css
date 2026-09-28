@@ -72,10 +72,14 @@ main[data-app="editor"] { min-height: 100dvh; display: flex; flex-direction: col
 :root[data-theme="dark"] .primary { color: #171a1f; }
 .primary:hover:not(:disabled) { border-color: var(--color-primary-hover); background: var(--color-primary-hover); color: #fff; }
 .toolbar .secondary { color: var(--color-text-secondary); }
+.toolbar button.chosen { border-color: var(--color-primary-border); background: var(--color-primary-soft); color: var(--color-primary-strong); font-weight: 700; }
+.primary-tools, .view-controls { display: inline-flex; align-items: center; gap: 4px; }
 .toolbar output { color: var(--color-text-muted); font-size: 11px; }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0,0,0,0) !important; white-space: nowrap !important; border: 0 !important; }
 .divider { height: 22px; margin: 0 3px; border-left: 1px solid var(--color-border); }
-.error { margin: 9px 14px; padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); border-radius: 7px; background: color-mix(in srgb, var(--color-danger) 8%, var(--color-surface)); color: var(--color-danger); font-size: 12px; }
+.error, .notice { margin: 9px 14px; padding: 9px 12px; border-radius: 7px; font-size: 12px; }
+.error { border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); background: color-mix(in srgb, var(--color-danger) 8%, var(--color-surface)); color: var(--color-danger); }
+.notice { border: 1px solid color-mix(in srgb, var(--color-success) 30%, var(--color-border)); background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface)); color: var(--color-success); }
 .load-progress { color: var(--color-text-secondary); font-size: 11px; }
 .source-bar { display: flex; min-height: 38px; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 7px 14px; border-bottom: 1px solid var(--color-border); background: var(--color-surface-muted); color: var(--color-text-secondary); font-size: 11px; }
 .source-bar strong { color: var(--color-text); }

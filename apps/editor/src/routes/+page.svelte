@@ -4,6 +4,8 @@
 	import '$lib/ui/sibambo.css';
 	import type { AdaptedBomcResult } from '@sibambo/e4-import';
 	import { EditorSession } from '$lib/editor/EditorSession';
+	import { EditorController } from '$lib/editor/EditorController';
+	import type { EditorTool } from '$lib/editor/EditorState';
 	import { loadE4InWorker } from '$lib/e4-worker-client';
 	import type { PreparedSceneViewport, ViewMode, ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
@@ -26,6 +28,9 @@
 	let ready = $state(false);
 	let error = $state('');
 	let activeOperation: 'import' | 'provenance' = 'import';
+	let activeTool = $state<EditorTool>('select');
+	let editorNotice = $state('');
+	let editorController = $state.raw<EditorController | null>(null);
 	let picked = $state<ViewportPick | null>(null);
 	let viewMode = $state<ViewMode>('solid');
 	let sceneId = $state('');
@@ -168,6 +173,7 @@
 			artifactSha256 = admitted.artifactSha256;
 			result = loaded;
 			session = nextSession;
+			editorController = new EditorController(nextSession.editableGeometry);
 			sceneId = nextSceneId;
 			viewport = nextViewport;
 			ready = false;
@@ -223,6 +229,19 @@
 		}
 	}
 
+	function setTool(tool: EditorTool) {
+		activeTool = tool;
+		if (editorController) editorController.setTool(tool);
+		if (tool === 'move') {
+			editorNotice = 'Move tool active: select or create editable geometry to translate. Imported BOMC geometry is read-only.';
+		} else {
+			editorNotice = '';
+		}
+	}
+	function undoAction() {
+		if (editorController) editorController.undo();
+	}
+
 	function setMode(mode: ViewMode) { viewMode = mode; viewport?.setViewMode(mode); }
 	function sceneChanged(event: Event) {
 		sceneId = (event.currentTarget as HTMLSelectElement).value;
@@ -260,6 +279,8 @@
 		viewport = null;
 		session?.dispose();
 		session = null;
+		editorController = null;
+		editorNotice = '';
 		result = null;
 		sceneId = '';
 		provenance = null;
@@ -293,17 +314,23 @@
 		<section class="toolbar" aria-label="Model and camera controls">
 			{#if busy}<button type="button" class="secondary" onclick={cancelLoad}>Cancel</button><output class="load-progress">{loadStatus}</output>{/if}
 			{#if result}
-			<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
+			<div class="primary-tools" aria-label="Primary editing tools">
+				<button type="button" class:chosen={activeTool === 'select'} onclick={() => setTool('select')}>Select</button>
+				<button type="button" class:chosen={activeTool === 'move'} onclick={() => setTool('move')}>Move</button>
+				<button type="button" onclick={() => { viewport?.fit(); }}>Fit</button>
+				<button type="button" onclick={undoAction} disabled={!editorController?.history.canUndo}>Undo</button>
+			</div>
 			<span class="divider"></span>
-			<button type="button" class="secondary" onclick={() => sourceInput?.click()}>Change artifact</button>
-			<button type="button" class="secondary" onclick={() => provenanceInput?.click()}>Choose sidecar for next model</button>
-			<button type="button" onclick={() => { viewport?.fit(); }}>Fit</button>
+			<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 			<button type="button" onclick={() => viewport?.view('top')}>Top</button>
 			<button type="button" onclick={() => viewport?.view('front')}>Front</button>
 			<button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
 			<label>Display<select value={viewMode} onchange={(event) => setMode((event.currentTarget as HTMLSelectElement).value as ViewMode)}><option value="solid">Solid</option><option value="xray">X-Ray</option><option value="wireframe">Wireframe</option></select></label>
 			{#if result.scenes.length}<label>Scene<select aria-label="Visible scene" value={sceneId} onchange={sceneChanged}>{#each result.scenes as scene}<option value={scene.id}>{scene.name || scene.id}</option>{/each}</select></label>{/if}
 			<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
+			<span class="divider"></span>
+			<button type="button" class="secondary" onclick={() => sourceInput?.click()}>Change artifact</button>
+			<button type="button" class="secondary" onclick={() => provenanceInput?.click()}>Choose sidecar for next model</button>
 			<button type="button" class="secondary" onclick={unload} disabled={busy}>Unload</button>
 		{/if}
 		</section>
@@ -313,7 +340,10 @@
 			{#if busy}<div class="mobile-progress"><output class="load-progress">{loadStatus}</output><button type="button" class="secondary" onclick={cancelLoad}>Cancel</button></div>{/if}
 			{#if result}
 				<div class="mobile-primary-actions">
+					<button type="button" class:chosen={activeTool === 'select'} onclick={() => setTool('select')}>Select</button>
+					<button type="button" class:chosen={activeTool === 'move'} onclick={() => setTool('move')}>Move</button>
 					<button type="button" class="secondary" onclick={() => viewport?.fit()}>Fit</button>
+					<button type="button" class="secondary" onclick={undoAction} disabled={!editorController?.history.canUndo}>Undo</button>
 					<details class="mobile-control-group">
 						<summary>Views</summary>
 						<div class="mobile-control-panel" aria-label="Standard camera views">
@@ -354,6 +384,7 @@
 		</section>
 	{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
+	{#if editorNotice}<p class="notice" role="status">{editorNotice}</p>{/if}
 	{#if result}
 		<section class="source-bar" aria-label="Imported source status">
 			<strong>{provenance?.model.id ?? result.modelName ?? session?.source.file.name}</strong>

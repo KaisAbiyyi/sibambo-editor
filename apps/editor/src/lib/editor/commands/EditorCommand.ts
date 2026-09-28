@@ -18,6 +18,17 @@ export class PushPullCommand implements EditorCommand {
 	undo() { if (this.before) this.store.set(this.before); else this.store.delete(this.extrusion.id); }
 }
 
+export class MoveCommand implements EditorCommand {
+	private readonly before: EditableEntity;
+	constructor(private readonly store: EditableGeometryStore, private readonly entityId: string, private readonly after: EditableEntity) {
+		const existing = store.get(entityId);
+		if (!existing) throw new Error(`Cannot move non-existent entity ${entityId}`);
+		this.before = structuredClone(existing);
+	}
+	execute() { this.store.set(this.after); }
+	undo() { this.store.set(this.before); }
+}
+
 export class CommandHistory {
 	private undoStack: EditorCommand[] = [];
 	private redoStack: EditorCommand[] = [];

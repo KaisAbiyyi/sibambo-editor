@@ -1,8 +1,8 @@
 import { Vector3 } from 'three';
-import { CommandHistory, CreateShapeCommand, PushPullCommand } from './commands/EditorCommand';
+import { CommandHistory, CreateShapeCommand, MoveCommand, PushPullCommand } from './commands/EditorCommand';
 import { EditableGeometryStore } from './EditableGeometryStore';
 import type { EditablePlanarFace, EditorPlane, EditorPoint, EditorPreview, EditorSelectionHit, EditorTool } from './EditorState';
-import { createCircle, createPlane, createRectangle, dimensions, extrudeFace } from './geometry/editable-geometry';
+import { createCircle, createPlane, createRectangle, dimensions, extrudeFace, translateEntity } from './geometry/editable-geometry';
 
 export class EditorController {
 	readonly history = new CommandHistory();
@@ -12,6 +12,8 @@ export class EditorController {
 	private drawingPlane: EditorPlane | null = null;
 	pushFace: EditablePlanarFace | null = null;
 	pushAnchorPoint: Vector3 | null = null;
+	moveEntityId: string | null = null;
+	private moveStartPoint: EditorPoint | null = null;
 	private pushStartY = 0;
 	private sequence = 0;
 
@@ -52,6 +54,27 @@ export class EditorController {
 			this.preview = { entity, label, hover: this.pushFace };
 			return this.preview;
 		}
+		if (this.tool === 'move') {
+			if (!this.moveEntityId || !this.moveStartPoint || (!hit && !snapPoint)) {
+				this.preview = { entity: null, label: '', hover: hit?.face || null };
+				return this.preview;
+			}
+			const pt: EditorPoint = snapPoint ? [snapPoint.x, snapPoint.y, snapPoint.z] : hit!.point;
+			const delta: EditorPoint = [pt[0] - this.moveStartPoint[0], pt[1] - this.moveStartPoint[1], pt[2] - this.moveStartPoint[2]];
+			const original = this.store.get(this.moveEntityId);
+			if (!original) {
+				this.preview = { entity: null, label: '', hover: null };
+				return this.preview;
+			}
+			const moved = translateEntity(original, delta);
+			const dist = Math.hypot(delta[0], delta[1], delta[2]);
+			this.preview = {
+				entity: moved,
+				label: `Move ${dist.toFixed(3)} m (dx: ${delta[0].toFixed(2)}, dy: ${delta[1].toFixed(2)}, dz: ${delta[2].toFixed(2)})`,
+				hover: null
+			};
+			return this.preview;
+		}
 		this.preview = { entity: null, label: '', hover: hit?.face || null };
 		return this.preview;
 	}
@@ -89,6 +112,24 @@ export class EditorController {
 			this.resetOperation();
 			return true;
 		}
+		if (this.tool === 'move') {
+			if (!this.moveEntityId) {
+				if (!hit) return false;
+				if (hit.imported) {
+					this.preview = { entity: null, label: 'Imported BOMC geometry is read-only in Editor; select editable geometry to move.', hover: hit.face };
+					return false;
+				}
+				const entity = this.store.get(hit.face.id);
+				if (!entity) return false;
+				this.moveEntityId = entity.id;
+				this.moveStartPoint = snapPoint ? [snapPoint.x, snapPoint.y, snapPoint.z] : hit.point;
+				return false;
+			}
+			if (!this.preview.entity || this.preview.entity.id !== this.moveEntityId) return false;
+			this.history.execute(new MoveCommand(this.store, this.moveEntityId, this.preview.entity));
+			this.resetOperation();
+			return true;
+		}
 		return false;
 	}
 
@@ -98,6 +139,7 @@ export class EditorController {
 
 	private resetOperation() {
 		this.firstPoint = null; this.drawingPlane = null; this.pushFace = null; this.pushAnchorPoint = null;
+		this.moveEntityId = null; this.moveStartPoint = null;
 		this.preview = { entity: null, label: '', hover: null };
 	}
 	private previewId() { return `editable-preview-${this.sequence + 1}`; }
