@@ -4,6 +4,49 @@ import { expect, test } from '@playwright/test';
 import { E4_PROVENANCE_POLICY_V1 } from '@sibambo/provenance/policies/e4-v1';
 import { makeTinyBomc12 } from '../../../tooling/test-fixtures/tiny-bomc';
 
+test('mobile file pickers are disabled while the first model is importing', async ({ browser }) => {
+	test.setTimeout(60000);
+	const context = await browser.newContext({
+		baseURL: 'http://127.0.0.1:5175',
+		viewport: { width: 390, height: 844 },
+		isMobile: true,
+		hasTouch: true
+	});
+	const page = await context.newPage();
+	const bytes = Buffer.from(makeTinyBomc12());
+	const manifest = {
+		schema: 'sibambo-research-provenance-v1', engine: 'e4',
+		artifact: { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, format: 'bomc-1.2', profile: 'exact' },
+		producer: { label: 'Synthetic mobile import fixture', sourceTreeSha256: E4_PROVENANCE_POLICY_V1.producer.sourceTreeSha256![0] },
+		model: { id: 'mobile-editor-importing' },
+		capture: { id: 'mobile-editor-importing-capture', exportedAt: new Date().toISOString(), evidence: 'Generated structural test fixture; not an exporter capture.', method: 'operator-attested' }
+	};
+	let releaseWorker!: () => void;
+	let markWorkerRequested!: () => void;
+	const workerGate = new Promise<void>((resolve) => { releaseWorker = resolve; });
+	const workerRequested = new Promise<void>((resolve) => { markWorkerRequested = resolve; });
+	await page.route('**/*e4-import.worker*', async (route) => {
+		markWorkerRequested();
+		await workerGate;
+		await route.continue();
+	});
+	try {
+		await page.goto('/?renderer=webgl2');
+		await page.getByLabel('BOMC 1.2 file').setInputFiles({ name: 'mobile-editor-importing.bomc', mimeType: 'application/octet-stream', buffer: bytes });
+		await page.getByLabel('Provenance sidecar').setInputFiles({ name: 'mobile-editor-importing.provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) });
+		await page.getByRole('button', { name: 'Open verified model' }).click();
+		await workerRequested;
+		await expect(page.getByRole('button', { name: 'Choose BOMC 1.2 file' })).toBeDisabled();
+		await expect(page.getByRole('button', { name: 'Choose provenance sidecar' })).toBeDisabled();
+		releaseWorker();
+		await expect(page.getByText('mobile-editor-importing', { exact: true })).toBeVisible({ timeout: 30000 });
+		await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 30000 });
+	} finally {
+		releaseWorker();
+		await context.close();
+	}
+});
+
 test('mobile Editor keeps inspection actions, touch gestures, source replacement, and save reachable', async ({ browser }) => {
 	test.setTimeout(120000);
 	const context = await browser.newContext({

@@ -327,8 +327,8 @@ import { loadE4InWorker } from '$lib/e4-worker-client';
 					<h1 id="empty-editor-title">Open a verified model</h1>
 					<p>Choose a BOMC 1.2 artifact and its hash-bound provenance sidecar to inspect the model in 3D.</p>
 					<div class="file-pickers">
-						<button type="button" class="secondary" onclick={() => sourceInput?.click()}>Choose BOMC 1.2 file</button><span>{sourceFile?.name ?? 'No artifact selected'}</span>
-						<button type="button" class="secondary" onclick={() => provenanceInput?.click()}>Choose provenance sidecar</button><span>{provenanceFile?.name ?? 'No sidecar selected'}</span>
+						<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Choose BOMC 1.2 file</button><span>{sourceFile?.name ?? 'No artifact selected'}</span>
+						<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose provenance sidecar</button><span>{provenanceFile?.name ?? 'No sidecar selected'}</span>
 					</div>
 					<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile || !provenanceFile}>{busy ? 'Verifying…' : 'Open verified model'}</button>
 					<p class="validation-note">Older BOMC versions, unsigned engine claims, and unverified files are rejected.</p>
