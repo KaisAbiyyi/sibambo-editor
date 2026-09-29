@@ -185,7 +185,7 @@ export async function decodeBomcJcmToPng(
 		if (!outputContext) fail('output canvas context is unavailable');
 		const outputData = new Uint8ClampedArray(output.buffer, output.byteOffset, output.byteLength);
 		outputContext.putImageData(new ImageData(outputData, parsed.width, parsed.height), 0, 0);
-		const png = outputCanvas instanceof OffscreenCanvas
+		const png = typeof OffscreenCanvas !== 'undefined' && outputCanvas instanceof OffscreenCanvas
 			? await outputCanvas.convertToBlob({ type: 'image/png' })
 			: await new Promise<Blob>((resolve, reject) => (outputCanvas as HTMLCanvasElement).toBlob((blob) => blob ? resolve(blob) : reject(new Error('BOMC invalid: JPEG color map PNG encoding failed.')), 'image/png'));
 		const bytes = new Uint8Array(await png.arrayBuffer());
