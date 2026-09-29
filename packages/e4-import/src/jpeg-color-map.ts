@@ -1,15 +1,20 @@
 const MAGIC = new Uint8Array([66, 79, 77, 74, 67, 77, 13, 10]);
 const HEADER_BYTES = 128;
 const CHECKPOINT_PIXELS = 131_072;
+const MAX_PIXELS = 32_000_000;
+const MAX_ENTRIES = 262_144;
+const MAX_JPEG_BYTES = 32 * 1024 * 1024;
 
 type ParsedJcm = {
 	width: number;
 	height: number;
 	pixels: number;
+	codec: number;
 	jpeg: Uint8Array;
 	baseHash: Uint8Array;
 	outputHash: Uint8Array;
-	colors: Map<number, number>;
+	colors?: Map<number, number>;
+	residual?: Uint8Array;
 };
 
 export type JcmDecodeOptions = {
@@ -85,40 +90,90 @@ function validateJpeg(jpeg: Uint8Array, width: number, height: number) {
 	fail('truncated JPEG');
 }
 
+async function inflateCorrection(encoded: Uint8Array, expectedLength: number) {
+	if (!expectedLength || expectedLength > MAX_PIXELS * 4) fail('correction bounds');
+	if (!encoded.byteLength || encoded.byteLength > expectedLength + 65_536) fail('correction bounds');
+	if (typeof DecompressionStream !== 'function') fail('DEFLATE decoder is unavailable');
+	const stream = new Blob([encoded.slice().buffer]).stream().pipeThrough(new DecompressionStream('deflate'));
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { value, done } = await reader.read();
+		if (done) break;
+		const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+		total += chunk.byteLength;
+		if (total > expectedLength) {
+			await reader.cancel();
+			fail('inflated correction exceeds expected length');
+		}
+		chunks.push(chunk);
+	}
+	if (total !== expectedLength) fail('inflated correction length');
+	const output = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		output.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return output;
+}
+
 async function parseJcm(payload: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<ParsedJcm> {
 	if (payload.byteLength < HEADER_BYTES || !equalBytes(payload.subarray(0, 8), MAGIC)) fail('header');
-	if (payload[8] !== 1 || payload[9] !== 0 || payload[10] !== 0 || payload[11] !== 1) fail('version or flags');
+	const codec = payload[10];
+	if (payload[8] !== 1 || payload[9] !== 0 || ![0, 1, 2].includes(codec) || payload[11] !== 1) fail('version or flags');
 	const header = new DataView(payload.buffer, payload.byteOffset, HEADER_BYTES);
 	const width = header.getUint32(12, true);
 	const height = header.getUint32(16, true);
 	const count = header.getUint32(20, true);
 	const jpegLength = header.getUint32(24, true);
-	if (header.getUint32(28, true) !== 0) fail('reserved field');
+	const correctionLength = header.getUint32(28, true);
 	const pixels = width * height;
-	if (!width || !height || !Number.isSafeInteger(pixels) || !Number.isSafeInteger(pixels * 4)) fail('pixel dimensions');
+	if (!width || !height || width > 16_384 || height > 16_384 || pixels > MAX_PIXELS ||
+		!Number.isSafeInteger(pixels) || !Number.isSafeInteger(pixels * 4)) fail('pixel dimensions');
 	if (width !== expectedWidth || height !== expectedHeight) fail('table dimensions mismatch');
-	if (!count || count > pixels || !jpegLength) fail('dictionary or JPEG byte count');
-	const expectedPayloadLength = HEADER_BYTES + jpegLength + count * 7;
+	if (!jpegLength || jpegLength > MAX_JPEG_BYTES) fail('JPEG byte count');
+
+	const rawCorrectionLength = codec === 2 ? pixels * 4 : count * 7;
+	if (codec === 2) {
+		if (count !== pixels) fail('residual count');
+	} else if (!count || count > MAX_ENTRIES || count > pixels) {
+		fail('dictionary entry count');
+	}
+	const payloadCorrectionLength = codec === 0 ? rawCorrectionLength : correctionLength;
+	if (codec === 0) {
+		if (correctionLength !== 0) fail('stored correction length');
+	} else if (!correctionLength || correctionLength > rawCorrectionLength + 65_536) {
+		fail('compressed correction bounds');
+	}
+	const expectedPayloadLength = HEADER_BYTES + jpegLength + payloadCorrectionLength;
 	if (!Number.isSafeInteger(expectedPayloadLength) || payload.byteLength !== expectedPayloadLength) fail('payload length');
+
 	const jpeg = payload.subarray(HEADER_BYTES, HEADER_BYTES + jpegLength);
 	if (!equalBytes(await digestSha256(jpeg), payload.subarray(32, 64))) fail('JPEG hash mismatch');
 	validateJpeg(jpeg, width, height);
+	const encodedCorrection = payload.subarray(HEADER_BYTES + jpegLength);
+	const correction = codec === 0 ? encodedCorrection : await inflateCorrection(encodedCorrection, rawCorrectionLength);
+
+	const common = {
+		width, height, pixels, codec, jpeg,
+		baseHash: payload.subarray(64, 96), outputHash: payload.subarray(96, 128)
+	};
+	if (codec === 2) return { ...common, residual: correction };
+
 	const colors = new Map<number, number>();
 	let previousKey = -1;
-	const tableOffset = HEADER_BYTES + jpegLength;
 	for (let index = 0; index < count; index += 1) {
-		const offset = tableOffset + index * 7;
-		const key = (payload[offset] << 16) | (payload[offset + 1] << 8) | payload[offset + 2];
+		const offset = index * 7;
+		const key = (correction[offset] << 16) | (correction[offset + 1] << 8) | correction[offset + 2];
 		if (key <= previousKey) fail('dictionary keys are not strictly sorted');
-		if (payload[offset + 6] !== 255) fail('dictionary entry is not opaque');
-		const color = (payload[offset + 3] << 24) | (payload[offset + 4] << 16) | (payload[offset + 5] << 8) | 255;
+		if (correction[offset + 6] !== 255) fail('dictionary entry is not opaque');
+		const color = (correction[offset + 3] << 24) | (correction[offset + 4] << 16) | (correction[offset + 5] << 8) | 255;
 		colors.set(key, color);
 		previousKey = key;
 	}
-	return {
-		width, height, pixels, jpeg,
-		baseHash: payload.subarray(64, 96), outputHash: payload.subarray(96, 128), colors
-	};
+	return { ...common, colors };
 }
 
 async function reconstructPixels(parsed: ParsedJcm, baseRgba: Uint8Array, options: JcmDecodeOptions = {}) {
@@ -132,13 +187,25 @@ async function reconstructPixels(parsed: ParsedJcm, baseRgba: Uint8Array, option
 		}
 		const sourceOffset = pixel * 4;
 		if (baseRgba[sourceOffset + 3] !== 255) fail('base frame is not opaque');
-		const key = (baseRgba[sourceOffset] << 16) | (baseRgba[sourceOffset + 1] << 8) | baseRgba[sourceOffset + 2];
-		const color = parsed.colors.get(key);
-		if (color === undefined) fail('missing dictionary key');
-		output[sourceOffset] = color >>> 24;
-		output[sourceOffset + 1] = (color >>> 16) & 255;
-		output[sourceOffset + 2] = (color >>> 8) & 255;
-		output[sourceOffset + 3] = 255;
+		if (parsed.codec === 2) {
+			const residual = parsed.residual;
+			if (!residual) fail('missing XOR residual');
+			output[sourceOffset] = baseRgba[sourceOffset] ^ residual[sourceOffset];
+			output[sourceOffset + 1] = baseRgba[sourceOffset + 1] ^ residual[sourceOffset + 1];
+			output[sourceOffset + 2] = baseRgba[sourceOffset + 2] ^ residual[sourceOffset + 2];
+			output[sourceOffset + 3] = baseRgba[sourceOffset + 3] ^ residual[sourceOffset + 3];
+			if (output[sourceOffset + 3] !== 255) fail('residual output is not opaque');
+		} else {
+			const colors = parsed.colors;
+			if (!colors) fail('missing dictionary');
+			const key = (baseRgba[sourceOffset] << 16) | (baseRgba[sourceOffset + 1] << 8) | baseRgba[sourceOffset + 2];
+			const color = colors.get(key);
+			if (color === undefined) fail('missing dictionary key');
+			output[sourceOffset] = color >>> 24;
+			output[sourceOffset + 1] = (color >>> 16) & 255;
+			output[sourceOffset + 2] = (color >>> 8) & 255;
+			output[sourceOffset + 3] = 255;
+		}
 	}
 	if (options.isCancelled?.()) throw new Error('BOMC load cancelled');
 	options.onProgress?.(parsed.pixels, parsed.pixels);
