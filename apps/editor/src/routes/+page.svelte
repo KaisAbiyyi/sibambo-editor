@@ -1,17 +1,19 @@
 <script lang="ts">
-	import { onDestroy, tick } from 'svelte';
-	import SibamboHeader from '$lib/components/SibamboHeader.svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import '$lib/ui/sibambo.css';
+	import '$lib/ui/editor-workspace.css';
 	import type { AdaptedBomcResult } from '@sibambo/e4-import';
 	import { EditorSession } from '$lib/editor/EditorSession';
 	import { EditorController } from '$lib/editor/EditorController';
 	import type { EditorTool } from '$lib/editor/EditorState';
 	import { pinchZoomDelta, pointerCameraTool, selectionDragMode, selectionModifierMode, type EditorSelectionModifier } from '$lib/editor/camera-navigation';
 	import { loadE4InWorker } from '$lib/e4-worker-client';
-	import { legacyViewModeFromDisplayState, type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewMode, type ViewportPick } from '@sibambo/viewport';
+	import { type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
+
+	const build = __SIBAMBO_APP_BUILD__;
 
 	let sourceFile = $state<File | null>(null);
 	let provenanceFile = $state<File | null>(null);
@@ -40,8 +42,8 @@
 	let moveAxis = $state<'x' | 'y' | 'z' | null>(null);
 	let faceStyle = $state<FaceStyle>('shaded-textures');
 	let viewEffects = $state<ViewEffects>({ xray: false, ambientOcclusion: false });
-	let viewMode = $state<ViewMode>('solid');
 	let sceneId = $state('');
+	let darkMode = $state(false);
 	let generation = 0;
 	let evidenceGeneration = 0;
 	let controller: AbortController | null = null;
@@ -100,11 +102,12 @@
 
 	function stageSource(event: Event) {
 		sourceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
-		// A staged source record belongs to the previously selected artifact.
-		// Clear it when the artifact changes so replacement can fall back to file-only.
+		// File > Open behaves like a desktop editor: choosing a file starts loading it.
+		// Provenance can be attached independently after the model is open.
 		provenanceFile = null;
 		if (provenanceInput) provenanceInput.value = '';
 		error = '';
+		if (sourceFile) void openModel();
 	}
 	function stageProvenance(event: Event) {
 		provenanceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
@@ -261,6 +264,7 @@
 	}
 
 	function setTool(tool: EditorTool) {
+		if (tool === 'select' || tool === 'move') activeCameraTool = null;
 		if (tool === 'move') {
 			const handle = selectedOccurrenceHandles.length === 1 ? selectedOccurrenceHandles[0] : null;
 			if (!handle || !viewport?.hasOccurrence(handle) || !editorController || !artifactSha256) {
@@ -315,8 +319,7 @@
 		selectedOccurrenceHandles = [...next];
 		picked = pick;
 		viewport?.setSelectedOccurrences(selectedOccurrenceHandles);
-		if (selectedOccurrenceHandles.length === 1) viewport?.focusOccurrence(selectedOccurrenceHandles[0]);
-		if (selectedOccurrenceHandles.length === 1) editorNotice = 'One imported occurrence selected. Use Move or press M to edit its working transform.';
+		if (selectedOccurrenceHandles.length === 1) editorNotice = 'One imported occurrence selected. Camera position and anchor are unchanged.';
 		else if (selectedOccurrenceHandles.length > 1) editorNotice = `${selectedOccurrenceHandles.length} imported occurrences selected. Move is available for one occurrence at a time.`;
 		else editorNotice = '';
 	}
@@ -543,8 +546,7 @@
 		if (key === 'm') { event.preventDefault(); setTool('move'); return; }
 		if (key === 'o' || key === 'h' || key === 'z') {
 			event.preventDefault();
-			activeCameraTool = key === 'o' ? 'orbit' : key === 'h' ? 'pan' : 'zoom';
-			editorNotice = `${activeCameraTool === 'orbit' ? 'Orbit' : activeCameraTool === 'pan' ? 'Pan' : 'Zoom'} selected · drag with the left button. Middle mouse remains available for navigation.`;
+			setCameraTool(key === 'o' ? 'orbit' : key === 'h' ? 'pan' : 'zoom');
 			return;
 		}
 		if (key === 'enter' && activeTool === 'move') {
@@ -576,7 +578,6 @@
 	function applyDisplayState(nextFaceStyle: FaceStyle = faceStyle, nextEffects: ViewEffects = viewEffects) {
 		faceStyle = nextFaceStyle;
 		viewEffects = { ...nextEffects };
-		viewMode = legacyViewModeFromDisplayState({ faceStyle, effects: viewEffects });
 		viewport?.setDisplayState({ faceStyle, effects: viewEffects });
 	}
 	function setFaceStyle(style: FaceStyle) { applyDisplayState(style, viewEffects); }
@@ -585,6 +586,32 @@
 	}
 	function toggleAmbientOcclusion(event: Event) {
 		applyDisplayState(faceStyle, { ...viewEffects, ambientOcclusion: (event.currentTarget as HTMLInputElement).checked });
+	}
+	function setCameraTool(tool: 'orbit' | 'pan' | 'zoom') {
+		if (activeTool === 'move') {
+			editorController?.cancel();
+			editorController?.setTool('select');
+			viewport?.setOccurrencePreview(null);
+			activeTool = 'select';
+		}
+		activeCameraTool = tool;
+		editorNotice = `${tool === 'orbit' ? 'Orbit' : tool === 'pan' ? 'Pan' : 'Zoom'} · left-drag the viewport. Camera and anchor stay coupled during pan/zoom.`;
+	}
+	function activateSelectTool() {
+		activeCameraTool = null;
+		setTool('select');
+	}
+	function zoomExtents() {
+		viewport?.fit();
+		editorNotice = 'Zoom Extents · camera and anchor reframed to the visible model.';
+	}
+	function applyTheme() {
+		document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
+	}
+	function toggleTheme() {
+		darkMode = !darkMode;
+		localStorage.setItem('sibambo-theme', darkMode ? 'dark' : 'light');
+		applyTheme();
 	}
 	function downloadCapture() {
 		if (!viewport || !result) return;
@@ -641,167 +668,153 @@
 		provenanceFile = null;
 		loadStatus = 'Choose a BOMC 1.2 model file.';
 	}
+	onMount(() => {
+		const saved = localStorage.getItem('sibambo-theme');
+		darkMode = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+		applyTheme();
+	});
 	onDestroy(() => { generation += 1; evidenceGeneration += 1; controller?.abort(); unsubscribeOccurrenceTransforms?.(); viewport?.dispose(); session?.dispose(); });
 </script>
 
 <svelte:head>
 	<title>Sibambo Editor</title>
-	<meta name="description" content="Open a local BOMC 1.2 file and inspect it with basic camera and navigation controls. Provenance matching is optional." />
+	<meta name="description" content="Sibambo Editor model workspace with SketchUp-style camera navigation." />
+	<meta name="theme-color" content={darkMode ? '#15181C' : '#F7F8FA'} />
 </svelte:head>
 
 <main data-app="editor" class:is-loaded={!!result}>
-	<SibamboHeader current="editor" />
 	<div class="visually-hidden">
 		<label>BOMC 1.2 file<input bind:this={sourceInput} type="file" accept=".bomc,application/octet-stream" onchange={stageSource} disabled={busy} tabindex="-1" /></label>
 		<label>Provenance JSON for next model<input bind:this={provenanceInput} type="file" accept=".json,application/json" onchange={stageProvenance} disabled={busy} tabindex="-1" /></label>
 		<label>Provenance JSON for current model<input bind:this={provenanceUpgradeInput} type="file" accept=".json,application/json" onchange={stageUpgradeProvenance} disabled={busy || !session || !!provenance} tabindex="-1" /></label>
 	</div>
-	{#if result || busy || error || editorNotice}
-		<div class="loaded-meta">
-			{#if result}
-				<section class="toolbar" aria-label="Model and camera controls">
-					<div class="primary-tools" aria-label="Primary editing tools">
-						<button type="button" class:chosen={activeTool === 'select'} onclick={() => setTool('select')}>Select</button>
-						{#if canMoveSelected()}<button type="button" class:chosen={activeTool === 'move'} onclick={() => setTool('move')}>Move</button>{/if}
-						<button type="button" onclick={() => { viewport?.fit(); }}>Fit</button>
-						<button type="button" onclick={undoAction} disabled={!editorController?.history.canUndo}>Undo</button>
-					</div>
-					<details class="secondary-tools">
-						<summary>More</summary>
-						<div class="secondary-menu">
-							<button type="button" onclick={() => viewport?.view('top')}>Top</button><button type="button" onclick={() => viewport?.view('front')}>Front</button><button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
-							<label>Face style<select aria-label="Face style" value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
-							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
-							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
-							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
-							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
-							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
-							<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact</button>
-							<button type="button" onclick={() => provenanceInput?.click()} disabled={busy}>Choose sidecar for next model</button>
-							<button type="button" onclick={unload} disabled={busy}>Unload</button>
-						</div>
-					</details>
-				</section>
-			{/if}
-			{#if busy || error || (editorNotice && !result)}
-				<section class="status-row" aria-live="polite">
-					{#if busy}<div class="status-progress"><output class="load-progress">{loadStatus}</output><button type="button" class="secondary" onclick={cancelLoad}>Cancel</button></div>{/if}
-					{#if error}<p class="error" role="alert">{error}</p>{/if}
-					{#if editorNotice && !result}<p class="notice" role="status">{editorNotice}</p>{/if}
-				</section>
-			{/if}
-			{#if result}
-		<section class="source-bar" aria-label="Imported source status">
-			<strong>{provenance?.model.id ?? result.modelName ?? session?.source.file.name}</strong>
-			<span class="evidence-level" aria-label="Evidence level" data-evidence-level={session?.source.evidenceLevel ?? 'file-only'}>{provenance ? 'Provenance-matched · operator-attested source record' : 'File-only · source not recorded'}</span>
-			<span>{result.encodingContract?.profile?.toUpperCase()} · BOMC {result.diagnostics.version}</span>
-			<span>{result.counts.faces.toLocaleString()} faces · {result.counts.instances.toLocaleString()} instances · {result.counts.meshes.toLocaleString()} meshes</span>
-			<span class:ready>{ready ? 'Textures settled and first frame observed' : 'Preparing viewport'}</span>
-		</section>
-				{#if result.scenes.length}
-					<nav class="scene-tabs" role="tablist" aria-label="Scenes">
-						{#each result.scenes as scene}
-							<button type="button" role="tab" aria-selected={scene.id === sceneId} class:active={scene.id === sceneId} onclick={() => activateScene(scene.id)}>{scene.name || scene.id}</button>
-						{/each}
-					</nav>
-				{/if}
-			{/if}
+
+	<nav class="editor-menubar" aria-label="Editor application menu">
+		<a class="editor-wordmark" href="https://sibambo.vercel.app/" aria-label="Sibambo home"><span class="wordmark-cube" aria-hidden="true">◇</span><strong>Sibambo</strong><span>Editor</span></a>
+		<details class="menu-root">
+			<summary>File</summary>
+			<div class="menu-popover">
+				<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Open Model…<kbd>Ctrl+O</kbd></button>
+				{#if result}<button type="button" onclick={downloadCapture} disabled={!ready}>Save View…</button>{/if}
+				{#if result && !provenance}<button type="button" onclick={() => provenanceUpgradeInput?.click()} disabled={busy}>Add Provenance…</button>{/if}
+				{#if result}<span class="menu-separator"></span><button type="button" onclick={unload} disabled={busy}>Close Model</button>{/if}
+			</div>
+		</details>
+		<details class="menu-root">
+			<summary>Edit</summary>
+			<div class="menu-popover">
+				<button type="button" onclick={undoAction} disabled={!editorController?.history.canUndo}>Undo<kbd>Ctrl+Z</kbd></button>
+				<button type="button" onclick={() => { editorController?.redo(); editorController?.setTool('select'); activeTool = 'select'; activeCameraTool = null; viewport?.setOccurrencePreview(null); }} disabled={!editorController?.history.canRedo}>Redo<kbd>Ctrl+Shift+Z</kbd></button>
+			</div>
+		</details>
+		<details class="menu-root">
+			<summary>View</summary>
+			<div class="menu-popover menu-form">
+				<label>Face Style<select value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
+				<label class="menu-check"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
+				<label class="menu-check"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
+			</div>
+		</details>
+		<details class="menu-root">
+			<summary>Camera</summary>
+			<div class="menu-popover">
+				<button type="button" onclick={zoomExtents} disabled={!viewport}>Zoom Extents<kbd>Shift+Z</kbd></button>
+				<button type="button" onclick={() => viewport?.view('top')} disabled={!viewport}>Top</button>
+				<button type="button" onclick={() => viewport?.view('front')} disabled={!viewport}>Front</button>
+				<button type="button" onclick={() => viewport?.view('iso')} disabled={!viewport}>Iso</button>
+			</div>
+		</details>
+		<button type="button" class="menu-label" aria-label="Draw menu placeholder">Draw</button>
+		<details class="menu-root">
+			<summary>Tools</summary>
+			<div class="menu-popover">
+				<button type="button" onclick={() => setTool('move')} disabled={!canMoveSelected()}>Move Selected<kbd>M</kbd></button>
+			</div>
+		</details>
+		<details class="menu-root">
+			<summary>Window</summary>
+			<div class="menu-popover"><button type="button" onclick={toggleTheme}>{darkMode ? 'Light Theme' : 'Dark Theme'}</button></div>
+		</details>
+		<button type="button" class="menu-label" aria-label="Extensions menu placeholder">Extensions</button>
+		<button type="button" class="menu-label" aria-label="Help menu placeholder">Help</button>
+	</nav>
+
+	<nav class="editor-toolstrip" aria-label="Camera and selection tools">
+		<div class="tool-group">
+			<button type="button" class:active={activeTool === 'select' && activeCameraTool === null} onclick={activateSelectTool} aria-label="Select" title="Select (Space)" disabled={!result}>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6.1 1.2 3.4 6-2.6 1.4-3.3-6.1L5 18.3V3.5Z"/></svg>
+			</button>
+			<span class="tool-separator"></span>
+			<button type="button" class:active={activeCameraTool === 'orbit'} onclick={() => setCameraTool('orbit')} aria-label="Orbit" title="Orbit (O)" disabled={!result}>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.1 5.5A8 8 0 0 1 20 11h-2.2a5.9 5.9 0 0 0-9.1-3.8L11 9.5H4.7V3.2l2.4 2.3Zm9.8 13A8 8 0 0 1 4 13h2.2a5.9 5.9 0 0 0 9.1 3.8L13 14.5h6.3v6.3l-2.4-2.3Z"/></svg>
+			</button>
+			<button type="button" class:active={activeCameraTool === 'pan'} onclick={() => setCameraTool('pan')} aria-label="Pan" title="Pan (H)" disabled={!result}>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 11V6.8a1.4 1.4 0 1 1 2.8 0V10h.5V5.7a1.4 1.4 0 1 1 2.8 0V10h.5V6.6a1.4 1.4 0 1 1 2.8 0v5.8l1-1a1.5 1.5 0 0 1 2.1 2.1l-4.5 5A4.3 4.3 0 0 1 13.3 20H11a4 4 0 0 1-3.2-1.6L4.3 14a1.5 1.5 0 0 1 2.3-1.9L8.5 14V11Z"/></svg>
+			</button>
+			<button type="button" class:active={activeCameraTool === 'zoom'} onclick={() => setCameraTool('zoom')} aria-label="Zoom" title="Zoom (Z)" disabled={!result}>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 5 5M10.5 8v5M8 10.5h5"/></svg>
+			</button>
+			<button type="button" onclick={zoomExtents} aria-label="Zoom Extents" title="Zoom Extents (Shift+Z)" disabled={!result}>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><circle cx="11" cy="11" r="3.5"/><path d="m13.7 13.7 3 3"/></svg>
+			</button>
 		</div>
+		{#if result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span></div>{/if}
+	</nav>
+
+	{#if result?.scenes.length}
+		<nav class="scene-tabs" role="tablist" aria-label="Scenes">
+			{#each result.scenes as scene}
+				<button type="button" role="tab" aria-selected={scene.id === sceneId} class:active={scene.id === sceneId} onclick={() => activateScene(scene.id)}>{scene.name || scene.id}</button>
+			{/each}
+		</nav>
+	{:else}
+		<div class="scene-tabs scene-tabs-empty" aria-hidden="true"><span>No scenes</span></div>
 	{/if}
-	{#if result}
-		<div class="workspace">
+
+	<section class="editor-stage">
+		{#if result}
 			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-			<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onwheel={handleViewportWheel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace">
+			<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace">
 				<div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div>
 				{#if selectionBox}<div class="selection-box" class:intersect={selectionBox.direction === 'intersect'} style:left={`${selectionBox.left}px`} style:top={`${selectionBox.top}px`} style:width={`${selectionBox.width}px`} style:height={`${selectionBox.height}px`} aria-hidden="true"></div>{/if}
-				<p class="touch-hint" data-testid="touch-hint">Tap selects · drag empty space to orbit · two fingers pan and zoom</p>
+				{#if activeTool === 'move'}
+					<div class="move-hud" aria-label="Move controls">
+						<div class="axis-controls"><button type="button" class:chosen={moveAxis === 'x'} onclick={() => { moveAxis = moveAxis === 'x' ? null : 'x'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>X</button><button type="button" class:chosen={moveAxis === 'y'} onclick={() => { moveAxis = moveAxis === 'y' ? null : 'y'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>Y</button><button type="button" class:chosen={moveAxis === 'z'} onclick={() => { moveAxis = moveAxis === 'z' ? null : 'z'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>Z</button></div>
+						<label>Distance <input type="number" step="0.01" placeholder="metres" value={moveDistanceText} oninput={(event) => { moveDistanceText = (event.currentTarget as HTMLInputElement).value; const distance = moveDistanceText === '' ? null : Number(moveDistanceText); editorController?.setOccurrenceMoveDistance(Number.isFinite(distance) ? distance : null); refreshOccurrencePreview(); }} /></label>
+						<button type="button" class="hud-primary" onclick={() => { editorController?.commitOccurrenceMove(); activeTool = 'select'; editorController?.setTool('select'); viewport?.setOccurrencePreview(null); editorNotice = 'Move committed.'; }}>Commit</button>
+						<button type="button" onclick={() => { editorController?.cancel(); activeTool = 'select'; editorController?.setTool('select'); viewport?.setOccurrencePreview(null); editorNotice = 'Move canceled.'; }}>Cancel</button>
+					</div>
+				{/if}
+				{#if busy || error}<div class="viewport-status" class:error-state={!!error} role="status"><span>{error || loadStatus}</span>{#if busy}<button type="button" onclick={cancelLoad}>Cancel</button>{/if}</div>{/if}
+				<p class="viewport-hint">Middle-drag Orbit · Shift+Middle Pan · Wheel Zoom · O/H/Z camera tools</p>
 			</div>
-			<aside class="task-panel" aria-label="Current selection and model details">
-				<div class="current-selection" class:is-moving={activeTool === 'move'} class:has-selection={selectedOccurrenceHandles.length > 0} aria-live="polite">
-					<span class="eyebrow">CURRENT SELECTION</span>
-					<strong>{selectedOccurrenceHandles.length === 0 ? 'Select an occurrence' : selectedOccurrenceHandles.length === 1 ? '1 imported occurrence' : `${selectedOccurrenceHandles.length} imported occurrences`}</strong>
-					<span>{activeTool === 'move' ? editorController?.preview.label ?? 'Move preview' : selectedOccurrenceHandles.length === 1 ? 'Move is available for this occurrence.' : 'Left click selects · drag selects a region'}</span>
-					{#if editorNotice && activeTool !== 'move'}<span class="selection-notice">{editorNotice}</span>{/if}
-				</div>
-				<div class="mobile-loaded-controls" aria-label="Mobile model controls">
-					<div class="mobile-primary-actions">
-						<button type="button" class:chosen={activeTool === 'select'} onclick={() => setTool('select')}>Select</button>
-						{#if canMoveSelected()}<button type="button" class:chosen={activeTool === 'move'} onclick={() => setTool('move')}>Move</button>{:else}<span class="mobile-control-placeholder" aria-hidden="true"></span>{/if}
-						<button type="button" class="secondary" onclick={() => viewport?.fit()}>Fit</button>
-						<button type="button" class="secondary" onclick={undoAction} disabled={!editorController?.history.canUndo}>Undo</button>
-					</div>
-					<details class="secondary-tools">
-						<summary aria-label="More model controls">More</summary>
-						<div class="secondary-menu">
-							<button type="button" onclick={() => viewport?.view('top')}>Top</button><button type="button" onclick={() => viewport?.view('front')}>Front</button><button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
-							<label>Face style<select aria-label="Face style" value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
-							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
-							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
-							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
-							<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact · {sourceFile?.name ?? 'choose file'}</button>
-							<button type="button" onclick={() => provenanceInput?.click()} disabled={busy}>Choose sidecar for next model</button>
-							{#if provenanceFile}<output>{provenanceFile.name}</output><button type="button" onclick={clearStagedProvenance} disabled={busy}>Remove sidecar</button>{/if}
-							<button type="button" onclick={unload} disabled={busy}>Unload</button>
-						</div>
-					</details>
-				</div>
-				<details class="inspection-details" open={activeTool === 'move'}>
-					<summary>{activeTool === 'move' ? 'Move controls' : 'Model and source details'}</summary>
-					<div class="inspection-content">
-						{#if activeTool === 'move'}
-							<div class="move-controls" aria-label="Move transform controls">
-								<div class="axis-controls" aria-label="Move axis constraint">
-									<button type="button" class:chosen={moveAxis === 'x'} onclick={() => { moveAxis = moveAxis === 'x' ? null : 'x'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>X</button>
-									<button type="button" class:chosen={moveAxis === 'y'} onclick={() => { moveAxis = moveAxis === 'y' ? null : 'y'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>Y</button>
-									<button type="button" class:chosen={moveAxis === 'z'} onclick={() => { moveAxis = moveAxis === 'z' ? null : 'z'; editorController?.setOccurrenceMoveAxis(moveAxis); refreshOccurrencePreview(); }}>Z</button>
-								</div>
-								<label>Distance in metres<input type="number" step="0.01" value={moveDistanceText} oninput={(event) => { moveDistanceText = (event.currentTarget as HTMLInputElement).value; const distance = moveDistanceText === '' ? null : Number(moveDistanceText); editorController?.setOccurrenceMoveDistance(Number.isFinite(distance) ? distance : null); refreshOccurrencePreview(); }} /></label>
-								<button type="button" class="primary" onclick={() => { editorController?.commitOccurrenceMove(); activeTool = 'select'; editorController?.setTool('select'); viewport?.setOccurrencePreview(null); editorNotice = 'Move committed to the Editor working transform. The imported BOMC bytes are unchanged.'; }}>Commit Move</button>
-								<button type="button" onclick={() => { editorController?.cancel(); activeTool = 'select'; editorController?.setTool('select'); viewport?.setOccurrencePreview(null); editorNotice = 'Move canceled.'; }}>Cancel Move</button>
-							</div>
-						{/if}
-						<h1>Model inspection</h1>
-						<p>Imported BOMC bytes stay read-only. Move changes are held in this Editor session.</p>
-						<dl><dt>Artifact SHA-256</dt><dd>{session?.source.artifactSha256 ?? artifactSha256}</dd><dt>Source</dt><dd>{session?.source.file.name ?? 'Unavailable'}</dd><dt>Evidence level</dt><dd>{session?.source.evidenceLevel ?? 'file-only'}</dd><dt>Source bytes</dt><dd>{session?.source.file.size.toLocaleString() ?? 'Unavailable'}</dd><dt>Model ID</dt><dd>{session?.source.modelId ?? 'Unknown (not recorded)'}</dd><dt>Profile</dt><dd>{session?.source.profile ?? result.encodingContract?.profile ?? 'Unknown'}</dd><dt>Provenance method</dt><dd>{session?.source.provenance?.capture.method ?? 'Not provided'}</dd></dl>
-						<div class="source-evidence-actions">
-							{#if !provenance}<button type="button" class="secondary" onclick={() => provenanceUpgradeInput?.click()} disabled={busy}>Add provenance JSON to this model</button>{/if}
-							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose sidecar for next model (optional)</button>
-							{#if provenanceFile}<span>Next model sidecar: {provenanceFile.name}</span><button type="button" class="secondary" onclick={clearStagedProvenance} disabled={busy}>Remove sidecar for next model</button>{/if}
-						</div>
-						{#if picked}<section class="pick"><h2>Picked geometry</h2><dl><dt>Source mesh</dt><dd>{picked.sourceMeshIndex}</dd><dt>Definition</dt><dd>{picked.definitionIndex}</dd><dt>Occurrence</dt><dd>{picked.occurrenceHandle ?? picked.occurrenceIndex ?? 'Unavailable'}</dd><dt>Source face</dt><dd>{picked.sourceFaceIndex ?? 'Unavailable'}</dd></dl></section>{/if}
-					</div>
-				</details>
-			</aside>
-		</div>
-	{:else}
-		<div class="empty-workspace">
-			<section class="empty viewport" aria-labelledby="empty-editor-title">
+		{:else}
+			<div class="empty-workspace">
 				<div class="empty-dropzone">
-					<span class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-9 5-9-5V8l9-5 9 5v8Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg></span>
-					<p class="eyebrow">MODEL INSPECTION</p>
-					<h1 id="empty-editor-title">Open a model file</h1>
-					<p>Choose one BOMC 1.2 file to inspect it in 3D. A matching provenance JSON is optional.</p>
-					<div class="file-pickers">
-						<button type="button" class="secondary" onclick={() => sourceInput?.click()} disabled={busy}>Choose model file</button><span>{sourceFile?.name ?? 'No model file selected'}</span>
-					</div>
-					<details class="optional-provenance">
-						<summary>Source record (optional)</summary>
-						<div class="optional-provenance-content">
-							<button type="button" class="secondary" onclick={() => provenanceInput?.click()} disabled={busy}>Choose provenance JSON (optional)</button>
-							<span>{provenanceFile?.name ?? 'No provenance JSON selected'}</span>
-							{#if provenanceFile}<button type="button" class="secondary" onclick={clearStagedProvenance} disabled={busy}>Remove optional sidecar</button>{/if}
-						</div>
-					</details>
-					<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
-					<p class="validation-note">Editor checks BOMC 1.2 structure and data integrity before loading. A matching source record is shown separately.</p>
+					<span class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m21 16-9 5-9-5V8l9-5 9 5v8Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg></span>
+					<p class="eyebrow">SIBAMBO EDITOR</p>
+					<h1>Open a model</h1>
+					<p>Open a BOMC 1.2 file to inspect it with the editor camera and scene tools.</p>
+					<button type="button" class="empty-open" onclick={() => sourceInput?.click()} disabled={busy}>{busy ? 'Opening…' : 'Open Model…'}</button>
+					{#if busy}<p class="empty-status">{loadStatus}</p>{/if}
+					{#if error}<p class="empty-error" role="alert">{error}</p>{/if}
 				</div>
-			</section>
-			<aside class="guide" aria-label="Editor workflow">
-				<p class="eyebrow">EDITOR WORKSPACE</p><h2>Inspect the model</h2>
-				<p>Use the viewport to inspect the checked file and its available source evidence.</p>
-				<ol class="workflow-steps"><li><strong>Choose one BOMC file</strong><span>A matching provenance JSON is optional.</span></li><li><strong>Open the model</strong><span>File structure and data integrity are checked before loading.</span></li><li><strong>Explore the view</strong><span>Change camera, scene, display mode, and inspect source geometry.</span></li></ol>
-				<p class="note">The imported source stays read-only. Editor does not load Rooms or Benchmark sessions.</p>
-			</aside>
+			</div>
+		{/if}
+	</section>
+
+	<footer class="editor-footer">
+		<div class="footer-brand"><strong>Sibambo Editor</strong><span>BOMC workspace</span></div>
+		<div class="footer-status" aria-live="polite">
+			{#if result}
+				<span>{editorNotice || (ready ? 'Ready' : 'Preparing viewport…')}</span>
+				{#if selectedOccurrenceHandles.length}<span>{selectedOccurrenceHandles.length} selected</span>{/if}
+				{#if picked?.sourceFaceIndex !== null && picked?.sourceFaceIndex !== undefined}<span>Face {picked.sourceFaceIndex}</span>{/if}
+			{:else}<span>{busy ? loadStatus : 'No model loaded'}</span>{/if}
 		</div>
-	{/if}
+		<div class="footer-build">
+			{#if result}<span>{result.counts.faces.toLocaleString()} faces · {result.counts.instances.toLocaleString()} instances · {result.counts.meshes.toLocaleString()} meshes</span>{/if}
+			<span>Build {build.commit.slice(0, 8)} · {build.dirty ? 'dirty' : 'clean'}</span>
+		</div>
+	</footer>
 </main>
