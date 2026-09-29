@@ -40,6 +40,7 @@ import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-
 import { applyInstancedMeshVisibility, applyMaterialClipPlanes, disposeInstancedMesh, isPointClipped, isReadyAfterRenderedFrame, prepareIndexedGeometry, refreshInstancedMeshBounds } from './viewport-render-state.js';
 import { filterTrianglesBySourceFaces, partitionOccurrenceSourceFaces, resolveSourceFaceIndex } from './source-face-filter.js';
 import { shouldRenderSourceEdge } from './scene-visibility.js';
+import { visibleSceneBounds } from './visible-scene-bounds.js';
 
 export type ViewportBounds = { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
 export type ViewportSourceFaceReference = { sourceFaceIndex: number; occurrenceHandle?: string };
@@ -139,7 +140,8 @@ export class PreparedSceneViewport {
 	private readonly occurrenceTranslations = new Map<string, ViewportOccurrenceTranslation>();
 	private occurrencePreview: { handle: string; translation: ViewportOccurrenceTranslation } | null = null;
 	private selectedOccurrences = new Set<string>();
-	private initialFitPending = true;
+	private initialFitHandle = 0;
+	private initialFitComplete = false;
 	private fittedBounds: ViewportBounds = { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 	private get camera() { return this.rendererHost.camera; }
 	private get controls() { return this.rendererHost.controls; }
@@ -179,12 +181,10 @@ export class PreparedSceneViewport {
 		this.buildMeshes();
 		const selectedScene = input.scenes?.find((scene) => scene.id === input.activeSceneId) ?? input.scenes?.find((scene) => scene.isActiveAtExport);
 		if (selectedScene) this.setScene(selectedScene);
-		rendererHost.setResizeHandler((width, height) => {
-			if (this.initialFitPending && width > 0 && height > 0) {
-				this.initialFitPending = false;
-				this.fit();
-			} else if (this.selectedOccurrences.size) this.refreshSelectionHelpers();
+		rendererHost.setResizeHandler(() => {
+			if (this.initialFitComplete && this.selectedOccurrences.size) this.refreshSelectionHelpers();
 		});
+		this.fitWhenLaidOut();
 	}
 
 	static async mount(host: HTMLElement, input: PreparedSceneViewportInput, search = window.location.search): Promise<PreparedSceneViewport> {
@@ -381,10 +381,8 @@ export class PreparedSceneViewport {
 	}
 
 	fit() {
-		const bounds = new Box3();
-		for (const occurrence of this.visibleOccurrenceBounds().values()) bounds.union(occurrence);
-		if (bounds.isEmpty()) bounds.set(new Vector3(-1, -1, -1), new Vector3(1, 1, 1));
-		this.fittedBounds = { min: point(bounds.min), max: point(bounds.max) };
+		const bounds = visibleSceneBounds(this.meshRecords);
+		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 		this.focusBounds(this.fittedBounds);
 	}
 
@@ -435,6 +433,8 @@ export class PreparedSceneViewport {
 	dispose() {
 		if (this.disposed) return;
 		this.disposed = true;
+		if (this.initialFitHandle) cancelAnimationFrame(this.initialFitHandle);
+		this.initialFitHandle = 0;
 		this.canvas.removeEventListener('click', this.handleClick);
 		this.clearSelectionHelpers();
 		for (const record of new Set([...this.baseMeshRecords, ...this.filteredMeshRecords])) {
@@ -698,6 +698,21 @@ export class PreparedSceneViewport {
 	}
 
 	private renderOnce() { if (!this.disposed) this.rendererHost.renderNow(); }
+	private fitWhenLaidOut() {
+		const waitForLayout = () => {
+			this.initialFitHandle = 0;
+			if (this.disposed) return;
+			const { width, height } = this.rendererHost.layoutSize;
+			if (width <= 0 || height <= 0) {
+				this.initialFitHandle = requestAnimationFrame(waitForLayout);
+				return;
+			}
+			this.fit();
+			this.initialFitComplete = true;
+			this.checkReady();
+		};
+		this.initialFitHandle = requestAnimationFrame(waitForLayout);
+	}
 	private disposeOverlay(object: Object3D) {
 		object.traverse((child) => {
 			const renderable = child as Object3D & { geometry?: BufferGeometry; material?: Material | Material[] };
@@ -707,7 +722,7 @@ export class PreparedSceneViewport {
 		});
 	}
 	private checkReady() {
-		if (this.readyAtMs !== null) return;
+		if (this.readyAtMs !== null || !this.initialFitComplete) return;
 		const pending = [...this.requestedTextures].filter((path) => !this.settledTextures.has(path)).length;
 		if (!isReadyAfterRenderedFrame(this.firstFrameAtMs !== null, pending)) return;
 		this.readyAtMs = performance.now();

@@ -38,6 +38,7 @@ export class ViewportRendererHost {
 	private beforeRender?: () => boolean;
 	private onFrameRendered?: (frameMs: number) => void;
 	private readonly navigationEnabled: boolean;
+	get layoutSize() { return { width: this.host.clientWidth, height: this.host.clientHeight }; }
 
 	private constructor(
 		private readonly host: HTMLElement,

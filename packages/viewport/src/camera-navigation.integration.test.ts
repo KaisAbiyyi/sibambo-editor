@@ -116,6 +116,56 @@ function leftDragAfterShortcut(key: string, code: string) {
 	return trace;
 }
 
+function touchGestureTrace(pointerCount: 1 | 2) {
+	const document = new TestDocument();
+	const canvas = new TestCanvas(document);
+	const camera = new PerspectiveCamera(45, 800 / 600, 0.1, 1000);
+	camera.position.set(10, 8, 15);
+	camera.lookAt(0, 0, 0);
+	const controls = new OrbitControls(camera, canvas as any);
+	controls.enableDamping = false;
+	const initialPosition = camera.position.clone();
+	const initialTarget = controls.target.clone();
+	const initialOffset = initialPosition.clone().sub(initialTarget);
+
+	canvas.dispatchEvent({
+		type: 'pointerdown', pointerId: 1, pointerType: 'touch', button: 0,
+		clientX: 100, clientY: 100, pageX: 100, pageY: 100, shiftKey: false, ctrlKey: false, metaKey: false
+	});
+	if (pointerCount === 1) {
+		document.dispatchEvent({
+			type: 'pointermove', pointerId: 1, pointerType: 'touch', button: 0,
+			clientX: 155, clientY: 140, pageX: 155, pageY: 140, shiftKey: false, ctrlKey: false, metaKey: false
+		});
+	} else {
+		canvas.dispatchEvent({
+			type: 'pointerdown', pointerId: 2, pointerType: 'touch', button: 0,
+			clientX: 200, clientY: 100, pageX: 200, pageY: 100, shiftKey: false, ctrlKey: false, metaKey: false
+		});
+		document.dispatchEvent({
+			type: 'pointermove', pointerId: 1, pointerType: 'touch', button: 0,
+			clientX: 110, clientY: 110, pageX: 110, pageY: 110, shiftKey: false, ctrlKey: false, metaKey: false
+		});
+		document.dispatchEvent({
+			type: 'pointermove', pointerId: 2, pointerType: 'touch', button: 0,
+			clientX: 230, clientY: 90, pageX: 230, pageY: 90, shiftKey: false, ctrlKey: false, metaKey: false
+		});
+		document.dispatchEvent({ type: 'pointerup', pointerId: 2, pointerType: 'touch', button: 0 });
+	}
+	document.dispatchEvent({ type: 'pointerup', pointerId: 1, pointerType: 'touch', button: 0 });
+	const trace = {
+		touchAction: canvas.style.touchAction,
+		cameraPosition: camera.position.clone(),
+		target: controls.target.clone(),
+		cameraOffset: camera.position.clone().sub(controls.target),
+		initialPosition,
+		initialTarget,
+		initialOffset
+	};
+	controls.dispose();
+	return trace;
+}
+
 describe('OrbitControls pointer input trace', () => {
 	test('middle orbits and Shift+middle pans using the installed OrbitControls modifier mapping', () => {
 		const orbit = middleDragTrace(false);
@@ -139,5 +189,17 @@ describe('OrbitControls pointer input trace', () => {
 		const orbitShortcut = leftDragAfterShortcut('r', 'KeyR');
 		expect(orbitShortcut.target.distanceTo(orbitShortcut.initialTarget)).toBeCloseTo(0);
 		expect(orbitShortcut.cameraPosition.distanceTo(orbitShortcut.initialPosition)).toBeGreaterThan(0.1);
+	});
+
+	test('one touch orbits and two touches pan and pinch without changing the page touch policy', () => {
+		const orbit = touchGestureTrace(1);
+		expect(orbit.touchAction).toBe('none');
+		expect(orbit.target.distanceTo(orbit.initialTarget)).toBeCloseTo(0);
+		expect(orbit.cameraPosition.distanceTo(orbit.initialPosition)).toBeGreaterThan(0.1);
+
+		const panAndPinch = touchGestureTrace(2);
+		expect(panAndPinch.touchAction).toBe('none');
+		expect(panAndPinch.target.distanceTo(panAndPinch.initialTarget)).toBeGreaterThan(0.1);
+		expect(panAndPinch.cameraOffset.length()).not.toBeCloseTo(panAndPinch.initialOffset.length());
 	});
 });
