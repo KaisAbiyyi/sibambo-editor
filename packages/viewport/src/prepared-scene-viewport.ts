@@ -197,7 +197,7 @@ export class PreparedSceneViewport {
 		rendererHost.setResizeHandler(() => {
 			if (this.initialFitComplete && this.selectedOccurrences.size) this.refreshSelectionHelpers();
 		});
-		this.fitWhenLaidOut();
+		this.fitWhenLaidOut(!(selectedScene?.useCamera && selectedScene.camera));
 	}
 
 	static async mount(host: HTMLElement, input: PreparedSceneViewportInput, search = window.location.search): Promise<PreparedSceneViewport> {
@@ -815,7 +815,7 @@ export class PreparedSceneViewport {
 		}) ?? null;
 	}
 	private renderOnce() { if (!this.disposed) this.rendererHost.renderNow(); }
-	private fitWhenLaidOut() {
+	private fitWhenLaidOut(shouldFit = true) {
 		const waitForLayout = () => {
 			this.initialFitHandle = 0;
 			if (this.disposed) return;
@@ -824,7 +824,13 @@ export class PreparedSceneViewport {
 				this.initialFitHandle = requestAnimationFrame(waitForLayout);
 				return;
 			}
-			this.fit();
+			if (shouldFit) this.fit();
+			else {
+				const visibleBounds = visibleSceneBounds(this.meshRecords);
+				if (visibleBounds) this.fittedBounds = visibleBounds;
+				this.rendererHost.updateClipRange(this.fittedBounds);
+				this.renderOnce();
+			}
 			this.initialFitComplete = true;
 			this.checkReady();
 		};
