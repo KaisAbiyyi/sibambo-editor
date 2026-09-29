@@ -1,4 +1,4 @@
-export type EditorTool = 'select' | 'move' | 'orbit' | 'pan' | 'tape' | 'rectangle' | 'circle' | 'pushpull';
+export type EditorTool = 'select' | 'orbit' | 'pan' | 'tape' | 'rectangle' | 'circle' | 'pushpull';
 export type EditorPoint = [number, number, number];
 
 export type EditorPlane = {

@@ -1,5 +1,5 @@
 import { ShapeUtils, Vector2, Vector3 } from 'three';
-import type { EditableEntity, EditableExtrusion, EditablePlanarFace, EditorPlane, EditorPoint } from '../EditorState';
+import type { EditableExtrusion, EditablePlanarFace, EditorPlane, EditorPoint } from '../EditorState';
 
 export type EditableGeometryData = { positions: Float32Array; indices: Uint32Array; triangleCount: number };
 
@@ -120,29 +120,6 @@ export function dimensions(face: EditablePlanarFace) {
 	return {
 		width: Math.max(...coordinates.map(([u]) => u)) - Math.min(...coordinates.map(([u]) => u)),
 		height: Math.max(...coordinates.map(([, v]) => v)) - Math.min(...coordinates.map(([, v]) => v))
-	};
-}
-
-export function translateFace(face: EditablePlanarFace, delta: EditorPoint): EditablePlanarFace {
-	const d = vector(delta);
-	return {
-		...face,
-		plane: {
-			...face.plane,
-			origin: tuple(vector(face.plane.origin).add(d))
-		},
-		outer: face.outer.map((point) => tuple(vector(point).add(d))),
-		holes: face.holes.map((hole) => hole.map((point) => tuple(vector(point).add(d))))
-	};
-}
-
-export function translateEntity(entity: EditableEntity, delta: EditorPoint): EditableEntity {
-	if (entity.kind === 'face') {
-		return translateFace(entity, delta);
-	}
-	return {
-		...entity,
-		base: translateFace(entity.base, delta)
 	};
 }
 

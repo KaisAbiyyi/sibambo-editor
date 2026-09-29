@@ -2035,7 +2035,6 @@ export function decodeScenes(
 		const { activeSectionPlaneIds, ...primitiveVisibility } = primitive;
 		const hasSectionCuts = activeClipPlaneIndices.length > 0 || activeSectionPlaneIds.length > 0;
 		const activeRecords = resolveActiveClipPlanes(activeClipPlaneIndices, activeSectionPlaneIds);
-		addClipPlaneWork(activeRecords.length);
 		const hasUnsupportedScope = activeRecords.some((plane) => Boolean(plane.ownerDefinitionId || plane.ownerInstanceId));
 		scenes.push({
 			id: stableId,

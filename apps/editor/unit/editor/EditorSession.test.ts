@@ -24,34 +24,8 @@ describe('EditorSession ownership', () => {
 
 		expect(session.source.artifactSha256).toBe(artifactSha256);
 		expect(session.source.modelId).toBe('source-model');
-		expect(session.source.evidenceLevel).toBe('provenance-matched');
-		expect(session.source.provenance?.artifact.sha256).toBe(artifactSha256);
 		expect(session.editableGeometry.values()).toEqual([face]);
 		expect(new Uint8Array(await file.arrayBuffer())).toEqual(sourceBytes);
-	});
-
-	test('stores file-only provenance explicitly as null without inventing a model ID', () => {
-		const file = new File([new Uint8Array([1, 2, 3])], 'source.bomc');
-		const session = new EditorSession(file, null, artifactSha256, 'exact');
-
-		expect(session.source.evidenceLevel).toBe('file-only');
-		expect(session.source.provenance).toBeNull();
-		expect(session.source.modelId).toBeNull();
-		expect(session.source.profile).toBe('exact');
-	});
-
-	test('attaches matching provenance to the session only after profile and hash checks', () => {
-		const file = new File([new Uint8Array([1, 2, 3])], 'source.bomc');
-		const session = new EditorSession(file, null, artifactSha256, 'exact');
-		session.attachProvenance(provenance);
-
-		expect(session.source.evidenceLevel).toBe('provenance-matched');
-		expect(session.source.provenance?.model.id).toBe('source-model');
-
-		const fileOnly = new EditorSession(file, null, artifactSha256, 'exact');
-		expect(() => fileOnly.attachProvenance({ ...provenance, artifact: { ...provenance.artifact, profile: 'research' } })).toThrow(/profile/i);
-		expect(fileOnly.source.evidenceLevel).toBe('file-only');
-		expect(fileOnly.source.provenance).toBeNull();
 	});
 
 	test('rejects an artifact hash that differs from imported provenance', () => {

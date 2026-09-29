@@ -7,8 +7,6 @@ import {
 	createRectangle,
 	extrudeFace,
 	faceArea,
-	translateEntity,
-	translateFace,
 	triangulateEditableFace,
 	triangulateExtrusion
 } from '../../../src/lib/editor/geometry/editable-geometry';
@@ -90,29 +88,6 @@ describe('push/pull geometry', () => {
 		};
 		const geometry = triangulateExtrusion(extrudeFace(face, 2)!);
 		expect(geometry.triangleCount).toBe(20);
-	});
-});
-
-describe('translation geometry', () => {
-	const plane = createPlane([0, 0, 0], [0, 1, 0]);
-	const face = createRectangle('rect', plane, [0, 0, 0], [2, 0, 3]);
-
-	test('translates planar face coordinates and plane origin by delta', () => {
-		const delta: EditorPoint = [3, 1, -2];
-		const moved = translateFace(face, delta);
-		expect(moved.plane.origin).toEqual([3, 1, -2]);
-		expect(moved.outer[0]).toEqual([3, 1, -2]);
-	});
-
-	test('translates extrusion entity by translating base face', () => {
-		const extrusion = extrudeFace(face, 2)!;
-		const delta: EditorPoint = [-1, 4, 2];
-		const moved = translateEntity(extrusion, delta);
-		expect(moved.kind).toBe('extrusion');
-		if (moved.kind === 'extrusion') {
-			expect(moved.base.plane.origin).toEqual([-1, 4, 2]);
-			expect(moved.distance).toBe(2);
-		}
 	});
 });
 

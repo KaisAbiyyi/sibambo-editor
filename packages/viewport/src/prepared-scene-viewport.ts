@@ -1,9 +1,6 @@
 import {
 	BufferAttribute,
 	BufferGeometry,
-	Box3,
-	Box3Helper,
-	Color,
 	Float32BufferAttribute,
 	InstancedMesh,
 	LineBasicMaterial,
@@ -33,11 +30,10 @@ import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 import { RuntimeAssetResolver } from './runtime-asset-resolver.js';
 import { RuntimeMaterialCache } from './source-material-cache.js';
 import { buildPreparedInstancedSurfaceGroups } from './prepared-surface.js';
-import { orbitCameraDrag, panCameraDrag, type CameraPose, type NavigationTool } from './camera-navigation.js';
 import { SceneVisibilityIndex } from './scene-visibility.js';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-program.js';
-import { applyInstancedMeshVisibility, applyMaterialClipPlanes, disposeInstancedMesh, isPointClipped, isReadyAfterRenderedFrame, prepareIndexedGeometry, refreshInstancedMeshBounds } from './viewport-render-state.js';
+import { applyInstancedMeshVisibility, applyMaterialClipPlanes, disposeInstancedMesh, isPointClipped, isReadyAfterRenderedFrame, prepareIndexedGeometry } from './viewport-render-state.js';
 import { filterTrianglesBySourceFaces, partitionOccurrenceSourceFaces, resolveSourceFaceIndex } from './source-face-filter.js';
 import { shouldRenderSourceEdge } from './scene-visibility.js';
 
@@ -61,9 +57,7 @@ export type ViewportPick = {
 	occurrenceHandle: string | null;
 	triangleIndex: number | null;
 	sourceFaceIndex: number | null;
-	point: [number, number, number];
 };
-export type ViewportOccurrenceTranslation = readonly [number, number, number];
 
 type MeshRecord = {
 	mesh: InstancedMesh;
@@ -94,12 +88,7 @@ type MeshRecord = {
 	sourceOccurrenceIndices: number[];
 	computeNormalsFromSource: boolean;
 };
-type EdgeRecord = {
-	lines: LineSegments;
-	visibleSceneSignatures?: string[];
-	basePositions: Float32Array;
-	segmentStartsByOccurrence: Map<string, number[]>;
-};
+type EdgeRecord = { lines: LineSegments; visibleSceneSignatures?: string[] };
 
 /** App-neutral prepared-scene viewport. Domain overlays and mutable editor tools remain caller-owned. */
 export class PreparedSceneViewport {
@@ -116,7 +105,6 @@ export class PreparedSceneViewport {
 	private readonly baseMeshRecords: MeshRecord[] = [];
 	private readonly filteredMeshRecords: MeshRecord[] = [];
 	private readonly edgeRecords: EdgeRecord[] = [];
-	private readonly selectionHelpers: Box3Helper[] = [];
 	private readonly domainOverlays = new Map<string, Object3D>();
 	private readonly requestedTextures = new Set<string>();
 	private readonly settledTextures = new Set<string>();
@@ -136,10 +124,6 @@ export class PreparedSceneViewport {
 	private pixelRatio = 1;
 	private onPick?: (pick: ViewportPick) => void;
 	private onReady?: (observation: RendererObservation) => void;
-	private readonly occurrenceTranslations = new Map<string, ViewportOccurrenceTranslation>();
-	private occurrencePreview: { handle: string; translation: ViewportOccurrenceTranslation } | null = null;
-	private selectedOccurrences = new Set<string>();
-	private initialFitPending = true;
 	private fittedBounds: ViewportBounds = { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 	private get camera() { return this.rendererHost.camera; }
 	private get controls() { return this.rendererHost.controls; }
@@ -177,14 +161,9 @@ export class PreparedSceneViewport {
 
 		for (const asset of input.appearance?.assets ?? []) this.assetResolver.registerAsset(asset.path, asset.bytes);
 		this.buildMeshes();
+		this.fit();
 		const selectedScene = input.scenes?.find((scene) => scene.id === input.activeSceneId) ?? input.scenes?.find((scene) => scene.isActiveAtExport);
 		if (selectedScene) this.setScene(selectedScene);
-		rendererHost.setResizeHandler((width, height) => {
-			if (this.initialFitPending && width > 0 && height > 0) {
-				this.initialFitPending = false;
-				this.fit();
-			} else if (this.selectedOccurrences.size) this.refreshSelectionHelpers();
-		});
 	}
 
 	static async mount(host: HTMLElement, input: PreparedSceneViewportInput, search = window.location.search): Promise<PreparedSceneViewport> {
@@ -253,138 +232,16 @@ export class PreparedSceneViewport {
 
 	setOnPick(handler?: (pick: ViewportPick) => void) { this.onPick = handler; }
 	setOnReady(handler?: (observation: RendererObservation) => void) { this.onReady = handler; if (this.readyAtMs !== null) handler?.(this.observe()); }
-	setOrbitControlsEnabled(enabled: boolean) { this.rendererHost.setOrbitControlsEnabled(enabled); }
-	getCameraPose(): CameraPose { return { position: this.camera.position.clone(), target: this.controls.target.clone() }; }
-	setCameraPose(pose: CameraPose) {
-		this.camera.position.copy(pose.position);
-		this.controls.target.copy(pose.target);
-		this.camera.lookAt(pose.target);
-		this.controls.update();
-		this.renderOnce();
-	}
-	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
-		this.setCameraPose(tool === 'orbit'
-			? orbitCameraDrag(start, deltaX, deltaY)
-			: panCameraDrag(this.camera, start, deltaX, deltaY, viewportHeight));
-	}
-	moveDeltaForScreenDrag(deltaX: number, deltaY: number, viewportHeight: number): [number, number, number] {
-		const direction = this.controls.target.clone().sub(this.camera.position).normalize();
-		const right = new Vector3().crossVectors(direction, this.camera.up).normalize();
-		const up = new Vector3().crossVectors(right, direction).normalize();
-		const distance = this.camera.position.distanceTo(this.controls.target);
-		const verticalSpan = this.camera instanceof PerspectiveCamera
-			? 2 * Math.tan(this.camera.fov * Math.PI / 360) * distance
-			: this.camera instanceof OrthographicCamera ? Math.abs(this.camera.top - this.camera.bottom) / Math.max(this.camera.zoom, 0.0001) : 2;
-		const worldPerPixel = verticalSpan / Math.max(viewportHeight, 1);
-		return right.multiplyScalar(deltaX * worldPerPixel).add(up.multiplyScalar(-deltaY * worldPerPixel)).toArray() as [number, number, number];
-	}
-	zoomAt(clientX: number, clientY: number, deltaY: number) {
-		const rect = this.canvas.getBoundingClientRect();
-		if (!rect.width || !rect.height || !Number.isFinite(deltaY)) return;
-		this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-		this.raycaster.setFromCamera(this.pointer, this.camera);
-		const viewDirection = this.controls.target.clone().sub(this.camera.position).normalize();
-		const plane = new Plane().setFromNormalAndCoplanarPoint(viewDirection, this.controls.target);
-		const anchor = this.raycaster.ray.intersectPlane(plane, new Vector3());
-		if (!anchor) return;
-		const factor = Math.max(0.25, Math.min(4, Math.exp(deltaY * 0.001)));
-		if (this.camera instanceof OrthographicCamera) {
-			const shift = anchor.clone().sub(this.controls.target).multiplyScalar(1 - factor);
-			this.camera.position.add(shift);
-			this.controls.target.add(shift);
-			this.camera.zoom = Math.max(0.02, Math.min(1000, this.camera.zoom / factor));
-			this.camera.updateProjectionMatrix();
-		} else {
-			this.camera.position.copy(anchor.clone().add(this.camera.position.clone().sub(anchor).multiplyScalar(factor)));
-			this.controls.target.copy(anchor.clone().add(this.controls.target.clone().sub(anchor).multiplyScalar(factor)));
-		}
-		this.camera.lookAt(this.controls.target);
-		this.controls.update();
-		this.renderOnce();
-	}
-	pickAt(clientX: number, clientY: number): ViewportPick | null {
-		const rect = this.canvas.getBoundingClientRect();
-		if (!rect.width || !rect.height) return null;
-		this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-		this.raycaster.setFromCamera(this.pointer, this.camera);
-		const records = new Map(this.meshRecords.map((record) => [record.mesh, record]));
-		const hit = this.raycaster.intersectObjects(this.meshRecords.map((record) => record.mesh), false)
-			.find((candidate) => {
-				const record = records.get(candidate.object as InstancedMesh);
-				return Boolean(record && record.mesh.visible && !isPointClipped(candidate.point, this.activeClipPlanes)
-					&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
-			});
-		if (!hit) return null;
-		const record = records.get(hit.object as InstancedMesh);
-		if (!record) return null;
-		const triangleIndex = hit.faceIndex ?? null;
-		return {
-			sourceMeshIndex: record.sourceMeshIndex,
-			definitionIndex: record.definitionIndex,
-			occurrenceIndex: typeof hit.instanceId === 'number' ? record.sourceOccurrenceIndices[hit.instanceId] ?? null : null,
-			occurrenceHandle: typeof hit.instanceId === 'number' ? record.occurrenceHandles?.[hit.instanceId] ?? null : null,
-			triangleIndex,
-			sourceFaceIndex: resolveSourceFaceIndex(triangleIndex, record.visibleSourceFaceIndicesByTriangle ?? record.sourceFaceIndicesByTriangle),
-			point: [hit.point.x, hit.point.y, hit.point.z]
-		};
-	}
-	hasOccurrence(occurrenceHandle: string) {
-		return this.baseMeshRecords.some((record) => record.occurrenceHandles?.includes(occurrenceHandle));
-	}
-	occurrenceAnchor(occurrenceHandle: string): [number, number, number] | null {
-		const bounds = this.occurrenceBounds(occurrenceHandle, false);
-		if (!bounds || bounds.isEmpty()) return null;
-		const center = bounds.getCenter(new Vector3());
-		return [center.x, center.y, center.z];
-	}
-	focusOccurrence(occurrenceHandle: string) {
-		const bounds = this.occurrenceBounds(occurrenceHandle, true);
-		if (!bounds || bounds.isEmpty()) return false;
-		const center = bounds.getCenter(new Vector3());
-		const offset = this.camera.position.clone().sub(this.controls.target);
-		this.setCameraPose({ position: center.clone().add(offset), target: center });
-		return true;
-	}
-	selectOccurrencesInRect(startX: number, startY: number, endX: number, endY: number) {
-		const leftToRight = endX >= startX;
-		const selection = normalizeRect(startX, startY, endX, endY);
-		const canvasRect = this.canvas.getBoundingClientRect();
-		const selected = new Set<string>();
-		for (const [handle, bounds] of this.visibleOccurrenceBounds()) {
-			const screen = projectBounds(bounds, this.camera, canvasRect);
-			if (leftToRight
-				? screen.left >= selection.left && screen.right <= selection.right && screen.top >= selection.top && screen.bottom <= selection.bottom
-				: screen.right >= selection.left && screen.left <= selection.right && screen.bottom >= selection.top && screen.top <= selection.bottom) selected.add(handle);
-		}
-		return [...selected];
-	}
-	setSelectedOccurrences(occurrenceHandles: readonly string[]) {
-		this.selectedOccurrences = new Set(occurrenceHandles.filter((handle) => this.hasOccurrence(handle)));
-		this.refreshSelectionHelpers();
-		this.renderOnce();
-	}
-	setOccurrenceTransforms(transforms: ReadonlyMap<string, ViewportOccurrenceTranslation>) {
-		const previous = new Map(this.occurrenceTranslations);
-		this.occurrenceTranslations.clear();
-		for (const [handle, translation] of transforms) {
-			if (this.hasOccurrence(handle) && translation.every(Number.isFinite)) this.occurrenceTranslations.set(handle, [...translation] as ViewportOccurrenceTranslation);
-		}
-		const changed = new Set([...previous.keys(), ...this.occurrenceTranslations.keys()]);
-		this.applyOccurrenceTransforms(changed);
-	}
-	setOccurrencePreview(occurrenceHandle: string | null, translation?: ViewportOccurrenceTranslation | null) {
-		const previousHandle = this.occurrencePreview?.handle;
-		this.occurrencePreview = occurrenceHandle && translation && this.hasOccurrence(occurrenceHandle)
-			? { handle: occurrenceHandle, translation: [...translation] as ViewportOccurrenceTranslation } : null;
-		const changed = new Set([previousHandle, this.occurrencePreview?.handle].filter((handle): handle is string => !!handle));
-		this.applyOccurrenceTransforms(changed);
-	}
 
 	fit() {
-		const bounds = new Box3();
-		for (const occurrence of this.visibleOccurrenceBounds().values()) bounds.union(occurrence);
-		if (bounds.isEmpty()) bounds.set(new Vector3(-1, -1, -1), new Vector3(1, 1, 1));
-		this.fittedBounds = { min: point(bounds.min), max: point(bounds.max) };
+		let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+		for (const group of this.input.scene.groups) {
+			const world = group.worldBounds;
+			minX = Math.min(minX, world.min[0]); minY = Math.min(minY, world.min[1]); minZ = Math.min(minZ, world.min[2]);
+			maxX = Math.max(maxX, world.max[0]); maxY = Math.max(maxY, world.max[1]); maxZ = Math.max(maxZ, world.max[2]);
+		}
+		if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) { minX = minY = minZ = -1; maxX = maxY = maxZ = 1; }
+		this.fittedBounds = { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
 		this.focusBounds(this.fittedBounds);
 	}
 
@@ -436,7 +293,6 @@ export class PreparedSceneViewport {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.canvas.removeEventListener('click', this.handleClick);
-		this.clearSelectionHelpers();
 		for (const record of new Set([...this.baseMeshRecords, ...this.filteredMeshRecords])) {
 			this.scene3d.remove(record.mesh);
 			disposeInstancedMesh(record.mesh);
@@ -534,22 +390,15 @@ export class PreparedSceneViewport {
 		for (const edgeSet of edgeSets) {
 			if (this.activeSceneSignature && edgeSet.visibleSceneSignatures?.length && !edgeSet.visibleSceneSignatures.includes(this.activeSceneSignature)) continue;
 			const coordinates: number[] = [];
-			const segmentStartsByOccurrence = new Map<string, number[]>();
 			const occurrenceCount = Math.floor(edgeSet.matrices.length / 16);
 			for (let edgeIndex = 0; edgeIndex < edgeSet.positions.length / 6; edgeIndex++) {
 				if (!shouldRenderSourceEdge(edgeSet.flags[edgeIndex], this.activeScene, this.activeSceneSignature, edgeSet.visibleSceneSignatures)) continue;
 				const localA = new Vector3(edgeSet.positions[edgeIndex * 6], edgeSet.positions[edgeIndex * 6 + 1], edgeSet.positions[edgeIndex * 6 + 2]);
 				const localB = new Vector3(edgeSet.positions[edgeIndex * 6 + 3], edgeSet.positions[edgeIndex * 6 + 4], edgeSet.positions[edgeIndex * 6 + 5]);
 				for (let occurrence = 0; occurrence < occurrenceCount; occurrence++) {
-					const handle = edgeSet.occurrenceHandles?.[occurrence];
-					if (!this.occurrenceVisible(edgeSet.occurrenceHierarchyIndices?.[occurrence], edgeSet.occurrenceInstanceIndices?.[occurrence], edgeSet.occurrenceTagIndices?.[occurrence], compiled, handle, visibilityIndex)) continue;
+					if (!this.occurrenceVisible(edgeSet.occurrenceHierarchyIndices?.[occurrence], edgeSet.occurrenceInstanceIndices?.[occurrence], edgeSet.occurrenceTagIndices?.[occurrence], compiled, edgeSet.occurrenceHandles?.[occurrence], visibilityIndex)) continue;
 					const matrix = new Matrix4().fromArray(edgeSet.matrices, occurrence * 16);
 					const a = localA.clone().applyMatrix4(matrix); const b = localB.clone().applyMatrix4(matrix);
-					if (handle) {
-						const starts = segmentStartsByOccurrence.get(handle) ?? [];
-						starts.push(coordinates.length / 3);
-						segmentStartsByOccurrence.set(handle, starts);
-					}
 					coordinates.push(a.x, a.y, a.z, b.x, b.y, b.z);
 				}
 			}
@@ -561,9 +410,8 @@ export class PreparedSceneViewport {
 			const edges = new LineSegments(geometry, material);
 			edges.renderOrder = 2;
 			this.scene3d.add(edges);
-			this.edgeRecords.push({ lines: edges, visibleSceneSignatures: edgeSet.visibleSceneSignatures, basePositions: Float32Array.from(coordinates), segmentStartsByOccurrence });
+			this.edgeRecords.push({ lines: edges, visibleSceneSignatures: edgeSet.visibleSceneSignatures });
 		}
-		this.applyOccurrenceTransforms(new Set([...this.occurrenceTranslations.keys(), ...(this.occurrencePreview ? [this.occurrencePreview.handle] : [])]));
 	}
 
 	private applyGeometryMode() {
@@ -661,7 +509,6 @@ export class PreparedSceneViewport {
 			record.visibleOccurrenceCount = record.visibleOccurrenceIndices.size;
 			record.mesh.visible = !isBaseHiddenForIsolation && signatureVisible && record.baseIndices.length > 0 && record.visibleOccurrenceCount > 0;
 		}
-		this.applyOccurrenceTransforms(new Set([...this.occurrenceTranslations.keys(), ...(this.occurrencePreview ? [this.occurrencePreview.handle] : [])]));
 	}
 
 	private occurrenceVisible(hierarchyIndex?: number, instanceIndex?: number, tagIndex?: number, compiled?: Uint8Array | null, handle?: string, visibilityIndex?: SceneVisibilityIndex | null) {
@@ -716,136 +563,33 @@ export class PreparedSceneViewport {
 
 	private handleClick = (event: MouseEvent) => {
 		if (!this.onPick) return;
-		const pick = this.pickAt(event.clientX, event.clientY);
-		if (pick) this.onPick(pick);
+		const rect = this.canvas.getBoundingClientRect();
+		this.pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+		this.raycaster.setFromCamera(this.pointer, this.camera);
+		const records = new Map(this.meshRecords.map((record) => [record.mesh, record]));
+		const hit = this.raycaster.intersectObjects(this.meshRecords.map((record) => record.mesh), false)
+			.find((candidate) => {
+				const record = records.get(candidate.object as InstancedMesh);
+				return Boolean(record && record.mesh.visible && !isPointClipped(candidate.point, this.activeClipPlanes)
+					&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
+			});
+		if (!hit) return;
+		const record = records.get(hit.object as InstancedMesh);
+		if (!record) return;
+		const triangleIndex = hit.faceIndex ?? null;
+		const sourceFaceIndex = resolveSourceFaceIndex(triangleIndex, record.visibleSourceFaceIndicesByTriangle ?? record.sourceFaceIndicesByTriangle);
+		this.onPick({
+			sourceMeshIndex: record.sourceMeshIndex,
+			definitionIndex: record.definitionIndex,
+			occurrenceIndex: typeof hit.instanceId === 'number' ? record.sourceOccurrenceIndices[hit.instanceId] ?? null : null,
+			occurrenceHandle: typeof hit.instanceId === 'number' ? record.occurrenceHandles?.[hit.instanceId] ?? null : null,
+			triangleIndex,
+			sourceFaceIndex
+		});
 	};
-
-	private occurrenceTranslation(handle: string): ViewportOccurrenceTranslation {
-		if (this.occurrencePreview?.handle === handle) return this.occurrencePreview.translation;
-		return this.occurrenceTranslations.get(handle) ?? [0, 0, 0];
-	}
-
-	private occurrenceBounds(handle: string, visibleOnly: boolean) {
-		const bounds = new Box3();
-		const translation = this.occurrenceTranslation(handle);
-		const translate = new Matrix4().makeTranslation(translation[0], translation[1], translation[2]);
-		for (const record of this.meshRecords) {
-			if (visibleOnly && !record.mesh.visible) continue;
-			const indices = record.occurrenceHandles?.flatMap((item, index) => item === handle && (!visibleOnly || record.visibleOccurrenceIndices.has(index)) ? [index] : []) ?? [];
-			if (!indices.length) continue;
-			if (!record.mesh.geometry.boundingBox) record.mesh.geometry.computeBoundingBox();
-			const localBounds = record.mesh.geometry.boundingBox;
-			if (!localBounds || localBounds.isEmpty()) continue;
-			for (const index of indices) {
-				const matrix = new Matrix4().fromArray(record.baseMatrices, index * 16).premultiply(translate);
-				bounds.union(localBounds.clone().applyMatrix4(matrix));
-			}
-		}
-		return bounds.isEmpty() ? null : bounds;
-	}
-
-	private visibleOccurrenceBounds() {
-		const boundsByHandle = new Map<string, Box3>();
-		for (const record of this.meshRecords) {
-			if (!record.mesh.visible || !record.occurrenceHandles?.length) continue;
-			if (!record.mesh.geometry.boundingBox) record.mesh.geometry.computeBoundingBox();
-			const localBounds = record.mesh.geometry.boundingBox;
-			if (!localBounds || localBounds.isEmpty()) continue;
-			for (const index of record.visibleOccurrenceIndices) {
-				const handle = record.occurrenceHandles[index] ?? `viewport:anonymous:${record.geometryGroupIndex}:${index}`;
-				const translation = this.occurrenceTranslation(handle);
-				const transform = new Matrix4().makeTranslation(translation[0], translation[1], translation[2]);
-				const matrix = new Matrix4().fromArray(record.baseMatrices, index * 16).premultiply(transform);
-				const bounds = boundsByHandle.get(handle) ?? new Box3();
-				bounds.union(localBounds.clone().applyMatrix4(matrix));
-				boundsByHandle.set(handle, bounds);
-			}
-		}
-		return boundsByHandle;
-	}
-
-	private applyOccurrenceTransforms(handles: ReadonlySet<string>) {
-		if (!handles.size) return;
-		for (const record of this.meshRecords) {
-			let changed = false;
-			const matrices = record.mesh.instanceMatrix.array as Float32Array;
-			for (let index = 0; index < record.mesh.count; index += 1) {
-				const handle = record.occurrenceHandles?.[index];
-				if (!handle || !handles.has(handle) || !record.visibleOccurrenceIndices.has(index)) continue;
-				const translation = this.occurrenceTranslation(handle);
-				new Matrix4().fromArray(record.baseMatrices, index * 16)
-					.premultiply(new Matrix4().makeTranslation(translation[0], translation[1], translation[2]))
-					.toArray(matrices, index * 16);
-				changed = true;
-			}
-			if (changed) {
-				record.mesh.instanceMatrix.needsUpdate = true;
-				refreshInstancedMeshBounds(record.mesh);
-			}
-		}
-		for (const record of this.edgeRecords) {
-			const attribute = record.lines.geometry.getAttribute('position');
-			if (!attribute) continue;
-			const positions = attribute.array as Float32Array;
-			let changed = false;
-			for (const handle of handles) {
-				const starts = record.segmentStartsByOccurrence.get(handle);
-				if (!starts) continue;
-				const translation = this.occurrenceTranslation(handle);
-				for (const start of starts) {
-					for (let vertex = start; vertex < start + 2; vertex += 1) {
-						for (let axis = 0; axis < 3; axis += 1) positions[vertex * 3 + axis] = record.basePositions[vertex * 3 + axis] + translation[axis];
-					}
-				}
-				changed = true;
-			}
-			if (changed) {
-				attribute.needsUpdate = true;
-				record.lines.geometry.computeBoundingBox();
-				record.lines.geometry.computeBoundingSphere();
-			}
-		}
-		this.refreshSelectionHelpers();
-		this.renderOnce();
-	}
-
-	private refreshSelectionHelpers() {
-		this.clearSelectionHelpers();
-		for (const handle of this.selectedOccurrences) {
-			const bounds = this.occurrenceBounds(handle, true);
-			if (!bounds) continue;
-			bounds.expandByScalar(Math.max(bounds.getSize(new Vector3()).length() * 0.002, 0.002));
-			const helper = new Box3Helper(bounds, new Color('#f06a4f'));
-			helper.renderOrder = 12;
-			this.selectionHelpers.push(helper);
-			this.scene3d.add(helper);
-		}
-	}
-
-	private clearSelectionHelpers() {
-		for (const helper of this.selectionHelpers) {
-			this.scene3d.remove(helper);
-			helper.geometry.dispose();
-			(helper.material as LineBasicMaterial).dispose();
-		}
-		this.selectionHelpers.length = 0;
-	}
 }
 
 function point(value: Vector3) { return { x: value.x, y: value.y, z: value.z }; }
-function normalizeRect(x1: number, y1: number, x2: number, y2: number) {
-	return { left: Math.min(x1, x2), right: Math.max(x1, x2), top: Math.min(y1, y2), bottom: Math.max(y1, y2) };
-}
-function projectBounds(bounds: Box3, camera: PerspectiveCamera | OrthographicCamera, canvasRect: DOMRect) {
-	const min = bounds.min, max = bounds.max;
-	const corners = [
-		new Vector3(min.x, min.y, min.z), new Vector3(min.x, min.y, max.z), new Vector3(min.x, max.y, min.z), new Vector3(min.x, max.y, max.z),
-		new Vector3(max.x, min.y, min.z), new Vector3(max.x, min.y, max.z), new Vector3(max.x, max.y, min.z), new Vector3(max.x, max.y, max.z)
-	].map((corner) => corner.project(camera));
-	const xs = corners.map((corner) => canvasRect.left + (corner.x + 1) * canvasRect.width / 2);
-	const ys = corners.map((corner) => canvasRect.top + (1 - corner.y) * canvasRect.height / 2);
-	return { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
-}
 function subset(values: ArrayLike<string | number> | undefined, indices: number[]): any {
 	if (!values) return undefined;
 	const selected = indices.map((index) => values[index]);
