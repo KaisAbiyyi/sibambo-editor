@@ -48,7 +48,7 @@ export class ViewportRendererHost {
 	private ssaoPass: SSAOPass | null = null;
 	private outputPass: OutputPass | null = null;
 	private ambientOcclusionEnabled = false;
-	get supportsAmbientOcclusion() { return this.composer !== null && this.ssaoPass !== null; }
+	get supportsAmbientOcclusion() { return isWebGlRenderer(this.renderer); }
 	get layoutSize() { return { width: this.host.clientWidth, height: this.host.clientHeight }; }
 
 	private constructor(
@@ -87,7 +87,6 @@ export class ViewportRendererHost {
 		this.host.replaceChildren(this.canvas);
 		this.controls = this.createControls();
 		this.controls.enabled = this.navigationEnabled;
-		this.setupPostProcessing();
 
 		this.resizeObserver = new ResizeObserver(() => this.resize());
 		this.resizeObserver.observe(host);
@@ -128,7 +127,8 @@ export class ViewportRendererHost {
 	}
 
 	setAmbientOcclusionEnabled(enabled: boolean) {
-		this.ambientOcclusionEnabled = Boolean(enabled) && this.supportsAmbientOcclusion;
+		if (enabled && this.supportsAmbientOcclusion && !this.composer) this.setupPostProcessing();
+		this.ambientOcclusionEnabled = Boolean(enabled) && this.composer !== null && this.ssaoPass !== null;
 		if (this.ssaoPass) this.ssaoPass.enabled = this.ambientOcclusionEnabled;
 		this.requestRender();
 	}
