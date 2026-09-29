@@ -1,9 +1,6 @@
-export const MAX_BOMC_RECORD_COUNT = 1_000_000;
-export const MAX_BOMC_ARRAY_BYTES = 64 * 1024 * 1024;
-
-export function assertBomcCount(count: number, label: string, maximum = MAX_BOMC_RECORD_COUNT) {
-	if (!Number.isSafeInteger(count) || count < 0 || count > maximum) {
-		throw new Error(`BOMC invalid: ${label} count ${count} exceeds the supported limit ${maximum}.`);
+export function assertBomcCount(count: number, label: string) {
+	if (!Number.isSafeInteger(count) || count < 0) {
+		throw new Error(`BOMC invalid: ${label} count is not a non-negative safe integer.`);
 	}
 	return count;
 }
@@ -16,8 +13,8 @@ export function assertExpectedBomcCount(count: number, expected: number | undefi
 export function assertBomcArrayBytes(count: number, components: number, bytesPerValue: number, label: string) {
 	const values = count * components;
 	const bytes = values * bytesPerValue;
-	if (!Number.isSafeInteger(values) || !Number.isSafeInteger(bytes) || bytes > MAX_BOMC_ARRAY_BYTES) {
-		throw new Error(`BOMC invalid: ${label} allocation exceeds the ${MAX_BOMC_ARRAY_BYTES}-byte limit.`);
+	if (!Number.isSafeInteger(values) || !Number.isSafeInteger(bytes)) {
+		throw new Error(`BOMC invalid: ${label} array size exceeds the JavaScript safe integer range.`);
 	}
 	return values;
 }
@@ -65,17 +62,18 @@ export class BomcBinaryReader {
 		return Number(value);
 	}
 
-	readCount(label: string, maximum = MAX_BOMC_RECORD_COUNT) {
-		return assertBomcCount(this.readUint32(), label, maximum);
+	readCount(label: string) {
+		return assertBomcCount(this.readUint32(), label);
 	}
 
-	readVaruintCount(label: string, maximum = MAX_BOMC_RECORD_COUNT) {
-		return assertBomcCount(this.readVaruint(), label, maximum);
+	readVaruintCount(label: string) {
+		return assertBomcCount(this.readVaruint(), label);
 	}
 
 	assertRemainingCount(count: number, minimumBytesPerEntry: number, label: string) {
 		assertBomcCount(count, label);
-		if (!Number.isSafeInteger(minimumBytesPerEntry) || minimumBytesPerEntry < 0 || count * minimumBytesPerEntry > this.remaining) {
+		const requiredBytes = count * minimumBytesPerEntry;
+		if (!Number.isSafeInteger(minimumBytesPerEntry) || minimumBytesPerEntry < 0 || !Number.isSafeInteger(requiredBytes) || requiredBytes > this.remaining) {
 			throw new Error(`BOMC invalid: ${label} count exceeds the remaining section data.`);
 		}
 	}
@@ -102,8 +100,8 @@ export class BomcBinaryReader {
 	readIndices(width: number, count: number, required = false) {
 		if (width !== 1 && width !== 2 && width !== 4) throw new Error(`BOMC invalid: adaptive-width code ${width}.`);
 		assertBomcCount(count, 'adaptive reference');
-		assertBomcArrayBytes(count, 1, 5, 'adaptive references');
-		if (count * width > this.remaining) throw new Error('BOMC invalid: adaptive reference count exceeds the remaining section data.');
+		const encodedBytes = count * width;
+		if (!Number.isSafeInteger(encodedBytes) || encodedBytes > this.remaining) throw new Error('BOMC invalid: adaptive reference count exceeds the remaining section data.');
 		const sentinel = width === 1 ? 0xff : width === 2 ? 0xffff : 0xffffffff;
 		const result = new Uint32Array(count);
 		const present = new Uint8Array(count);

@@ -8,7 +8,7 @@ Sibambo Editor is a browser-based E4 viewport and early editing foundation for i
 ## What it currently does
 
 - Accepts one BOMC 1.2 file without requiring a sidecar.
-- Checks file size, BOMC marker and version, computes the artifact SHA-256, and applies the E4 importer’s bounded parsing rules.
+- Checks the BOMC marker and version, computes the artifact SHA-256, and validates encoded structure and references.
 - Optionally checks a provenance sidecar against the app’s E4 policy, artifact byte count and SHA-256, and parsed encoding profile.
 - Imports through an Editor-owned worker with progress and cancellation.
 - Shows named scenes, Solid, X-Ray, and Wireframe display modes, standard camera views, and orbit, pan, and zoom navigation.
@@ -21,7 +21,7 @@ The imported source is read-only in the current interface. Editor-specific geome
 
 Choose a BOMC 1.2 file and select **Open model file**. The persistent evidence label shows **File-only · source not recorded** when no sidecar is present. You can optionally choose a provenance JSON before opening, or add one to the current file from its source details. A successful match is labelled **Provenance-matched · operator-attested source record**. A malformed or mismatched sidecar does not replace the active session or upgrade its evidence label. After the first frame and requested textures settle, use **Save view** to download a PNG. **Cancel** stops the active import: on first load, the page stays empty; during replacement, the current model and viewport stay available. A rejected replacement also leaves the current session in place. **Unload** clears the page session.
 
-The selected artifact is capped at 256 MiB. The E4 importer also applies bounded section, count, geometry, and work checks, and optional sidecar JSON is read through a byte-bounded helper before parsing. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not authenticate files or guarantee safe processing. A provenance-matched label means the operator-attested record agrees with the selected bytes and parsed profile; it does not cryptographically prove who produced the file or certify the model.
+BOMC import has no fixed app-level file, section, record, geometry, or render-work cutoffs. The importer validates encoded structure, declared lengths, checksums, and references. Optional sidecar JSON is still read through a byte-bounded helper before parsing. A provenance-matched label means the operator-attested record agrees with the selected bytes and parsed profile; it does not cryptographically prove who produced the file or certify the model.
 
 ## Status and evidence limits
 

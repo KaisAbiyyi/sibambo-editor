@@ -5,11 +5,11 @@ This document describes the current Editor file path and the claims supported by
 
 ## Files admitted by the current page
 
-The page accepts one user-selected BOMC 1.2 artifact. It always checks the 256 MiB size bound, BOMC marker and version, computes the artifact SHA-256, and then hands the bytes to the import worker. A JSON provenance sidecar is optional. If supplied before opening, Editor validates it against the E4 policy and checks its declared artifact byte count and SHA-256 against the selected file, then confirms its profile matches the parsed BOMC profile. A sidecar can also be added to an open file; the same checks run before the session evidence changes.
+The page accepts one user-selected BOMC 1.2 artifact. It checks the BOMC marker and version, computes the artifact SHA-256, and then hands the bytes to the import worker. The importer validates encoded structure, declared lengths, checksums, and references without fixed app-level file, record, geometry, or render-work cutoffs. A JSON provenance sidecar is optional. If supplied before opening, Editor validates it against the E4 policy and checks its declared artifact byte count and SHA-256 against the selected file, then confirms its profile matches the parsed BOMC profile. A sidecar can also be added to an open file; the same checks run before the session evidence changes.
 
 Without a matching sidecar, the Editor session stores `provenance: null` and displays **File-only · source not recorded**. After all sidecar and parsed-profile checks pass, the current session may upgrade to **Provenance-matched · operator-attested source record** without remounting its viewport. A malformed or mismatched sidecar leaves the active model, camera, selection, and evidence level unchanged. File-only and provenance-matched are evidence labels; neither authenticates the producer or certifies the model.
 
-The selected artifact is limited to 256 MiB. The E4 importer also applies bounded section decoding and count, geometry, and work checks. These parser caps are provisional pending cross-model corpus validation. Sidecar JSON is read through a byte-bounded helper before parsing. These controls limit resource use but do not guarantee that every malformed file is safe to process.
+Sidecar JSON is read through a byte-bounded helper before parsing. BOMC section and count fields are checked against the encoded structure, and malformed or inconsistent data is rejected.
 
 The worker can be cancelled and terminated, but cancellation does not replace parser bounds or authenticate input. Do not treat a matching hash as proof that a producer created the file.
 

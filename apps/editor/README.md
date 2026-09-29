@@ -30,7 +30,7 @@ These controls inspect the imported source. The app page does not expose drawing
 
 Import runs in an app-owned worker. Progress is shown while the worker decodes and prepares render data. **Cancel** aborts the request and prevents stale progress or results from replacing the current state. On first load, cancellation leaves no loaded session; during replacement, it preserves the current model and viewport. Editor mounts a replacement candidate viewport before disposing the old session and viewport, so a candidate that is rejected or fails to mount leaves the current view available. **Unload** clears the selected files and in-memory session. Closing or reloading the page disposes the active viewport and session.
 
-The worker keeps heavy decoding and render preparation off the main UI thread, but that does not remove the resource limits described in [Data handling and evidence limits](../../docs/data-and-evidence.md).
+The worker keeps decoding and render preparation off the main UI thread. BOMC imports validate encoded structure and references as described in [Data handling and evidence limits](../../docs/data-and-evidence.md).
 
 ## Data handling
 
@@ -40,9 +40,9 @@ The source model is displayed read-only. The [Editor session](src/lib/editor/Edi
 
 ## Security and evidence limits
 
-The app rejects unsupported BOMC versions and caps the selected artifact at 256 MiB whether or not a sidecar is provided. When provided, sidecar JSON is read through a byte-bounded helper and checked for policy, byte count, hash, and parsed profile matches. The E4 importer also applies bounded section, count, geometry, and work checks. E4 parser caps remain provisional pending cross-model corpus validation. These defensive checks do not guarantee safe processing of every malformed file.
+The app rejects unsupported BOMC versions. It has no fixed app-level BOMC file-size, section, record, geometry, or render-work cutoff. When provided, sidecar JSON is read through a byte-bounded helper and checked for policy, byte count, hash, and parsed profile matches.
 
-The sidecar hash is not a security signature and does not prove producer authenticity. Resource limits do not authenticate files or certify E4 behavior.
+The sidecar hash is not a security signature and does not prove producer authenticity. BOMC format checks do not certify E4 behavior.
 
 E4 remains **candidate_pending_cross_model_validation**. Cross-model viewer parity, universal fidelity, certification, complete editing, and lossless save-back are unproven. See [Data handling and evidence limits](../../docs/data-and-evidence.md).
 

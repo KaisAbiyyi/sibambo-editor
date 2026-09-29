@@ -10,20 +10,6 @@ import {
 
 const HEADER_BYTES = 32;
 const ALIGNMENT = 8;
-// Conservative parser policy while E4 is still pending cross-model corpus validation.
-export const BOMC_RESOURCE_LIMITS = Object.freeze({
-	maxInputBytes: 256 * 1024 * 1024,
-	maxSections: 128,
-	maxSectionRawBytes: 128 * 1024 * 1024,
-	maxTotalRawBytes: 512 * 1024 * 1024
-});
-
-export type BomcResourceLimits = {
-	maxInputBytes: number;
-	maxSections: number;
-	maxSectionRawBytes: number;
-	maxTotalRawBytes: number;
-};
 
 export function isBomcBuffer(buffer: ArrayBuffer | Uint8Array) {
 	const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -40,11 +26,10 @@ export class BomcContainer {
 	readonly directoryMs: number;
 	private decoded = new Map<number, Uint8Array>();
 
-	constructor(buffer: ArrayBuffer, private readonly limits: BomcResourceLimits = BOMC_RESOURCE_LIMITS) {
+	constructor(buffer: ArrayBuffer) {
 		const headerStarted = performance.now();
 		this.buffer = buffer;
 		this.bytes = new Uint8Array(buffer);
-		if (buffer.byteLength > limits.maxInputBytes) throw new Error(`BOMC invalid: input exceeds the ${limits.maxInputBytes}-byte resource limit.`);
 		if (buffer.byteLength < HEADER_BYTES) throw new Error('BOMC invalid: truncated header.');
 		if (!isBomcBuffer(buffer)) throw new Error('BOMC invalid: magic mismatch.');
 		const reader = new BomcBinaryReader(buffer);
@@ -54,7 +39,6 @@ export class BomcContainer {
 		const endian = reader.readUint32();
 		const flags = reader.readUint32();
 		const sectionCount = reader.readUint32();
-		if (sectionCount > limits.maxSections) throw new Error(`BOMC invalid: section count ${sectionCount} exceeds the supported limit ${limits.maxSections}.`);
 		const directoryOffset = reader.readUint64('directory offset');
 		if (major !== 1 || minor > 2) throw new Error(`BOMC invalid: unsupported version ${major}.${minor}.`);
 		if (endian !== BOMC_ENDIAN_MARKER) throw new Error('BOMC invalid: unsupported byte order.');
@@ -70,7 +54,6 @@ export class BomcContainer {
 		if (!Number.isSafeInteger(directoryEnd) || directoryEnd > buffer.byteLength) throw new Error('BOMC invalid: directory outside file.');
 		const directory = new BomcBinaryReader(buffer, directoryOffset, sectionCount * directoryEntryBytes);
 		const descriptors: BomcSectionDescriptor[] = [];
-		let totalRawLength = 0;
 		for (let index = 0; index < sectionCount; index += 1) {
 			const type = directory.readUint16();
 			const codec = directory.readUint8();
@@ -88,13 +71,6 @@ export class BomcContainer {
 			}
 			if (this.sections.has(type)) throw new Error(`BOMC invalid: duplicate section type ${type}.`);
 			const descriptor = { index, type, codec, flags: sectionFlags, offset, storedLength, rawLength, count, crc32 };
-			if (rawLength > limits.maxSectionRawBytes) {
-				throw new Error(`BOMC invalid: section ${index} raw size exceeds the ${limits.maxSectionRawBytes}-byte resource limit.`);
-			}
-			totalRawLength += rawLength;
-			if (!Number.isSafeInteger(totalRawLength) || totalRawLength > limits.maxTotalRawBytes) {
-				throw new Error(`BOMC invalid: declared raw sections exceed the ${limits.maxTotalRawBytes}-byte resource limit.`);
-			}
 			this.sections.set(type, descriptor);
 			descriptors.push(descriptor);
 			this.metrics.push({ ...descriptor, inflateMs: 0, loaded: false });

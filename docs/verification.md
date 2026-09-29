@@ -23,7 +23,7 @@ The combined F4 app suite across Benchmark, Rooms, and Editor reported **146 uni
 ## Release boundaries
 
 - Editor currently displays the imported source read-only; a complete CAD workflow and lossless BOMC save-back are not established capabilities.
-- E4 parser resource bounds and byte-bounded sidecar JSON reads are defensive controls, not authentication or a guarantee of safe processing. E4 caps remain provisional pending cross-model corpus validation; see [Data handling and evidence limits](data-and-evidence.md).
+- BOMC import validates encoded structure, lengths, checksums, and references. Sidecar JSON remains byte-bounded and policy-checked; a matching record does not establish producer authentication. See [Data handling and evidence limits](data-and-evidence.md).
 - Imported model data stays in page memory. There is no hosted model database, account synchronization, or server-side edit history.
 - E4 remains **`candidate_pending_cross_model_validation`**. Local build success does not establish cross-viewer parity, representative-corpus correctness, or certification.
 - Earlier monorepo test results are not promoted to tests of this standalone checkout.

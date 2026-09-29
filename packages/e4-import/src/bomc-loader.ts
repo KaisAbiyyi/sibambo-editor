@@ -15,20 +15,6 @@ const REQUIRED_SECTIONS = [
 const AXIS_TO_THREE = new Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
 const AXIS_FROM_THREE = AXIS_TO_THREE.clone().invert();
 const MISSING = 0xffffffff;
-// Runtime parser policy caps are provisional until the private E4 cross-model corpus gate closes.
-const MAX_BOMC_EXPANDED_OCCURRENCES = 250_000;
-const MAX_BOMC_OCCURRENCE_DEPTH = 128;
-const MAX_BOMC_RENDER_TRIANGLE_WORK = 2_000_000;
-const MAX_BOMC_SCENE_VISIBILITY_WORK = 10_000_000;
-const MAX_BOMC_TOTAL_VERTICES = 5_000_000;
-const MAX_BOMC_TOTAL_TOPOLOGY_INDICES = 16_000_000;
-const MAX_BOMC_TOTAL_UV_PAIRS = 8_000_000;
-const MAX_BOMC_SCENE_OVERRIDE_ENTRIES = 1_000_000;
-const MAX_BOMC_SCENES = 10_000;
-const MAX_BOMC_TOTAL_METADATA_RECORDS = 1_000_000;
-// Provisional while E4 remains pending cross-model corpus validation.
-const MAX_BOMC_FALLBACK_RECORDS = 100_000;
-const MAX_BOMC_SCENE_CLIP_PLANE_WORK = 10_000_000;
 
 type ModelRecord = {
 	profile: 'production' | 'debug'; rootNode: number; bounds: number[]; counts: AdaptedBomcResult['counts'];
@@ -127,10 +113,6 @@ export class BomcLoader {
 		const metadataStarted = performance.now();
 		const strings = await decodeReleased(container, BOMC_SECTION.STRINGS, decodeStrings);
 		const model = await decodeReleased(container, BOMC_SECTION.MODEL, (bytes) => decodeModel(bytes, strings));
-		const totalMetadataRecords = Object.values(model.counts).reduce((sum, count) => sum + count, 0);
-		if (!Number.isSafeInteger(totalMetadataRecords) || totalMetadataRecords > MAX_BOMC_TOTAL_METADATA_RECORDS) {
-			throw new Error(`BOMC invalid: total model records exceed the ${MAX_BOMC_TOTAL_METADATA_RECORDS} resource limit.`);
-		}
 		validateCountedSections(container, model.counts);
 		const materials = container.has(BOMC_SECTION.MATERIALS) ? await decodeReleased(container, BOMC_SECTION.MATERIALS, (bytes) => decodeMaterials(bytes, strings, model.counts.materials)) : [];
 		const tags = container.has(BOMC_SECTION.TAGS) ? await decodeReleased(container, BOMC_SECTION.TAGS, (bytes) => decodeTags(bytes, strings, model.counts.tags)) : [];
@@ -222,7 +204,6 @@ export class BomcLoader {
 		} else scenes = syntheticDefaultScenes(tags, instances);
 		const sceneVisibilityIndex = createSceneVisibilityIndex(scenes);
 		const edgeAdjacencyByMesh = buildRuntimeEdgeAdjacencies(meshes, occurrences.meshes);
-		assertRuntimeWorkBudgets(meshes, occurrences.meshes, scenes, fallback, occurrences.instances, instances, sceneVisibilityIndex, edgeAdjacencyByMesh);
 		const fallbackMaterialBase = materials.length;
 		const runtimeMaterials: MaterialRecord[] = materials.concat(fallback.map((record, index) => ({
 			name: record.kind === 4 ? `BOMC image fallback ${index + 1}` : `BOMC text fallback ${index + 1}`,
@@ -668,9 +649,6 @@ function decodeGeometry(meshRows: MeshRow[], faces: FaceRow[], normals: Float32A
 		if (!Number.isSafeInteger(totalVertices) || !Number.isSafeInteger(totalTopologyIndices) || !Number.isSafeInteger(totalUvPairs)) {
 			throw new Error('BOMC invalid: aggregate mesh counts exceed the safe integer range.');
 		}
-		if (totalVertices > MAX_BOMC_TOTAL_VERTICES) throw new Error(`BOMC invalid: total mesh vertices exceed the ${MAX_BOMC_TOTAL_VERTICES} resource limit.`);
-		if (totalTopologyIndices > MAX_BOMC_TOTAL_TOPOLOGY_INDICES) throw new Error(`BOMC invalid: total topology indices exceed the ${MAX_BOMC_TOTAL_TOPOLOGY_INDICES} resource limit.`);
-		if (totalUvPairs > MAX_BOMC_TOTAL_UV_PAIRS) throw new Error(`BOMC invalid: total UV pairs exceed the ${MAX_BOMC_TOTAL_UV_PAIRS} resource limit.`);
 	}
 	return meshRows.map((row, meshIndex): MeshRecord => {
 		const localFaces = faces.slice(row.faceStart, row.faceStart + row.faceCount);
@@ -773,7 +751,6 @@ export async function decodeTextures(tableBytes: Uint8Array, blobBytes: Uint8Arr
 	const lengths = Array.from({ length: count }, () => reader.readUint64('texture blob length'));
 	reader.finish('texture table');
 	const records: TextureRecord[] = [];
-	let mappedPixels = 0;
 	for (let index = 0; index < count; index += 1) {
 		if (options.isCancelled?.()) throw new Error('BOMC load cancelled');
 		if (media[index] < 1 || media[index] > 6) throw new Error(`BOMC invalid: texture ${index} media type.`);
@@ -787,9 +764,6 @@ export async function decodeTextures(tableBytes: Uint8Array, blobBytes: Uint8Arr
 			if (actual !== hashes[index]) throw new Error(`BOMC invalid: texture ${index} hash mismatch.`);
 		}
 		if (media[index] === 6) {
-			const imagePixels = widths[index] * heights[index];
-			if (!Number.isSafeInteger(imagePixels) || imagePixels > 64_000_000 - mappedPixels) throw new Error('BOMC invalid: JPEG color map aggregate pixel limit.');
-			mappedPixels += imagePixels;
 			const png = await decodeBomcJcmToPng(encodedBytes, widths[index], heights[index], options);
 			const hash = bytesToHex(png.sha256);
 			records.push({ media: 1, width: widths[index], height: heights[index], hash, bytes: png.bytes,
@@ -819,7 +793,7 @@ export function decodeFallback(bytes: Uint8Array, strings: string[]) {
 	const reader = new BomcBinaryReader(bytes);
 	if (reader.readUint8() !== 1) throw new Error('BOMC invalid: fallback section version.');
 	const instanceWidth = reader.readUint8(), textureWidth = reader.readUint8(), stringWidth = reader.readUint8();
-	const count = reader.readCount('fallback', MAX_BOMC_FALLBACK_RECORDS);
+	const count = reader.readCount('fallback');
 	const indexWidths = [instanceWidth, textureWidth, stringWidth];
 	if (indexWidths.some((width) => ![1, 2, 4].includes(width))) throw new Error('BOMC invalid: adaptive-width code.');
 	const minimumRowBytes = instanceWidth + textureWidth + stringWidth + 21;
@@ -891,21 +865,44 @@ function collectOccurrences(rootIndex: number, definitions: DefinitionRecord[], 
 	const instanceIndices: number[] = [];
 	const tagIndices: number[] = [];
 	const definitionStack: number[] = [];
+	const activeDefinitions = new Set<number>();
 	const transformAt = (index: number) => new Matrix4().fromArray(transforms, index * 16);
-	const visitInstance = (
-		instanceIndex: number,
-		parent: Matrix4,
-		inheritedMaterial: number,
-		parentHierarchyIndex: number,
-		inheritedRoleCode: number,
-		inheritedLabel?: string,
-		nestingDepth = 0
-	) => {
+	type InheritedFrame = {
+		parent: Matrix4;
+		inheritedMaterial: number;
+		parentHierarchyIndex: number;
+		inheritedRoleCode: number;
+		inheritedLabel?: string;
+	};
+	type TraversalFrame = (
+		{ kind: 'visit'; instanceIndex: number } & InheritedFrame
+	) | (
+		{ kind: 'visit-children'; children: number[]; childIndex: number } & InheritedFrame
+	) | { kind: 'leave-definition'; definitionIndex: number };
+	const frames: TraversalFrame[] = [{
+		kind: 'visit', instanceIndex: rootIndex, parent: new Matrix4(), inheritedMaterial: MISSING,
+		parentHierarchyIndex: -1, inheritedRoleCode: 0
+	}];
+	while (frames.length > 0) {
+		const frame = frames.pop()!;
+		if (frame.kind === 'leave-definition') {
+			definitionStack.pop();
+			activeDefinitions.delete(frame.definitionIndex);
+			continue;
+		}
+		if (frame.kind === 'visit-children') {
+			if (frame.childIndex + 1 < frame.children.length) frames.push({ ...frame, childIndex: frame.childIndex + 1 });
+			frames.push({
+				kind: 'visit', instanceIndex: frame.children[frame.childIndex], parent: frame.parent,
+				inheritedMaterial: frame.inheritedMaterial, parentHierarchyIndex: frame.parentHierarchyIndex,
+				inheritedRoleCode: frame.inheritedRoleCode, inheritedLabel: frame.inheritedLabel
+			});
+			continue;
+		}
+		const { instanceIndex, parent, inheritedMaterial, parentHierarchyIndex, inheritedRoleCode, inheritedLabel } = frame;
 		const instance = instances[instanceIndex];
-		if (!instance) return;
-		if (!hasScenes && (!instance.visible || (instance.tag !== MISSING && tags[instance.tag]?.visible === false))) return;
-		if (nestingDepth > MAX_BOMC_OCCURRENCE_DEPTH) throw new Error(`BOMC invalid: expanded occurrence depth exceeds ${MAX_BOMC_OCCURRENCE_DEPTH}.`);
-		if (parentIndices.length >= MAX_BOMC_EXPANDED_OCCURRENCES) throw new Error(`BOMC invalid: expanded occurrence count exceeds ${MAX_BOMC_EXPANDED_OCCURRENCES}.`);
+		if (!instance) continue;
+		if (!hasScenes && (!instance.visible || (instance.tag !== MISSING && tags[instance.tag]?.visible === false))) continue;
 		const hierarchyIndex = parentIndices.length;
 		parentIndices.push(parentHierarchyIndex);
 		instanceIndices.push(instanceIndex);
@@ -920,9 +917,9 @@ function collectOccurrences(rootIndex: number, definitions: DefinitionRecord[], 
 		const inferredRole = instance.roleCode || semanticRoleFromText(`${instance.label || ''} ${instance.name || ''}`);
 		const semanticRoleCode = inferredRole || inheritedRoleCode;
 		const semanticLabel = instance.label || inheritedLabel;
-		if (instance.definition === MISSING) return;
+		if (instance.definition === MISSING) continue;
 		const definitionIndex = instance.definition;
-		if (definitionStack.includes(definitionIndex)) throw new Error(`BOMC invalid: recursive definition cycle ${[...definitionStack, definitionIndex].join(' -> ')}.`);
+		if (activeDefinitions.has(definitionIndex)) throw new Error(`BOMC invalid: recursive definition cycle ${[...definitionStack, definitionIndex].join(' -> ')}.`);
 		const definition = definitions[definitionIndex];
 		if (!definition) throw new Error(`BOMC invalid: missing definition ${definitionIndex}.`);
 		if (definition.mesh !== MISSING) {
@@ -943,12 +940,16 @@ function collectOccurrences(rootIndex: number, definitions: DefinitionRecord[], 
 			result.set(definition.mesh, list);
 		}
 		definitionStack.push(definitionIndex);
-		for (const child of definition.nodes) {
-			visitInstance(child, worldSource, material, hierarchyIndex, semanticRoleCode, semanticLabel, nestingDepth + 1);
+		activeDefinitions.add(definitionIndex);
+		frames.push({ kind: 'leave-definition', definitionIndex });
+		if (definition.nodes.length > 0) {
+			frames.push({
+				kind: 'visit-children', children: definition.nodes, childIndex: 0, parent: worldSource,
+				inheritedMaterial: material, parentHierarchyIndex: hierarchyIndex,
+				inheritedRoleCode: semanticRoleCode, inheritedLabel: semanticLabel
+			});
 		}
-		definitionStack.pop();
-	};
-	visitInstance(rootIndex, new Matrix4(), MISSING, -1, 0);
+	}
 	return {
 		meshes: result,
 		instances: instanceOccurrences,
@@ -989,54 +990,6 @@ export function createSceneVisibilityIndex(scenes: SceneProfile[]): SceneVisibil
 		if (!bySignature.has(scene.visibilitySignature)) bySignature.set(scene.visibilitySignature, scene);
 	}
 	return { byScene, bySignature, hasFaceOverrides };
-}
-
-export function assertRuntimeWorkBudgets(
-	meshes: MeshRecord[], occurrences: Map<number, Occurrence[]>, scenes: SceneProfile[],
-	fallback: FallbackRecord[], instanceOccurrences: Map<number, Matrix4[]>, instances: InstanceRecord[],
-	sceneVisibilityIndex: SceneVisibilityIndex, edgeAdjacencyByMesh: Map<number, Uint32Array[]>
-) {
-	let renderTriangleWork = 0;
-	let sceneVisibilityWork = 0;
-	let fallbackGroups = 0;
-	for (let meshIndex = 0; meshIndex < meshes.length; meshIndex += 1) {
-		const mesh = meshes[meshIndex];
-		const occurrenceCount = occurrences.get(meshIndex)?.length || 0;
-		if (occurrenceCount > 0) {
-			sceneVisibilityWork += (mesh.faces.length + mesh.edges.length) * scenes.length;
-			if (sceneVisibilityIndex.hasFaceOverrides && scenes.length) {
-				const adjacency = edgeAdjacencyByMesh.get(meshIndex) || [];
-				for (let edgeIndex = 0; edgeIndex < mesh.edges.length; edgeIndex += 1) {
-					// Edge visibility can inspect every incident face in every scene.
-					sceneVisibilityWork += scenes.length * (adjacency[edgeIndex]?.length || 0);
-				}
-			}
-		}
-		const triangleIndices = mesh.faces.reduce((sum, face) => sum + face.triangleCount, 0);
-		// Two appearance sides are the maximum render expansion for one source face.
-		renderTriangleWork += Math.ceil(triangleIndices / 3) * occurrenceCount * 2;
-		if (renderTriangleWork > MAX_BOMC_RENDER_TRIANGLE_WORK) {
-			throw new Error(`BOMC invalid: render triangle work exceeds the ${MAX_BOMC_RENDER_TRIANGLE_WORK} resource limit.`);
-		}
-	}
-	if (!Number.isSafeInteger(sceneVisibilityWork) || sceneVisibilityWork > MAX_BOMC_SCENE_VISIBILITY_WORK) {
-		throw new Error(`BOMC invalid: scene visibility work exceeds the ${MAX_BOMC_SCENE_VISIBILITY_WORK} resource limit.`);
-	}
-	let fallbackOccurrenceWork = 0;
-	for (const record of fallback) {
-		if (!instances[record.instance]?.visible) continue;
-		const occurrenceCount = instanceOccurrences.get(record.instance)?.length || 0;
-		if (!occurrenceCount) continue;
-		fallbackGroups += 1;
-		fallbackOccurrenceWork += occurrenceCount;
-		if (!Number.isSafeInteger(fallbackOccurrenceWork) || fallbackGroups > MAX_BOMC_FALLBACK_RECORDS) {
-			throw new Error('BOMC invalid: fallback geometry work exceeds the resource limit.');
-		}
-	}
-	const fallbackTriangleWork = fallbackOccurrenceWork * 2;
-	if (!Number.isSafeInteger(fallbackTriangleWork) || renderTriangleWork + fallbackTriangleWork > MAX_BOMC_RENDER_TRIANGLE_WORK) {
-		throw new Error(`BOMC invalid: render triangle work including fallback geometry exceeds the ${MAX_BOMC_RENDER_TRIANGLE_WORK} resource limit.`);
-	}
 }
 
 function primitiveVisibleForScene(
@@ -1843,22 +1796,14 @@ export function decodeScenes(
 		throw new Error(`BOMC invalid: scenes section version ${version} unsupported.`);
 	}
 	const tagCount = reader.readUint8();
-	const scenesCount = reader.readCount('scene', MAX_BOMC_SCENES);
+	const scenesCount = reader.readCount('scene');
 
 	const tagBitsetBytes = Math.ceil(tagCount / 8);
 	const scenes: SceneProfile[] = [];
 	const seenIds = new Set<string>();
-	let clipPlaneResolutionWork = 0;
 	let clipPlaneIndicesById: Map<string, number[]> | undefined;
-	const addClipPlaneWork = (amount: number) => {
-		clipPlaneResolutionWork += amount;
-		if (!Number.isSafeInteger(clipPlaneResolutionWork) || clipPlaneResolutionWork > MAX_BOMC_SCENE_CLIP_PLANE_WORK) {
-			throw new Error(`BOMC invalid: scene clip-plane resolution work exceeds the ${MAX_BOMC_SCENE_CLIP_PLANE_WORK} resource limit.`);
-		}
-	};
 	const ensureClipPlaneIndex = () => {
 		if (clipPlaneIndicesById) return clipPlaneIndicesById;
-		addClipPlaneWork(clipPlanes.length * 2);
 		clipPlaneIndicesById = new Map<string, number[]>();
 		const add = (id: string, index: number) => {
 			const rows = clipPlaneIndicesById!.get(id) || [];
@@ -1873,22 +1818,10 @@ export function decodeScenes(
 		return clipPlaneIndicesById;
 	};
 	const resolveActiveClipPlanes = (indices: number[], ids: string[]) => {
-		if (indices.length > 0) {
-			addClipPlaneWork(indices.length * 2);
-			return indices.map((index) => clipPlanes[index]).filter(Boolean);
-		}
+		if (indices.length > 0) return indices.map((index) => clipPlanes[index]).filter(Boolean);
 		if (ids.length === 0) return [];
 		const index = ensureClipPlaneIndex();
 		const uniqueIds = new Set(ids);
-		let candidateCount = 0;
-		for (const id of uniqueIds) {
-			candidateCount += index.get(id)?.length || 0;
-			if (!Number.isSafeInteger(candidateCount) || clipPlaneResolutionWork + ids.length + candidateCount > MAX_BOMC_SCENE_CLIP_PLANE_WORK) {
-				throw new Error(`BOMC invalid: scene clip-plane resolution work exceeds the ${MAX_BOMC_SCENE_CLIP_PLANE_WORK} resource limit.`);
-			}
-		}
-		const sortWork = candidateCount > 1 ? candidateCount * Math.ceil(Math.log2(candidateCount)) : 0;
-		addClipPlaneWork(ids.length + candidateCount + sortWork);
 		const matches = new Set<number>();
 		for (const id of uniqueIds) for (const clipIndex of index.get(id) || []) matches.add(clipIndex);
 		return [...matches].sort((left, right) => left - right).map((clipIndex) => clipPlanes[clipIndex]);
@@ -1902,14 +1835,9 @@ export function decodeScenes(
 			tagStableIds.push(strings[strIdx] || '');
 		}
 	}
-	let totalOverrideEntries = 0;
 	const readOverrideCount = (label: string, minimumBytesPerEntry = 1) => {
 		const count = reader.readVaruintCount(label);
 		reader.assertRemainingCount(count, minimumBytesPerEntry, label);
-		totalOverrideEntries += count;
-		if (totalOverrideEntries > MAX_BOMC_SCENE_OVERRIDE_ENTRIES) {
-			throw new Error(`BOMC invalid: scene override entries exceed the ${MAX_BOMC_SCENE_OVERRIDE_ENTRIES} resource limit.`);
-		}
 		return count;
 	};
 	const minimumSceneCountFields = 2 + (version >= 2 ? 2 : 0) + (version >= 4 ? 10 : 0) + (version >= 5 ? 1 : 0);

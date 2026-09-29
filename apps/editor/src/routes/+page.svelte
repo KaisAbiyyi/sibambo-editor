@@ -767,13 +767,13 @@
 						</div>
 					</details>
 					<button class="primary" type="button" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
-					<p class="validation-note">Editor checks the BOMC 1.2 format and resource limits before loading. A matching source record is shown separately.</p>
+					<p class="validation-note">Editor checks BOMC 1.2 structure and data integrity before loading. A matching source record is shown separately.</p>
 				</div>
 			</section>
 			<aside class="guide" aria-label="Editor workflow">
 				<p class="eyebrow">EDITOR WORKSPACE</p><h2>Inspect the model</h2>
 				<p>Use the viewport to inspect the checked file and its available source evidence.</p>
-				<ol class="workflow-steps"><li><strong>Choose one BOMC file</strong><span>A matching provenance JSON is optional.</span></li><li><strong>Open the model</strong><span>The file format and resource limits are checked before loading.</span></li><li><strong>Explore the view</strong><span>Change camera, scene, display mode, and inspect source geometry.</span></li></ol>
+				<ol class="workflow-steps"><li><strong>Choose one BOMC file</strong><span>A matching provenance JSON is optional.</span></li><li><strong>Open the model</strong><span>File structure and data integrity are checked before loading.</span></li><li><strong>Explore the view</strong><span>Change camera, scene, display mode, and inspect source geometry.</span></li></ol>
 				<p class="note">The imported source stays read-only. Editor does not load Rooms or Benchmark sessions.</p>
 			</aside>
 		</div>

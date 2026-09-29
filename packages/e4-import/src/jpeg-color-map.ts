@@ -1,8 +1,5 @@
 const MAGIC = new Uint8Array([66, 79, 77, 74, 67, 77, 13, 10]);
 const HEADER_BYTES = 128;
-const MAX_PIXELS = 32_000_000;
-const MAX_ENTRIES = 262_144;
-const MAX_JPEG_BYTES = 32 * 1024 * 1024;
 const CHECKPOINT_PIXELS = 131_072;
 
 type ParsedJcm = {
@@ -43,7 +40,7 @@ export async function digestSha256(bytes: Uint8Array) {
 }
 
 function validateJpeg(jpeg: Uint8Array, width: number, height: number) {
-	if (jpeg.byteLength < 4 || jpeg.byteLength > MAX_JPEG_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) fail('JPEG bounds or SOI marker');
+	if (jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) fail('JPEG bounds or SOI marker');
 	let cursor = 2;
 	let frameSeen = false;
 	let scanSeen = false;
@@ -97,10 +94,12 @@ async function parseJcm(payload: Uint8Array, expectedWidth: number, expectedHeig
 	const count = header.getUint32(20, true);
 	const jpegLength = header.getUint32(24, true);
 	if (header.getUint32(28, true) !== 0) fail('reserved field');
-	if (!width || !height || width > 16_384 || height > 16_384 || width * height > MAX_PIXELS) fail('pixel bounds');
+	const pixels = width * height;
+	if (!width || !height || !Number.isSafeInteger(pixels) || !Number.isSafeInteger(pixels * 4)) fail('pixel dimensions');
 	if (width !== expectedWidth || height !== expectedHeight) fail('table dimensions mismatch');
-	if (!count || count > MAX_ENTRIES || count > width * height || !jpegLength || jpegLength > MAX_JPEG_BYTES) fail('resource bounds');
-	if (payload.byteLength !== HEADER_BYTES + jpegLength + count * 7) fail('payload length');
+	if (!count || count > pixels || !jpegLength) fail('dictionary or JPEG byte count');
+	const expectedPayloadLength = HEADER_BYTES + jpegLength + count * 7;
+	if (!Number.isSafeInteger(expectedPayloadLength) || payload.byteLength !== expectedPayloadLength) fail('payload length');
 	const jpeg = payload.subarray(HEADER_BYTES, HEADER_BYTES + jpegLength);
 	if (!equalBytes(await digestSha256(jpeg), payload.subarray(32, 64))) fail('JPEG hash mismatch');
 	validateJpeg(jpeg, width, height);
@@ -117,7 +116,7 @@ async function parseJcm(payload: Uint8Array, expectedWidth: number, expectedHeig
 		previousKey = key;
 	}
 	return {
-		width, height, pixels: width * height, jpeg,
+		width, height, pixels, jpeg,
 		baseHash: payload.subarray(64, 96), outputHash: payload.subarray(96, 128), colors
 	};
 }

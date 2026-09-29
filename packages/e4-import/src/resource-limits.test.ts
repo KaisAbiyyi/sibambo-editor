@@ -1,47 +1,19 @@
 import { deflateSync } from 'node:zlib';
 import { describe, expect, test } from 'bun:test';
 import { decodeNormalSection, decodePositionBlock, decodeTopologyBlock, decodeTransformSection, decodeUvBlock } from './codecs';
-import { assertRuntimeWorkBudgets, buildMeshEdgeAdjacency, createSceneVisibilityIndex, decodeEdges, decodeFallback, decodeScenes, decodeTextures } from './bomc-loader';
+import { buildMeshEdgeAdjacency, createSceneVisibilityIndex, decodeEdges, decodeScenes, decodeTextures } from './bomc-loader';
 import { BomcContainer, crc32 } from './container';
-import { MAX_BOMC_RECORD_COUNT, readFixedArray } from './binary-reader';
 import { BOMC_MAGIC } from './types';
 
-describe('BOMC resource limits', () => {
-	test('rejects excessive section count and declared raw bytes before loading sections', () => {
-		const emptyContainer = buildContainer([]);
-		expect(() => new BomcContainer(emptyContainer, {
-			maxInputBytes: emptyContainer.byteLength - 1, maxSections: 2, maxSectionRawBytes: 8, maxTotalRawBytes: 16
-		})).toThrow(/input exceeds/);
-
-		const oneHundredTwentyNine = Array.from({ length: 129 }, (_, type) => ({ type, stored: new Uint8Array(0), rawLength: 0, codec: 0 }));
-		expect(() => new BomcContainer(buildContainer(oneHundredTwentyNine))).toThrow(/section count 129/);
-
-		const twoSections = [
-			{ type: 1, stored: new Uint8Array(2), rawLength: 2, codec: 0 },
-			{ type: 2, stored: new Uint8Array(2), rawLength: 2, codec: 0 }
-		];
-		expect(() => new BomcContainer(buildContainer(twoSections), { maxInputBytes: 1024, maxSections: 2, maxSectionRawBytes: 3, maxTotalRawBytes: 3 })).toThrow(/declared raw sections/);
-		expect(() => new BomcContainer(buildContainer([{ type: 1, stored: new Uint8Array(0), rawLength: 4, codec: 0 }]), {
-			maxInputBytes: 1024, maxSections: 2, maxSectionRawBytes: 3, maxTotalRawBytes: 8
-		})).toThrow(/section 0 raw size/);
-	});
-
+describe('BOMC structural validation', () => {
 	test('stops DEFLATE output at the declared byte boundary and accepts exact output', async () => {
 		const expanded = new Uint8Array(64).fill(65);
 		const compressed = new Uint8Array(deflateSync(expanded));
-		const limits = { maxInputBytes: 1024, maxSections: 2, maxSectionRawBytes: 64, maxTotalRawBytes: 64 };
-		const overflow = new BomcContainer(buildContainer([{ type: 1, stored: compressed, rawLength: 8, codec: 1 }]), limits);
+		const overflow = new BomcContainer(buildContainer([{ type: 1, stored: compressed, rawLength: 8, codec: 1 }]));
 		await expect(overflow.load(1)).rejects.toThrow(/declared raw size/);
 
-		const exact = new BomcContainer(buildContainer([{ type: 1, stored: compressed, rawLength: 64, codec: 1 }]), limits);
+		const exact = new BomcContainer(buildContainer([{ type: 1, stored: compressed, rawLength: 64, codec: 1 }]));
 		expect(await exact.load(1)).toEqual(expanded);
-	});
-
-	test('rejects decoded array counts above the hard record budget', () => {
-		expect(() => decodeNormalSection(genericHeader(1, MAX_BOMC_RECORD_COUNT + 1))).toThrow(/normal count/);
-		expect(() => decodeTransformSection(genericHeader(0, MAX_BOMC_RECORD_COUNT + 1))).toThrow(/transform count/);
-		expect(() => decodePositionBlock(positionHeader(MAX_BOMC_RECORD_COUNT + 1))).toThrow(/position count/);
-		expect(() => readFixedArray(new Uint8Array(0), 'u32', MAX_BOMC_RECORD_COUNT + 1)).toThrow(/fixed array count/);
 	});
 
 	test('validates counted payload lengths before typed-array allocation', () => {
@@ -76,21 +48,7 @@ describe('BOMC resource limits', () => {
 		expect(() => decodeNormalSection(genericHeader(3, 1, packF64([1e300, 0, 1])))).toThrow(/non-finite normal value/);
 	});
 
-	test('bounds fallback rows and their occurrence-expanded render work', () => {
-		const excessiveRows = new Uint8Array(8);
-		excessiveRows.set([1, 1, 1, 1]);
-		new DataView(excessiveRows.buffer).setUint32(4, 100_001, true);
-		expect(() => decodeFallback(excessiveRows, [])).toThrow(/fallback count 100001/);
-
-		const worlds: unknown[] = [];
-		worlds.length = 1_000_001;
-		expect(() => assertRuntimeWorkBudgets(
-			[], new Map(), [], [{ instance: 0 }] as never[], new Map([[0, worlds as never[]]]), [{ visible: true }] as never[],
-			createSceneVisibilityIndex([]), new Map()
-		)).toThrow(/render triangle work including fallback geometry/);
-	});
-
-	test('indexes scene visibility and budgets incident-face probes', () => {
+	test('indexes scene visibility overrides by scene', () => {
 		const scene = (visibilitySignature: string) => ({
 			visibilitySignature,
 			visibility: {
@@ -102,13 +60,6 @@ describe('BOMC resource limits', () => {
 		const visibilityIndex = createSceneVisibilityIndex(scenes);
 		expect(visibilityIndex.byScene.get(scenes[0])?.hiddenFaceIndices.has(5)).toBe(true);
 		expect(visibilityIndex.hasFaceOverrides).toBe(true);
-
-		const mesh = { faces: [{ triangleCount: 0 }], edges: [{}] } as never;
-		const oversizedAdjacency = Object.assign([], { 0: { length: 5_000_001 } }) as unknown as Uint32Array[];
-		expect(() => assertRuntimeWorkBudgets(
-			[mesh], new Map([[0, [{} as never]]]), scenes, [], new Map(), [], visibilityIndex,
-			new Map([[0, oversizedAdjacency]])
-		)).toThrow(/scene visibility work/);
 	});
 
 	test('deduplicates edge-face adjacency without Array membership scans', () => {
@@ -145,21 +96,6 @@ describe('BOMC resource limits', () => {
 	test('rejects scene override counts that exceed bytes available before iterating', () => {
 		const sceneBytes = minimalSceneWithShortHiddenNodes(2);
 		expect(() => decodeScenes(sceneBytes, ['scene'], [], [])).toThrow(/hidden node count exceeds the remaining section data/);
-	});
-
-	test('caps indexed clip-plane resolution work across scenes', () => {
-		const sceneCount = 10_000;
-		const planeStringIndex = sceneCount + 3;
-		const strings = [
-			...Array.from({ length: sceneCount }, (_, index) => `scene:${index}`),
-			'name', '', 'visibility-signature', 'active-plane'
-		];
-		const clipPlanes = Array.from({ length: 1_001 }, (_, index) => ({
-			index, stableId: 'active-plane', sourcePersistentId: `persistent:${index}`,
-			ownerDefinitionId: null, ownerInstanceId: null
-		})) as never[];
-		const sceneBytes = scenesWithActivePlaneIds(sceneCount, planeStringIndex);
-		expect(() => decodeScenes(sceneBytes, strings, [], [], 0, 0, clipPlanes)).toThrow(/scene clip-plane resolution work/);
 	});
 
 	test('resolves clip-plane stable and source IDs through the index', () => {

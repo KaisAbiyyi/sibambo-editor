@@ -3,10 +3,8 @@ import { sha256, validateProvenance } from '@sibambo/provenance';
 import { E4_PROVENANCE_POLICY_V1 } from '@sibambo/provenance/policies/e4-v1';
 import type { ResearchProvenance } from '@sibambo/contracts';
 
-const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
-
 export async function admitE4File(file: File, sidecar?: unknown) {
-	if (file.size <= 0 || file.size > MAX_ARTIFACT_BYTES) throw new Error('E4 artifact is empty or exceeds the 256 MiB limit.');
+	if (file.size <= 0) throw new Error('E4 artifact is empty.');
 	const provenance = sidecar === undefined ? null : validateProvenance(sidecar, E4_PROVENANCE_POLICY_V1) as ResearchProvenance;
 	if (provenance && provenance.artifact.bytes !== file.size) throw new Error('Artifact byte count mismatch: provenance belongs to another file.');
 	const buffer = await file.arrayBuffer();
