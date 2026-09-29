@@ -48,6 +48,7 @@ export class ViewportRendererHost {
 	private ssaoPass: SSAOPass | null = null;
 	private outputPass: OutputPass | null = null;
 	private ambientOcclusionEnabled = false;
+	private clipBounds: CameraPresetBounds | null = null;
 	get supportsAmbientOcclusion() { return isWebGlRenderer(this.renderer); }
 	get layoutSize() { return { width: this.host.clientWidth, height: this.host.clientHeight }; }
 
@@ -135,6 +136,7 @@ export class ViewportRendererHost {
 
 	/** Apply the shared fit policy to caller-derived bounds. */
 	focusBounds(bounds: CameraPresetBounds) {
+		this.clipBounds = bounds;
 		const center = new Vector3(
 			(bounds.min.x + bounds.max.x) / 2,
 			(bounds.min.y + bounds.max.y) / 2,
@@ -156,6 +158,7 @@ export class ViewportRendererHost {
 	}
 
 	updateClipRange(bounds: CameraPresetBounds) {
+		this.clipBounds = bounds;
 		const span = Math.max(
 			bounds.max.x - bounds.min.x,
 			bounds.max.y - bounds.min.y,
@@ -322,7 +325,10 @@ export class ViewportRendererHost {
 		controls.mouseButtons.MIDDLE = middleMouseAction();
 		controls.mouseButtons.LEFT = orbitControlsMouseAction('orbit');
 		controls.target.set(0, 0, 0);
-		controls.addEventListener('change', () => this.requestRender());
+		controls.addEventListener('change', () => {
+			if (this.clipBounds) this.updateClipRange(this.clipBounds);
+			else this.requestRender();
+		});
 		this.canvas.addEventListener('pointerdown', this.handlePointerDownCapture, true);
 		this.canvas.addEventListener('pointerup', this.restoreMiddleMouseMapping);
 		this.canvas.addEventListener('pointercancel', this.restoreMiddleMouseMapping);
