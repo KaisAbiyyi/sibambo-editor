@@ -41,7 +41,9 @@ describe('editor camera navigation', () => {
 		camera.updateMatrixWorld(true);
 		const moved = panCameraDrag(camera, start, 80, -35, height);
 		expect(moved.target.y).toBeCloseTo(0, 10);
-		expect(Math.abs(moved.position.distanceTo(moved.target) - grounded.position.distanceTo(grounded.target))).toBeLessThan(1e-7);
+		const beforeDirection = grounded.target.clone().sub(grounded.position).normalize();
+		const afterDirection = moved.target.clone().sub(moved.position).normalize();
+		expect(afterDirection.distanceTo(beforeDirection)).toBeLessThan(1e-9);
 		camera.position.copy(moved.position);
 		camera.lookAt(moved.target);
 		camera.updateMatrixWorld(true);
