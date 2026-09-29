@@ -298,12 +298,15 @@ export class PreparedSceneViewport {
 	setOrbitControlsEnabled(enabled: boolean) { this.rendererHost.setOrbitControlsEnabled(enabled); }
 	getCameraPose(): CameraPose { return { position: this.camera.position.clone(), target: this.controls.target.clone() }; }
 	setCameraPose(pose: CameraPose) {
+		// Editor camera navigation owns the pose directly. The controls target is the
+		// persistent orbit anchor: orbit rotates around it, while pan/zoom translate
+		// camera and anchor together. Avoid OrbitControls.update() here because it can
+		// emit another change/render while a pointer gesture is already driving frames.
 		this.camera.position.copy(pose.position);
 		this.controls.target.copy(pose.target);
 		this.camera.lookAt(pose.target);
-		this.controls.update();
+		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
-		this.renderOnce();
 	}
 	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
 		this.setCameraPose(tool === 'orbit'
@@ -352,9 +355,8 @@ export class PreparedSceneViewport {
 			this.controls.target.add(travel);
 		}
 		this.camera.lookAt(this.controls.target);
-		this.controls.update();
+		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
-		this.renderOnce();
 	}
 	pickAt(clientX: number, clientY: number): ViewportPick | null {
 		const rect = this.canvas.getBoundingClientRect();
@@ -807,8 +809,9 @@ export class PreparedSceneViewport {
 	}
 	private cursorSurfaceHit() {
 		const epsilon = Math.max(this.modelSpan() * 1e-6, 1e-6);
-		const records = new Map(this.meshRecords.map((record) => [record.mesh, record]));
-		return this.raycaster.intersectObjects(this.meshRecords.map((record) => record.mesh), false).find((candidate) => {
+		const visible = this.meshRecords.filter((record) => record.mesh.visible);
+		const records = new Map(visible.map((record) => [record.mesh, record]));
+		return this.raycaster.intersectObjects(visible.map((record) => record.mesh), false).find((candidate) => {
 			const record = records.get(candidate.object as InstancedMesh);
 			return Boolean(record && candidate.distance > epsilon && !isPointClipped(candidate.point, this.activeClipPlanes)
 				&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
@@ -960,7 +963,7 @@ export class PreparedSceneViewport {
 			const bounds = this.occurrenceBounds(handle, true);
 			if (!bounds) continue;
 			bounds.expandByScalar(Math.max(bounds.getSize(new Vector3()).length() * 0.002, 0.002));
-			const helper = new Box3Helper(bounds, new Color('#f06a4f'));
+			const helper = new Box3Helper(bounds, new Color('#125dff'));
 			helper.renderOrder = 12;
 			this.selectionHelpers.push(helper);
 			this.scene3d.add(helper);
