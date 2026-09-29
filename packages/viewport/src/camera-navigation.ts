@@ -90,8 +90,11 @@ export function panCameraDrag(camera: Camera, start: CameraPose, deltaX: number,
 	const direction = start.target.clone().sub(start.position).normalize();
 	const right = new Vector3().crossVectors(direction, camera.up).normalize();
 	const up = new Vector3().crossVectors(right, direction).normalize();
+	// Pan is defined in screen pixels at the orbit-anchor depth. This makes a
+	// 1 px pointer drag move the model by 1 px on screen instead of applying an
+	// arbitrary world-space sensitivity. Camera and anchor translate identically.
 	const verticalSpan = camera instanceof PerspectiveCamera
-		? 2 * Math.tan(camera.fov * Math.PI / 360) * start.position.distanceTo(start.target)
+		? 2 * Math.tan(camera.getEffectiveFOV() * Math.PI / 360) * start.position.distanceTo(start.target)
 		: camera instanceof OrthographicCamera ? Math.abs(camera.top - camera.bottom) / Math.max(camera.zoom, 0.0001) : 2;
 	const worldPerPixel = verticalSpan / Math.max(viewportHeight, 1);
 	const translation = right.multiplyScalar(-deltaX * worldPerPixel).add(up.multiplyScalar(deltaY * worldPerPixel));
