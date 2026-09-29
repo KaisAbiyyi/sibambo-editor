@@ -26,7 +26,18 @@ import type { ClipPlaneRecord, SceneProfile } from '@sibambo/contracts';
 import type { PreparedRuntimeGeometryScene } from '@sibambo/scene-runtime/types';
 import { shouldUseSuppressedSolidGeometry } from '@sibambo/scene-runtime';
 import { createFallbackTextMaterial } from './fallback-text.js';
-import { MaterialStateManager, type ViewMode } from './material-state.js';
+import {
+	MaterialStateManager,
+	displayStateFromLegacyMode,
+	legacyViewModeFromDisplayState,
+	normalizeDisplayState,
+	withFaceStyle,
+	withViewEffects,
+	type DisplayState,
+	type FaceStyle,
+	type ViewEffects,
+	type ViewMode
+} from './material-state.js';
 import type { RendererBackendName, ViewerRenderer } from './renderer-backend.js';
 import { ViewportRendererHost } from './renderer-host.js';
 import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
@@ -145,7 +156,8 @@ export class PreparedSceneViewport {
 	private fittedBounds: ViewportBounds = { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 	private get camera() { return this.rendererHost.camera; }
 	private get controls() { return this.rendererHost.controls; }
-	private get viewMode() { return this.rendererHost.viewMode; }
+	private get displayState() { return this.rendererHost.displayState; }
+	private get viewMode() { return legacyViewModeFromDisplayState(this.displayState); }
 
 	private constructor(
 		private readonly input: PreparedSceneViewportInput,
@@ -167,10 +179,11 @@ export class PreparedSceneViewport {
 			}
 		);
 		this.canvas.addEventListener('click', this.handleClick);
+		this.canvas.addEventListener('wheel', this.handleWheel, { capture: true, passive: false });
 		this.assetResolver.onTextureSettled(({ path }) => {
 			this.settledTextures.add(path);
 			for (const record of this.meshRecords) {
-				const material = this.materialState.materialFor(record.materialId, this.viewMode);
+				const material = this.materialState.materialFor(record.materialId, this.displayState, false, this.isDenseScene());
 				this.applyClipPlanesToMaterial(material);
 				record.mesh.material = material;
 			}
@@ -201,11 +214,37 @@ export class PreparedSceneViewport {
 	}
 
 	setViewMode(mode: ViewMode) {
-		this.rendererHost.setViewMode(mode);
-		this.materialState.applyMode(mode);
-		this.applyGeometryMode();
-		this.applySourceFaceFilter();
-		this.rebuildSourceEdges();
+		this.setDisplayState(displayStateFromLegacyMode(mode));
+	}
+
+	getDisplayState(): DisplayState {
+		return normalizeDisplayState(this.displayState);
+	}
+
+	setFaceStyle(faceStyle: FaceStyle) {
+		this.setDisplayState(withFaceStyle(this.displayState, faceStyle));
+	}
+
+	setViewEffects(effects: Partial<ViewEffects>) {
+		this.setDisplayState(withViewEffects(this.displayState, effects));
+	}
+
+	setDisplayState(state: DisplayState) {
+		const previousMode = this.viewMode;
+		const previousSuppressed = shouldUseSuppressedSolidGeometry({ viewMode: previousMode, editorMode: this.input.editorMode ?? false, encodingProfile: this.input.encodingProfile });
+		const next = normalizeDisplayState(state);
+		this.rendererHost.setDisplayState(next);
+		this.materialState.applyDisplayState(next);
+		const nextSuppressed = shouldUseSuppressedSolidGeometry({ viewMode: this.viewMode, editorMode: this.input.editorMode ?? false, encodingProfile: this.input.encodingProfile });
+		if (previousSuppressed !== nextSuppressed) {
+			this.applyGeometryMode();
+			this.applySourceFaceFilter();
+			this.rebuildSourceEdges();
+		} else {
+			this.applyMaterialState();
+			this.applySourceEdgeStyle();
+			this.refreshVisibility();
+		}
 		this.renderOnce();
 	}
 
@@ -219,6 +258,9 @@ export class PreparedSceneViewport {
 		this.rendererHost.applySceneCamera(scene);
 		this.applyClipPlanes(scene);
 		this.refreshVisibility();
+		const visibleBounds = visibleSceneBounds(this.meshRecords);
+		if (visibleBounds) this.fittedBounds = visibleBounds;
+		this.rendererHost.updateClipRange(this.fittedBounds);
 		this.rebuildSourceEdges();
 		this.renderOnce();
 	}
@@ -260,6 +302,7 @@ export class PreparedSceneViewport {
 		this.controls.target.copy(pose.target);
 		this.camera.lookAt(pose.target);
 		this.controls.update();
+		this.rendererHost.updateClipRange(this.fittedBounds);
 		this.renderOnce();
 	}
 	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
@@ -280,26 +323,37 @@ export class PreparedSceneViewport {
 	}
 	zoomAt(clientX: number, clientY: number, deltaY: number) {
 		const rect = this.canvas.getBoundingClientRect();
-		if (!rect.width || !rect.height || !Number.isFinite(deltaY)) return;
+		if (!rect.width || !rect.height || !Number.isFinite(deltaY) || deltaY === 0) return;
 		this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
 		this.raycaster.setFromCamera(this.pointer, this.camera);
 		const viewDirection = this.controls.target.clone().sub(this.camera.position).normalize();
-		const plane = new Plane().setFromNormalAndCoplanarPoint(viewDirection, this.controls.target);
-		const anchor = this.raycaster.ray.intersectPlane(plane, new Vector3());
-		if (!anchor) return;
-		const factor = Math.max(0.25, Math.min(4, Math.exp(deltaY * 0.001)));
+		const targetPlane = new Plane().setFromNormalAndCoplanarPoint(viewDirection, this.controls.target);
+		const planeAnchor = this.raycaster.ray.intersectPlane(targetPlane, new Vector3());
 		if (this.camera instanceof OrthographicCamera) {
-			const shift = anchor.clone().sub(this.controls.target).multiplyScalar(1 - factor);
+			if (!planeAnchor) return;
+			const factor = Math.exp(Math.max(-240, Math.min(240, deltaY)) * 0.0018);
+			const shift = planeAnchor.clone().sub(this.controls.target).multiplyScalar(1 - factor);
 			this.camera.position.add(shift);
 			this.controls.target.add(shift);
-			this.camera.zoom = Math.max(0.02, Math.min(1000, this.camera.zoom / factor));
+			this.camera.zoom = Math.max(1e-8, Math.min(1e8, this.camera.zoom / factor));
 			this.camera.updateProjectionMatrix();
 		} else {
-			this.camera.position.copy(anchor.clone().add(this.camera.position.clone().sub(anchor).multiplyScalar(factor)));
-			this.controls.target.copy(anchor.clone().add(this.controls.target.clone().sub(anchor).multiplyScalar(factor)));
+			const surface = this.cursorSurfaceHit();
+			const span = this.modelSpan();
+			const targetDistance = Math.max(this.camera.position.distanceTo(this.controls.target), span * 0.001);
+			const anchorDistance = surface?.distance ?? (planeAnchor ? this.camera.position.distanceTo(planeAnchor) : targetDistance);
+			const wheelMagnitude = Math.max(0.08, Math.min(2.5, Math.abs(deltaY) / 100));
+			// The floor term deliberately prevents asymptotic convergence at a picked surface:
+			// repeated zoom-in steps eventually cross it, matching a camera dolly rather than a finite lens zoom.
+			const step = Math.max(anchorDistance * 0.18, span * 0.0005, 0.0005) * wheelMagnitude;
+			const direction = this.raycaster.ray.direction.clone().normalize();
+			const travel = direction.multiplyScalar((deltaY < 0 ? 1 : -1) * step);
+			this.camera.position.add(travel);
+			this.controls.target.add(travel);
 		}
 		this.camera.lookAt(this.controls.target);
 		this.controls.update();
+		this.rendererHost.updateClipRange(this.fittedBounds);
 		this.renderOnce();
 	}
 	pickAt(clientX: number, clientY: number): ViewportPick | null {
@@ -436,6 +490,7 @@ export class PreparedSceneViewport {
 		if (this.initialFitHandle) cancelAnimationFrame(this.initialFitHandle);
 		this.initialFitHandle = 0;
 		this.canvas.removeEventListener('click', this.handleClick);
+		this.canvas.removeEventListener('wheel', this.handleWheel, true);
 		this.clearSelectionHelpers();
 		for (const record of new Set([...this.baseMeshRecords, ...this.filteredMeshRecords])) {
 			this.scene3d.remove(record.mesh);
@@ -556,7 +611,7 @@ export class PreparedSceneViewport {
 			if (coordinates.length === 0) continue;
 			const geometry = new BufferGeometry();
 			geometry.setAttribute('position', new Float32BufferAttribute(coordinates, 3));
-			const material = new LineBasicMaterial(sourceEdgeMaterialDescriptor(this.viewMode));
+			const material = new LineBasicMaterial(sourceEdgeMaterialDescriptor(this.displayState));
 			this.applyClipPlanesToMaterial(material);
 			const edges = new LineSegments(geometry, material);
 			edges.renderOrder = 2;
@@ -580,9 +635,35 @@ export class PreparedSceneViewport {
 				? group.solidSourceTriangleIndices ? Uint32Array.from(group.solidSourceTriangleIndices, (triangle) => group.sourceTagIndicesByTriangle?.[triangle] ?? 0xffffffff) : undefined
 				: record.fullSourceTagIndicesByTriangle;
 			prepareIndexedGeometry(record.mesh.geometry, record.baseIndices, record.computeNormalsFromSource);
-			const material = this.materialState.materialFor(record.materialId, this.viewMode);
+			const material = this.materialState.materialFor(record.materialId, this.displayState, false, this.isDenseScene());
 			this.applyClipPlanesToMaterial(material);
 			record.mesh.material = material;
+		}
+	}
+
+	private applyMaterialState() {
+		for (const record of this.baseMeshRecords) {
+			const material = this.materialState.materialFor(record.materialId, this.displayState, false, this.isDenseScene());
+			this.applyClipPlanesToMaterial(material);
+			record.mesh.material = material;
+		}
+		for (const record of this.filteredMeshRecords) {
+			const material = this.materialState.materialFor(record.materialId, this.displayState, false, this.isDenseScene());
+			this.applyClipPlanesToMaterial(material);
+			record.mesh.material = material;
+		}
+	}
+
+	private applySourceEdgeStyle() {
+		const descriptor = sourceEdgeMaterialDescriptor(this.displayState);
+		for (const record of this.edgeRecords) {
+			const material = record.lines.material as LineBasicMaterial;
+			material.color.set(descriptor.color);
+			material.transparent = descriptor.transparent;
+			material.opacity = descriptor.opacity;
+			material.depthTest = descriptor.depthTest;
+			material.depthWrite = descriptor.depthWrite;
+			material.needsUpdate = true;
 		}
 	}
 
@@ -659,7 +740,8 @@ export class PreparedSceneViewport {
 				this.occurrenceVisible(record.occurrenceHierarchyIndices?.[occurrence], record.occurrenceInstanceIndices?.[occurrence], record.occurrenceTagIndices?.[occurrence], compiled, record.occurrenceHandles?.[occurrence], profile)
 			);
 			record.visibleOccurrenceCount = record.visibleOccurrenceIndices.size;
-			record.mesh.visible = !isBaseHiddenForIsolation && signatureVisible && record.baseIndices.length > 0 && record.visibleOccurrenceCount > 0;
+			record.mesh.visible = this.displayState.faceStyle !== 'wireframe'
+				&& !isBaseHiddenForIsolation && signatureVisible && record.baseIndices.length > 0 && record.visibleOccurrenceCount > 0;
 		}
 		this.applyOccurrenceTransforms(new Set([...this.occurrenceTranslations.keys(), ...(this.occurrencePreview ? [this.occurrencePreview.handle] : [])]));
 	}
@@ -697,6 +779,26 @@ export class PreparedSceneViewport {
 		return created.material;
 	}
 
+	private isDenseScene() {
+		return (this.input.scene.totalTriangles ?? 0) > 250_000 || this.input.scene.groups.length > 1_500;
+	}
+	private modelSpan() {
+		return Math.max(
+			this.fittedBounds.max.x - this.fittedBounds.min.x,
+			this.fittedBounds.max.y - this.fittedBounds.min.y,
+			this.fittedBounds.max.z - this.fittedBounds.min.z,
+			0.001
+		);
+	}
+	private cursorSurfaceHit() {
+		const epsilon = Math.max(this.modelSpan() * 1e-6, 1e-6);
+		const records = new Map(this.meshRecords.map((record) => [record.mesh, record]));
+		return this.raycaster.intersectObjects(this.meshRecords.map((record) => record.mesh), false).find((candidate) => {
+			const record = records.get(candidate.object as InstancedMesh);
+			return Boolean(record && candidate.distance > epsilon && !isPointClipped(candidate.point, this.activeClipPlanes)
+				&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
+		}) ?? null;
+	}
 	private renderOnce() { if (!this.disposed) this.rendererHost.renderNow(); }
 	private fitWhenLaidOut() {
 		const waitForLayout = () => {
@@ -728,6 +830,13 @@ export class PreparedSceneViewport {
 		this.readyAtMs = performance.now();
 		this.onReady?.(this.observe());
 	}
+
+	private handleWheel = (event: WheelEvent) => {
+		if (this.disposed) return;
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		this.zoomAt(event.clientX, event.clientY, event.deltaY);
+	};
 
 	private handleClick = (event: MouseEvent) => {
 		if (!this.onPick) return;

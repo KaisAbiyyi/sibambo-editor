@@ -1,7 +1,17 @@
 export { applyNavigationShortcutToControls, cameraPresetPose, handleNavigationShortcut, middleMouseAction, orbitCameraDrag, orbitControlsMouseAction, panCameraDrag, resolveNavigationShortcut, resolvePointerNavigationAction } from './camera-navigation.js';
 export type { CameraNavigationAction, CameraPose, CameraPreset, CameraPresetBounds, NavigationTool } from './camera-navigation.js';
-export { MaterialStateManager, EdgeGeometryCache, xrayCategoryOpacity } from './material-state.js';
-export type { ViewMode } from './material-state.js';
+export {
+	DEFAULT_DISPLAY_STATE,
+	MaterialStateManager,
+	EdgeGeometryCache,
+	displayStateFromLegacyMode,
+	legacyViewModeFromDisplayState,
+	normalizeDisplayState,
+	withFaceStyle,
+	withViewEffects,
+	xrayCategoryOpacity
+} from './material-state.js';
+export type { DisplayState, FaceStyle, ViewEffects, ViewMode } from './material-state.js';
 export { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 export type { SourceEdgeMaterialDescriptor } from './source-edge-style.js';
 export { createViewerRenderer, isWebGlRenderer, resolveRendererRequest } from './renderer-backend.js';

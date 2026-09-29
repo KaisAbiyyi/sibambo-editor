@@ -1,20 +1,27 @@
-import type { ViewMode } from './material-state.js';
+import type { DisplayState, ViewMode } from './material-state.js';
+import { displayStateFromLegacyMode, normalizeDisplayState } from './material-state.js';
 
 export type SourceEdgeMaterialDescriptor = {
 	color: '#111318';
 	transparent: true;
 	opacity: number;
-	depthTest: true;
+	depthTest: boolean;
 	depthWrite: false;
 };
 
-/** Keep source-edge rendering aligned with the established model viewport. */
-export function sourceEdgeMaterialDescriptor(mode: ViewMode): SourceEdgeMaterialDescriptor {
+export function sourceEdgeMaterialDescriptor(input: DisplayState | ViewMode): SourceEdgeMaterialDescriptor {
+	const state = typeof input === 'string' ? displayStateFromLegacyMode(input) : normalizeDisplayState(input);
+	const xray = state.effects.xray;
+	const opacity = xray ? 0.26
+		: state.faceStyle === 'wireframe' ? 0.74
+		: state.faceStyle === 'hidden-line' ? 0.72
+		: state.faceStyle === 'monochrome' ? 0.62
+		: 0.58;
 	return {
 		color: '#111318',
 		transparent: true,
-		opacity: mode === 'xray' ? 0.48 : mode === 'wireframe' ? 0.24 : 0.58,
-		depthTest: true,
+		opacity,
+		depthTest: !xray,
 		depthWrite: false
 	};
 }

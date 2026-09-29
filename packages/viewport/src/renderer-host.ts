@@ -2,7 +2,7 @@ import { OrthographicCamera, PerspectiveCamera, Scene, Vector3 } from 'three';
 import type { SceneProfile } from '@sibambo/contracts';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { applyNavigationShortcutToControls, cameraPresetPose, middleMouseAction, orbitControlsMouseAction, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
-import type { ViewMode } from './material-state.js';
+import { DEFAULT_DISPLAY_STATE, displayStateFromLegacyMode, legacyViewModeFromDisplayState, normalizeDisplayState, type DisplayState, type ViewMode } from './material-state.js';
 import { addRendererSceneLighting, applyRendererColorDefaults, SIBAMBO_CAMERA_DEFAULTS } from './renderer-defaults.js';
 import { createViewerRenderer, type RendererBackendName, type ViewerRenderer } from './renderer-backend.js';
 import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
@@ -29,6 +29,7 @@ export class ViewportRendererHost {
 	readonly pixelRatio: number;
 	camera: ViewportCamera;
 	readonly controls: OrbitControls;
+	displayState: DisplayState = normalizeDisplayState(DEFAULT_DISPLAY_STATE);
 	viewMode: ViewMode = 'solid';
 
 	private readonly resizeObserver: ResizeObserver;
@@ -103,7 +104,12 @@ export class ViewportRendererHost {
 	}
 
 	setViewMode(mode: ViewMode) {
-		this.viewMode = mode;
+		this.setDisplayState(displayStateFromLegacyMode(mode));
+	}
+
+	setDisplayState(state: DisplayState) {
+		this.displayState = normalizeDisplayState(state);
+		this.viewMode = legacyViewModeFromDisplayState(this.displayState);
 		this.requestRender();
 	}
 
@@ -129,6 +135,22 @@ export class ViewportRendererHost {
 		this.requestRender();
 	}
 
+	updateClipRange(bounds: CameraPresetBounds) {
+		const span = Math.max(
+			bounds.max.x - bounds.min.x,
+			bounds.max.y - bounds.min.y,
+			bounds.max.z - bounds.min.z,
+			0.001
+		);
+		const distance = Math.max(this.camera.position.distanceTo(this.controls.target), span * 0.0001);
+		const near = Math.max(0.00005, Math.min(span * 0.0005, distance * 0.02));
+		const far = Math.max(span * 40, distance + span * 8, near * 2000, 1);
+		this.camera.near = near;
+		this.camera.far = far;
+		this.camera.updateProjectionMatrix();
+		this.requestRender();
+	}
+
 	view(bounds: CameraPresetBounds, name: CameraPreset) {
 		const { position, target } = cameraPresetPose(bounds, name);
 		this.camera.up.set(0, 1, 0);
@@ -136,6 +158,7 @@ export class ViewportRendererHost {
 		this.controls.target.copy(target);
 		this.camera.lookAt(target);
 		this.controls.update();
+		this.updateClipRange(bounds);
 		this.requestRender();
 	}
 
@@ -245,6 +268,11 @@ export class ViewportRendererHost {
 	private createControls() {
 		const controls = new OrbitControls(this.camera, this.canvas);
 		controls.enableDamping = false;
+		controls.minDistance = 0;
+		controls.maxDistance = Infinity;
+		controls.minZoom = 1e-8;
+		controls.maxZoom = 1e8;
+		controls.zoomToCursor = true;
 		controls.mouseButtons.MIDDLE = middleMouseAction();
 		controls.mouseButtons.LEFT = orbitControlsMouseAction('orbit');
 		controls.target.set(0, 0, 0);

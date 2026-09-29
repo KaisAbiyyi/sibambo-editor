@@ -5,8 +5,10 @@ export type {
 	CleanMaterialRuntime,
 	EngineFormat,
 	EngineId,
+	DisplayState,
 	EncodingProfile,
 	FaceSourceIdentity,
+	FaceStyle,
 	GeometryOrientation,
 	LoadProgress,
 	OccurrenceHierarchy,
@@ -17,6 +19,7 @@ export type {
 	ResearchProvenance,
 	SurfaceKey,
 	SourceIdentity,
+	ViewEffects,
 	ViewMode,
 	WorkerEnvelope
 } from './runtime.js';
