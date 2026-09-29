@@ -838,7 +838,7 @@ export class PreparedSceneViewport {
 			0, -length, 0, 0, length, 0
 		];
 		const attribute = this.navigationAxes.geometry.getAttribute('position') as BufferAttribute;
-		for (let index = 0; index < positions.length; index += 1) attribute.setX(index, positions[index]);
+		(attribute.array as Float32Array).set(positions);
 		attribute.needsUpdate = true;
 		this.navigationAxes.geometry.computeBoundingSphere();
 	}
