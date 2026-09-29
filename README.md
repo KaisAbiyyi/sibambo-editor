@@ -1,15 +1,15 @@
 
 # Sibambo Editor
 
-The standalone app follows the Editor behavior in the pinned `model-eval` working copy. It keeps its own deployment and in-memory session.
+The standalone workspace follows the versioned [Sibambo UI contract](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/sibambo-ui-contract-ui-reunification-001-v1.1.md), based on the production `model-eval` interface. Editor owns its layout and styles locally; shared appearance does not move model data or sessions between apps.
 
-Sibambo Editor is a browser-based E4 viewport and early editing foundation for inspecting BOMC 1.2 captures. The current page opens one model file with its matching provenance sidecar, renders the imported source, and lets you inspect scenes and source geometry. The app does not provide a complete CAD workflow or write edited geometry back to a BOMC file.
+Sibambo Editor is a browser-based E4 viewport and early editing foundation for inspecting BOMC 1.2 captures. The current page opens one model file, renders the imported source, and lets you inspect scenes and source geometry. A provenance sidecar is optional and adds a matched source record when its policy, byte count, hash, and profile checks pass. The app does not provide a complete CAD workflow or write edited geometry back to a BOMC file.
 
 ## What it currently does
 
-- Accepts one BOMC 1.2 file with a matching research provenance sidecar.
+- Accepts one BOMC 1.2 file without requiring a sidecar.
 - Checks the BOMC marker and version, computes the artifact SHA-256, and validates encoded structure and references.
-- Checks the sidecar against the app’s E4 policy, artifact byte count and SHA-256, and parsed encoding profile.
+- Optionally checks a provenance sidecar against the app’s E4 policy, artifact byte count and SHA-256, and parsed encoding profile.
 - Imports through an Editor-owned worker with progress and cancellation.
 - Shows named scenes, Solid, X-Ray, and Wireframe display modes, standard camera views, and orbit, pan, and zoom navigation.
 - Lets you pick source geometry and inspect available mesh, definition, occurrence, and face identifiers.
@@ -19,9 +19,9 @@ The imported source is read-only in the current interface. Editor-specific geome
 
 ## Open a model
 
-Choose a BOMC 1.2 file and matching provenance JSON, then select **Open verified model**. Missing or mismatched provenance is rejected. After the first frame and requested textures settle, use **Save view** to download a PNG. **Cancel** stops the active import: on first load, the page stays empty; during replacement, the current model and viewport stay available. A rejected replacement also leaves the current session in place. **Unload** clears the page session.
+Choose a BOMC 1.2 file and select **Open model file**. The persistent evidence label shows **File-only · source not recorded** when no sidecar is present. You can optionally choose a provenance JSON before opening, or add one to the current file from its source details. A successful match is labelled **Provenance-matched · operator-attested source record**. A malformed or mismatched sidecar does not replace the active session or upgrade its evidence label. After the first frame and requested textures settle, use **Save view** to download a PNG. **Cancel** stops the active import: on first load, the page stays empty; during replacement, the current model and viewport stay available. A rejected replacement also leaves the current session in place. **Unload** clears the page session.
 
-BOMC import has no fixed app-level file, section, record, geometry, or render-work cutoffs. The importer validates encoded structure, declared lengths, checksums, and references. The required sidecar JSON is read through a byte-bounded helper before parsing. A matching operator-attested record does not cryptographically prove who produced the file or certify the model.
+BOMC import has no fixed app-level file, section, record, geometry, or render-work cutoffs. The importer validates encoded structure, declared lengths, checksums, and references. Optional sidecar JSON is still read through a byte-bounded helper before parsing. A provenance-matched label means the operator-attested record agrees with the selected bytes and parsed profile; it does not cryptographically prove who produced the file or certify the model.
 
 ## Status and evidence limits
 

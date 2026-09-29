@@ -5,11 +5,12 @@ Sibambo Editor is a separate SvelteKit application under apps/editor. Its route 
 
 ## Import and render path
 
-1. The page requires one local BOMC 1.2 file and its matching JSON provenance sidecar.
-2. Editor admission checks the BOMC 1.2 marker and version and computes the artifact SHA-256. The page reads the sidecar through the byte-bounded helper and admission applies the E4 provenance policy and checks the declared byte count and SHA-256.
+1. The page accepts one local BOMC 1.2 file; a local JSON provenance sidecar is optional.
+2. Editor admission checks the BOMC 1.2 marker and version and computes the artifact SHA-256. If a sidecar is supplied, the page reads it through the byte-bounded helper and admission applies the E4 provenance policy and checks the declared byte count and SHA-256.
 3. The admitted ArrayBuffer is transferred to the Editor-owned module worker. The worker invokes the shared BOMC importer and scene-preparation package, reporting progress to the page.
-4. The page confirms the declared sidecar profile matches the parsed BOMC profile, creates a read-only EditorSession with matched provenance, and mounts the shared PreparedSceneViewport.
-5. When the viewport reports that the first frame was observed and requested textures settled, the page enables PNG capture.
+4. The page confirms any declared sidecar profile matches the parsed BOMC profile, creates a read-only EditorSession with either `provenance: null` or matched provenance, and mounts the shared PreparedSceneViewport.
+5. A sidecar added to an open file goes through the same policy, byte-count, hash, and parsed-profile checks before session evidence changes; it does not remount the viewport.
+6. When the viewport reports that the first frame was observed and requested textures settled, the page enables PNG capture.
 
 Relevant implementation files:
 

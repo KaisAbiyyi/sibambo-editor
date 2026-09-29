@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { PerspectiveCamera, Vector3 } from 'three';
-import { orbitCameraDrag, panCameraDrag, temporaryCameraTool } from '../../src/lib/editor/camera-navigation';
+import { orbitCameraDrag, panCameraDrag, pinchZoomDelta, temporaryCameraTool } from '../../src/lib/editor/camera-navigation';
 
 describe('editor camera navigation', () => {
 	test('orbit starts from current pose without changing target or radius', () => {
@@ -24,5 +24,13 @@ describe('editor camera navigation', () => {
 		expect(temporaryCameraTool('tape', 1, false)).toBe('orbit');
 		expect(temporaryCameraTool('tape', 1, true)).toBe('pan');
 		expect(temporaryCameraTool('tape', 0, false)).toBe('tape');
+	});
+
+	test('pinch zoom deltas accumulate to the single start-to-current scale', () => {
+		const first = pinchZoomDelta(100, 110);
+		const second = pinchZoomDelta(110, 121);
+		expect(first + second).toBeCloseTo(pinchZoomDelta(100, 121));
+		expect(pinchZoomDelta(100, 110)).toBeLessThan(0);
+		expect(pinchZoomDelta(110, 100)).toBeGreaterThan(0);
 	});
 });
