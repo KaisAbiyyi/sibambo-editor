@@ -19,7 +19,6 @@ const MISSING = 0xffffffff;
 const MAX_BOMC_EXPANDED_OCCURRENCES = 250_000;
 const MAX_BOMC_OCCURRENCE_DEPTH = 128;
 const MAX_BOMC_RENDER_TRIANGLE_WORK = 2_000_000;
-const MAX_BOMC_ANALYTICAL_FACE_WORK = 250_000;
 const MAX_BOMC_SCENE_VISIBILITY_WORK = 10_000_000;
 const MAX_BOMC_TOTAL_VERTICES = 5_000_000;
 const MAX_BOMC_TOTAL_TOPOLOGY_INDICES = 16_000_000;
@@ -997,7 +996,6 @@ export function assertRuntimeWorkBudgets(
 	fallback: FallbackRecord[], instanceOccurrences: Map<number, Matrix4[]>, instances: InstanceRecord[],
 	sceneVisibilityIndex: SceneVisibilityIndex, edgeAdjacencyByMesh: Map<number, Uint32Array[]>
 ) {
-	let analyticalFaceWork = 0;
 	let renderTriangleWork = 0;
 	let sceneVisibilityWork = 0;
 	let fallbackGroups = 0;
@@ -1014,13 +1012,9 @@ export function assertRuntimeWorkBudgets(
 				}
 			}
 		}
-		analyticalFaceWork += mesh.faces.length * occurrenceCount;
 		const triangleIndices = mesh.faces.reduce((sum, face) => sum + face.triangleCount, 0);
 		// Two appearance sides are the maximum render expansion for one source face.
 		renderTriangleWork += Math.ceil(triangleIndices / 3) * occurrenceCount * 2;
-		if (analyticalFaceWork > MAX_BOMC_ANALYTICAL_FACE_WORK) {
-			throw new Error(`BOMC invalid: analytical face work exceeds the ${MAX_BOMC_ANALYTICAL_FACE_WORK} resource limit.`);
-		}
 		if (renderTriangleWork > MAX_BOMC_RENDER_TRIANGLE_WORK) {
 			throw new Error(`BOMC invalid: render triangle work exceeds the ${MAX_BOMC_RENDER_TRIANGLE_WORK} resource limit.`);
 		}
