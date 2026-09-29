@@ -583,6 +583,9 @@
 	function toggleXray(event: Event) {
 		applyDisplayState(faceStyle, { ...viewEffects, xray: (event.currentTarget as HTMLInputElement).checked });
 	}
+	function toggleAmbientOcclusion(event: Event) {
+		applyDisplayState(faceStyle, { ...viewEffects, ambientOcclusion: (event.currentTarget as HTMLInputElement).checked });
+	}
 	function downloadCapture() {
 		if (!viewport || !result) return;
 		const link = document.createElement('a');
@@ -669,6 +672,8 @@
 							<button type="button" onclick={() => viewport?.view('top')}>Top</button><button type="button" onclick={() => viewport?.view('front')}>Front</button><button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
 							<label>Face style<select aria-label="Face style" value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
 							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
 							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
 							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 							<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact</button>
