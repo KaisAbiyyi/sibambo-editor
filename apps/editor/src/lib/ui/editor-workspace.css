@@ -1,5 +1,6 @@
 /* Editor-only workspace chrome. Keep shared Sibambo variables/base styles in sibambo.css. */
-main[data-app="editor"] {
+main[data-app="editor"],
+main[data-app="editor"].is-loaded {
 	height: 100vh;
 	height: 100dvh;
 	min-height: 0;
@@ -284,7 +285,8 @@ main[data-app="editor"] {
 .footer-build span:first-child { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
 
 @media(max-width: 760px) {
-	main[data-app="editor"] { grid-template-rows: 36px 52px 40px minmax(0, 1fr) 32px; }
+	main[data-app="editor"],
+	main[data-app="editor"].is-loaded { grid-template-rows: 36px 52px 40px minmax(0, 1fr) 32px; }
 	.editor-wordmark { padding: 0 8px; }
 	.editor-wordmark > span:last-child { display: none; }
 	.menu-root > summary, .menu-label { height: 35px; padding: 0 8px; font-size: 10px; }
