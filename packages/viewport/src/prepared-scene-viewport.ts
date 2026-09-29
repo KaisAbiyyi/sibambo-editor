@@ -44,7 +44,7 @@ import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 import { RuntimeAssetResolver } from './runtime-asset-resolver.js';
 import { RuntimeMaterialCache } from './source-material-cache.js';
 import { buildPreparedInstancedSurfaceGroups } from './prepared-surface.js';
-import { orbitCameraDrag, panCameraDrag, type CameraPose, type NavigationTool } from './camera-navigation.js';
+import { groundedCameraPose, orbitCameraDrag, panCameraDrag, type CameraPose, type NavigationTool } from './camera-navigation.js';
 import { SceneVisibilityIndex } from './scene-visibility.js';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-program.js';
@@ -354,7 +354,10 @@ export class PreparedSceneViewport {
 			this.camera.position.add(travel);
 			this.controls.target.add(travel);
 		}
-		this.camera.lookAt(this.controls.target);
+		const grounded = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
+		this.camera.position.copy(grounded.position);
+		this.controls.target.copy(grounded.target);
+		this.camera.lookAt(grounded.target);
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 	}
