@@ -129,6 +129,7 @@ export class PreparedSceneViewport {
 	private readonly filteredMeshRecords: MeshRecord[] = [];
 	private readonly edgeRecords: EdgeRecord[] = [];
 	private readonly selectionHelpers: Box3Helper[] = [];
+	private navigationAxes: LineSegments | null = null;
 	private readonly domainOverlays = new Map<string, Object3D>();
 	private readonly requestedTextures = new Set<string>();
 	private readonly settledTextures = new Set<string>();
@@ -192,6 +193,7 @@ export class PreparedSceneViewport {
 
 		for (const asset of input.appearance?.assets ?? []) this.assetResolver.registerAsset(asset.path, asset.bytes);
 		this.buildMeshes();
+		this.createNavigationAxes();
 		const selectedScene = input.scenes?.find((scene) => scene.id === input.activeSceneId) ?? input.scenes?.find((scene) => scene.isActiveAtExport);
 		if (selectedScene) this.setScene(selectedScene);
 		rendererHost.setResizeHandler(() => {
@@ -260,6 +262,7 @@ export class PreparedSceneViewport {
 		this.refreshVisibility();
 		const visibleBounds = visibleSceneBounds(this.meshRecords);
 		if (visibleBounds) this.fittedBounds = visibleBounds;
+		this.refreshNavigationAxes();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 		this.rebuildSourceEdges();
 		this.renderOnce();
@@ -442,6 +445,7 @@ export class PreparedSceneViewport {
 	fit() {
 		const bounds = visibleSceneBounds(this.meshRecords);
 		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
+		this.refreshNavigationAxes();
 		this.focusBounds(this.fittedBounds);
 	}
 
@@ -791,6 +795,52 @@ export class PreparedSceneViewport {
 		this.fallbackTextMaterials.add(created.material);
 		if (created.texture) this.fallbackTextTextures.add(created.texture);
 		return created.material;
+	}
+
+	private createNavigationAxes() {
+		const geometry = new BufferGeometry();
+		geometry.setAttribute('position', new Float32BufferAttribute(new Float32Array(18), 3));
+		geometry.setAttribute('color', new Float32BufferAttribute([
+			0.86, 0.10, 0.10, 0.86, 0.10, 0.10, // X / red
+			0.08, 0.58, 0.22, 0.08, 0.58, 0.22, // Y / green
+			0.10, 0.32, 0.95, 0.10, 0.32, 0.95  // Z / blue
+		], 3));
+		const material = new LineBasicMaterial({
+			vertexColors: true,
+			transparent: true,
+			opacity: 0.82,
+			depthTest: false,
+			depthWrite: false,
+			toneMapped: false
+		});
+		this.navigationAxes = new LineSegments(geometry, material);
+		this.navigationAxes.name = 'sibambo-navigation-axes';
+		this.navigationAxes.renderOrder = 40;
+		this.scene3d.add(this.navigationAxes);
+		this.refreshNavigationAxes();
+	}
+
+	private refreshNavigationAxes() {
+		if (!this.navigationAxes) return;
+		const span = this.modelSpan();
+		const maxCoordinate = Math.max(
+			Math.abs(this.fittedBounds.min.x), Math.abs(this.fittedBounds.max.x),
+			Math.abs(this.fittedBounds.min.y), Math.abs(this.fittedBounds.max.y),
+			Math.abs(this.fittedBounds.min.z), Math.abs(this.fittedBounds.max.z)
+		);
+		const length = Math.max(10, span * 3, maxCoordinate * 1.5);
+		// Runtime is Three.js Y-up while SketchUp source semantics are Z-up.
+		// Draw source X red on runtime X, source Y green on runtime Z, and source
+		// Z blue on runtime Y so the visible guide matches SketchUp conventions.
+		const positions = [
+			-length, 0, 0, length, 0, 0,
+			0, 0, -length, 0, 0, length,
+			0, -length, 0, 0, length, 0
+		];
+		const attribute = this.navigationAxes.geometry.getAttribute('position') as BufferAttribute;
+		for (let index = 0; index < positions.length; index += 1) attribute.setX(index, positions[index]);
+		attribute.needsUpdate = true;
+		this.navigationAxes.geometry.computeBoundingSphere();
 	}
 
 	private hasNativePbr() {

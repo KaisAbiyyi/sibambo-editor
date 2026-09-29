@@ -13,20 +13,23 @@ describe('editor camera navigation', () => {
 		expect(anchorDirection.distanceTo(cameraDirection)).toBeLessThan(1e-9);
 	});
 
-	test('orbit uses the grounded anchor and keeps angular sensitivity independent of radius', () => {
+	test('orbit uses the grounded anchor, rotates only horizontally, and keeps sensitivity independent of radius', () => {
 		const near = { position: new Vector3(8, 5, 7), target: new Vector3(2, 1, -3) };
 		const nearGrounded = groundedCameraPose(near);
 		const farDirection = nearGrounded.position.clone().sub(nearGrounded.target).normalize();
 		const far = { position: nearGrounded.target.clone().add(farDirection.multiplyScalar(100)), target: nearGrounded.target.clone() };
-		const nearMoved = orbitCameraDrag(near, 80, -20);
-		const farMoved = orbitCameraDrag(far, 80, -20);
+		const nearMoved = orbitCameraDrag(near, 80, -200);
+		const nearMovedNoVerticalInput = orbitCameraDrag(near, 80, 0);
+		const farMoved = orbitCameraDrag(far, 80, 300);
 		expect(nearMoved.target.y).toBeCloseTo(0, 10);
 		expect(farMoved.target.y).toBeCloseTo(0, 10);
-		const nearStartDirection = nearGrounded.position.clone().sub(nearGrounded.target).normalize();
-		const nearEndDirection = nearMoved.position.clone().sub(nearMoved.target).normalize();
-		const farStartDirection = far.position.clone().sub(far.target).normalize();
-		const farEndDirection = farMoved.position.clone().sub(farMoved.target).normalize();
-		expect(nearStartDirection.angleTo(nearEndDirection)).toBeCloseTo(farStartDirection.angleTo(farEndDirection), 10);
+		expect(nearMoved.position.y).toBeCloseTo(nearGrounded.position.y, 10);
+		expect(nearMoved.position.distanceTo(nearMovedNoVerticalInput.position)).toBeLessThan(1e-9);
+		const nearStartHorizontal = new Vector3(nearGrounded.position.x - nearGrounded.target.x, 0, nearGrounded.position.z - nearGrounded.target.z).normalize();
+		const nearEndHorizontal = new Vector3(nearMoved.position.x - nearMoved.target.x, 0, nearMoved.position.z - nearMoved.target.z).normalize();
+		const farStartHorizontal = new Vector3(far.position.x - far.target.x, 0, far.position.z - far.target.z).normalize();
+		const farEndHorizontal = new Vector3(farMoved.position.x - farMoved.target.x, 0, farMoved.position.z - farMoved.target.z).normalize();
+		expect(nearStartHorizontal.angleTo(nearEndHorizontal)).toBeCloseTo(farStartHorizontal.angleTo(farEndHorizontal), 10);
 		expect(Math.abs(nearMoved.position.distanceTo(nearMoved.target) - nearGrounded.position.distanceTo(nearGrounded.target))).toBeLessThan(1e-9);
 	});
 

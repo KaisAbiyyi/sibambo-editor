@@ -1,4 +1,4 @@
-import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Spherical, Vector3 } from 'three';
+import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Vector3 } from 'three';
 
 export type CameraPose = { position: Vector3; target: Vector3 };
 export type CameraPreset = 'top' | 'front' | 'iso';
@@ -107,15 +107,21 @@ export function cameraPresetPose(bounds: CameraPresetBounds, name: CameraPreset)
 	return { position: target.clone().add(offset.normalize().multiplyScalar(span)), target };
 }
 
-export function orbitCameraDrag(start: CameraPose, deltaX: number, deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
+export function orbitCameraDrag(start: CameraPose, deltaX: number, _deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
 	const grounded = groundedCameraPose(start);
 	const offset = grounded.position.clone().sub(grounded.target);
-	const spherical = new Spherical().setFromVector3(offset);
-	// Angular sensitivity is intentionally independent of camera-anchor distance.
-	// Zoom changes framing, not degrees-per-pointer-pixel.
-	spherical.theta -= deltaX * radiansPerPixel;
-	spherical.phi = Math.max(0.01, Math.min(Math.PI - 0.01, spherical.phi - deltaY * radiansPerPixel));
-	return { position: grounded.target.clone().add(new Vector3().setFromSpherical(spherical)), target: grounded.target.clone() };
+	const angle = -deltaX * radiansPerPixel;
+	const cos = Math.cos(angle);
+	const sin = Math.sin(angle);
+	// SketchUp-like constrained orbit: rotate only around the world vertical axis.
+	// Camera height and elevation angle remain fixed; vertical pointer movement does
+	// not pitch the camera. This prevents the spherical "too orbit-y" behavior.
+	const rotated = new Vector3(
+		offset.x * cos + offset.z * sin,
+		offset.y,
+		-offset.x * sin + offset.z * cos
+	);
+	return { position: grounded.target.clone().add(rotated), target: grounded.target.clone() };
 }
 export function panCameraDrag(camera: Camera, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number): CameraPose {
 	const grounded = groundedCameraPose(start);
