@@ -13,7 +13,11 @@ export type ResearchProvenance = {
 export type Point3 = { x: number; y: number; z: number };
 export type Bounds3 = { min: Point3; max: Point3; size: Point3; center: Point3 };
 export type GeometryOrientation = 'horizontal' | 'vertical' | 'sloped';
+/** Legacy three-state display mode retained for app/domain compatibility. */
 export type ViewMode = 'solid' | 'xray' | 'wireframe';
+export type FaceStyle = 'wireframe' | 'hidden-line' | 'shaded' | 'shaded-textures' | 'monochrome' | 'photoreal';
+export type ViewEffects = { xray: boolean; ambientOcclusion: boolean };
+export type DisplayState = { faceStyle: FaceStyle; effects: ViewEffects };
 export type EncodingProfile = 'exact' | 'research' | 'visual';
 
 export type SurfaceKey =
@@ -61,6 +65,15 @@ export type CleanMaterialRuntime = {
 	textureAsset?: string;
 	textureWidthM?: number;
 	textureHeightM?: number;
+	/** Optional forward-compatible PBR fields. Existing BOMC 1.2 material records may omit all of them. */
+	roughness?: number;
+	metalness?: number;
+	roughnessTextureAsset?: string;
+	metalnessTextureAsset?: string;
+	normalTextureAsset?: string;
+	occlusionTextureAsset?: string;
+	emissiveTextureAsset?: string;
+	emissiveColor?: string;
 };
 
 export type OccurrenceHierarchy = {

@@ -1,10 +1,14 @@
 import { OrthographicCamera, PerspectiveCamera, Scene, Vector3 } from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { SceneProfile } from '@sibambo/contracts';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { applyNavigationShortcutToControls, cameraPresetPose, middleMouseAction, orbitControlsMouseAction, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
-import type { ViewMode } from './material-state.js';
+import { DEFAULT_DISPLAY_STATE, displayStateFromLegacyMode, legacyViewModeFromDisplayState, normalizeDisplayState, type DisplayState, type ViewMode } from './material-state.js';
 import { addRendererSceneLighting, applyRendererColorDefaults, SIBAMBO_CAMERA_DEFAULTS } from './renderer-defaults.js';
-import { createViewerRenderer, type RendererBackendName, type ViewerRenderer } from './renderer-backend.js';
+import { createViewerRenderer, isWebGlRenderer, type RendererBackendName, type ViewerRenderer } from './renderer-backend.js';
 import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 
 export type ViewportCamera = PerspectiveCamera | OrthographicCamera;
@@ -29,6 +33,7 @@ export class ViewportRendererHost {
 	readonly pixelRatio: number;
 	camera: ViewportCamera;
 	readonly controls: OrbitControls;
+	displayState: DisplayState = normalizeDisplayState(DEFAULT_DISPLAY_STATE);
 	viewMode: ViewMode = 'solid';
 
 	private readonly resizeObserver: ResizeObserver;
@@ -38,6 +43,14 @@ export class ViewportRendererHost {
 	private beforeRender?: () => boolean;
 	private onFrameRendered?: (frameMs: number) => void;
 	private readonly navigationEnabled: boolean;
+	private composer: EffectComposer | null = null;
+	private renderPass: RenderPass | null = null;
+	private ssaoPass: SSAOPass | null = null;
+	private outputPass: OutputPass | null = null;
+	private ambientOcclusionEnabled = false;
+	private clipBounds: CameraPresetBounds | null = null;
+	get supportsAmbientOcclusion() { return isWebGlRenderer(this.renderer); }
+	get layoutSize() { return { width: this.host.clientWidth, height: this.host.clientHeight }; }
 
 	private constructor(
 		private readonly host: HTMLElement,
@@ -94,6 +107,8 @@ export class ViewportRendererHost {
 	setCamera(camera: ViewportCamera) {
 		this.camera = camera;
 		this.controls.object = camera;
+		if (this.renderPass) this.renderPass.camera = camera;
+		if (this.ssaoPass) this.ssaoPass.camera = camera;
 		this.resize();
 	}
 
@@ -102,12 +117,26 @@ export class ViewportRendererHost {
 	}
 
 	setViewMode(mode: ViewMode) {
-		this.viewMode = mode;
+		this.setDisplayState(displayStateFromLegacyMode(mode));
+	}
+
+	setDisplayState(state: DisplayState) {
+		this.displayState = normalizeDisplayState(state);
+		this.viewMode = legacyViewModeFromDisplayState(this.displayState);
+		this.setAmbientOcclusionEnabled(this.displayState.effects.ambientOcclusion);
+		this.requestRender();
+	}
+
+	setAmbientOcclusionEnabled(enabled: boolean) {
+		if (enabled && this.supportsAmbientOcclusion && !this.composer) this.setupPostProcessing();
+		this.ambientOcclusionEnabled = Boolean(enabled) && this.composer !== null && this.ssaoPass !== null;
+		if (this.ssaoPass) this.ssaoPass.enabled = this.ambientOcclusionEnabled;
 		this.requestRender();
 	}
 
 	/** Apply the shared fit policy to caller-derived bounds. */
 	focusBounds(bounds: CameraPresetBounds) {
+		this.clipBounds = bounds;
 		const center = new Vector3(
 			(bounds.min.x + bounds.max.x) / 2,
 			(bounds.min.y + bounds.max.y) / 2,
@@ -128,6 +157,28 @@ export class ViewportRendererHost {
 		this.requestRender();
 	}
 
+	updateClipRange(bounds: CameraPresetBounds) {
+		this.clipBounds = bounds;
+		const span = Math.max(
+			bounds.max.x - bounds.min.x,
+			bounds.max.y - bounds.min.y,
+			bounds.max.z - bounds.min.z,
+			0.001
+		);
+		const distance = Math.max(this.camera.position.distanceTo(this.controls.target), span * 0.0001);
+		const near = Math.max(0.00005, Math.min(span * 0.0005, distance * 0.02));
+		const far = Math.max(span * 40, distance + span * 8, near * 2000, 1);
+		this.camera.near = near;
+		this.camera.far = far;
+		this.camera.updateProjectionMatrix();
+		if (this.ssaoPass) {
+			this.ssaoPass.minDistance = Math.max(span * 0.00008, 0.00001);
+			this.ssaoPass.maxDistance = Math.max(span * 0.018, this.ssaoPass.minDistance * 10);
+			this.ssaoPass.kernelRadius = Math.max(3, Math.min(24, 6 + Math.log10(span + 1) * 4));
+		}
+		this.requestRender();
+	}
+
 	view(bounds: CameraPresetBounds, name: CameraPreset) {
 		const { position, target } = cameraPresetPose(bounds, name);
 		this.camera.up.set(0, 1, 0);
@@ -135,6 +186,7 @@ export class ViewportRendererHost {
 		this.controls.target.copy(target);
 		this.camera.lookAt(target);
 		this.controls.update();
+		this.updateClipRange(bounds);
 		this.requestRender();
 	}
 
@@ -197,7 +249,8 @@ export class ViewportRendererHost {
 			this.frameHandle = 0;
 		}
 		const startedAt = performance.now();
-		this.renderer.render(this.scene, this.camera);
+		if (this.ambientOcclusionEnabled && this.composer) this.composer.render();
+		else this.renderer.render(this.scene, this.camera);
 		this.onFrameRendered?.(performance.now() - startedAt);
 	}
 
@@ -206,6 +259,7 @@ export class ViewportRendererHost {
 		const width = Math.max(this.host.clientWidth, 1);
 		const height = Math.max(this.host.clientHeight, 1);
 		this.renderer.setSize(width, height, false);
+		this.composer?.setSize(width, height);
 		if (this.camera instanceof PerspectiveCamera) {
 			this.camera.aspect = width / height;
 		} else {
@@ -226,6 +280,10 @@ export class ViewportRendererHost {
 		this.canvas.removeEventListener('pointercancel', this.restoreMiddleMouseMapping);
 		window.removeEventListener('keydown', this.handleNavigationKeyDown);
 		this.controls.dispose();
+		this.ssaoPass?.dispose();
+		this.outputPass?.dispose();
+		this.composer?.dispose();
+		this.ssaoPass = null; this.outputPass = null; this.renderPass = null; this.composer = null;
 		if (this.frameHandle) cancelAnimationFrame(this.frameHandle);
 		this.frameHandle = 0;
 		this.resizeObserver.disconnect();
@@ -241,13 +299,36 @@ export class ViewportRendererHost {
 		if (continueRendering) this.requestRender();
 	};
 
+	private setupPostProcessing() {
+		if (!isWebGlRenderer(this.renderer)) return;
+		this.composer = new EffectComposer(this.renderer);
+		this.composer.setPixelRatio(this.pixelRatio);
+		this.renderPass = new RenderPass(this.scene, this.camera);
+		const size = this.layoutSize;
+		this.ssaoPass = new SSAOPass(this.scene, this.camera, Math.max(size.width, 1), Math.max(size.height, 1), 16);
+		this.ssaoPass.enabled = false;
+		this.ssaoPass.kernelRadius = 8;
+		this.outputPass = new OutputPass();
+		this.composer.addPass(this.renderPass);
+		this.composer.addPass(this.ssaoPass);
+		this.composer.addPass(this.outputPass);
+	}
+
 	private createControls() {
 		const controls = new OrbitControls(this.camera, this.canvas);
 		controls.enableDamping = false;
+		controls.minDistance = 0;
+		controls.maxDistance = Infinity;
+		controls.minZoom = 1e-8;
+		controls.maxZoom = 1e8;
+		controls.zoomToCursor = true;
 		controls.mouseButtons.MIDDLE = middleMouseAction();
 		controls.mouseButtons.LEFT = orbitControlsMouseAction('orbit');
 		controls.target.set(0, 0, 0);
-		controls.addEventListener('change', () => this.requestRender());
+		controls.addEventListener('change', () => {
+			if (this.clipBounds) this.updateClipRange(this.clipBounds);
+			else this.requestRender();
+		});
 		this.canvas.addEventListener('pointerdown', this.handlePointerDownCapture, true);
 		this.canvas.addEventListener('pointerup', this.restoreMiddleMouseMapping);
 		this.canvas.addEventListener('pointercancel', this.restoreMiddleMouseMapping);

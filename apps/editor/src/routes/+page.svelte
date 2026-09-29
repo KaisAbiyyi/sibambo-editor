@@ -8,7 +8,7 @@
 	import type { EditorTool } from '$lib/editor/EditorState';
 	import { pinchZoomDelta, pointerCameraTool, selectionDragMode, selectionModifierMode, type EditorSelectionModifier } from '$lib/editor/camera-navigation';
 	import { loadE4InWorker } from '$lib/e4-worker-client';
-	import type { PreparedSceneViewport, ViewMode, ViewportPick } from '@sibambo/viewport';
+	import { legacyViewModeFromDisplayState, type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewMode, type ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
@@ -38,6 +38,8 @@
 	let activeCameraTool = $state<'orbit' | 'pan' | 'zoom' | null>(null);
 	let moveDistanceText = $state('');
 	let moveAxis = $state<'x' | 'y' | 'z' | null>(null);
+	let faceStyle = $state<FaceStyle>('shaded-textures');
+	let viewEffects = $state<ViewEffects>({ xray: false, ambientOcclusion: false });
 	let viewMode = $state<ViewMode>('solid');
 	let sceneId = $state('');
 	let generation = 0;
@@ -183,7 +185,7 @@
 			}
 			const selectedScene = loaded.scenes.find((scene) => scene.id === nextSceneId);
 			nextViewport.setScene(selectedScene ?? null);
-			nextViewport.setViewMode(viewMode);
+			nextViewport.setDisplayState({ faceStyle, effects: viewEffects });
 			nextViewport.setOrbitControlsEnabled(false);
 			provenance = admitted.provenance;
 			artifactSha256 = admitted.artifactSha256;
@@ -330,8 +332,8 @@
 		}
 		updateSelection([pick.occurrenceHandle], mode, pick);
 	}
-	function sceneChanged(event: Event) {
-		sceneId = (event.currentTarget as HTMLSelectElement).value;
+	function activateScene(nextSceneId: string) {
+		sceneId = nextSceneId;
 		const selected = result?.scenes.find((scene) => scene.id === sceneId);
 		viewport?.setScene(selected ?? null);
 		const retained = selectedOccurrenceHandles.filter((handle) => viewport?.hasOccurrence(handle));
@@ -341,6 +343,9 @@
 			viewport?.setSelectedOccurrences(retained);
 			editorNotice = 'Selection cleared because its imported occurrence is absent from this scene.';
 		}
+	}
+	function sceneChanged(event: Event) {
+		activateScene((event.currentTarget as HTMLSelectElement).value);
 	}
 	function mouseButtonsFromMask(mask: number) {
 		const buttons = new Set<number>();
@@ -568,7 +573,19 @@
 		}
 	}
 
-	function setMode(mode: ViewMode) { viewMode = mode; viewport?.setViewMode(mode); }
+	function applyDisplayState(nextFaceStyle: FaceStyle = faceStyle, nextEffects: ViewEffects = viewEffects) {
+		faceStyle = nextFaceStyle;
+		viewEffects = { ...nextEffects };
+		viewMode = legacyViewModeFromDisplayState({ faceStyle, effects: viewEffects });
+		viewport?.setDisplayState({ faceStyle, effects: viewEffects });
+	}
+	function setFaceStyle(style: FaceStyle) { applyDisplayState(style, viewEffects); }
+	function toggleXray(event: Event) {
+		applyDisplayState(faceStyle, { ...viewEffects, xray: (event.currentTarget as HTMLInputElement).checked });
+	}
+	function toggleAmbientOcclusion(event: Event) {
+		applyDisplayState(faceStyle, { ...viewEffects, ambientOcclusion: (event.currentTarget as HTMLInputElement).checked });
+	}
 	function downloadCapture() {
 		if (!viewport || !result) return;
 		const link = document.createElement('a');
@@ -653,8 +670,10 @@
 						<summary>More</summary>
 						<div class="secondary-menu">
 							<button type="button" onclick={() => viewport?.view('top')}>Top</button><button type="button" onclick={() => viewport?.view('front')}>Front</button><button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
-							<label>Display<select value={viewMode} onchange={(event) => setMode((event.currentTarget as HTMLSelectElement).value as ViewMode)}><option value="solid">Solid</option><option value="xray">X-Ray</option><option value="wireframe">Wireframe</option></select></label>
-							{#if result.scenes.length}<label>Scene<select aria-label="Visible scene" value={sceneId} onchange={sceneChanged}>{#each result.scenes as scene}<option value={scene.id}>{scene.name || scene.id}</option>{/each}</select></label>{/if}
+							<label>Face style<select aria-label="Face style" value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.ambientOcclusion} onchange={toggleAmbientOcclusion} />Ambient Occlusion</label>
 							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
 							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 							<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact</button>
@@ -679,6 +698,13 @@
 			<span>{result.counts.faces.toLocaleString()} faces · {result.counts.instances.toLocaleString()} instances · {result.counts.meshes.toLocaleString()} meshes</span>
 			<span class:ready>{ready ? 'Textures settled and first frame observed' : 'Preparing viewport'}</span>
 		</section>
+				{#if result.scenes.length}
+					<nav class="scene-tabs" role="tablist" aria-label="Scenes">
+						{#each result.scenes as scene}
+							<button type="button" role="tab" aria-selected={scene.id === sceneId} class:active={scene.id === sceneId} onclick={() => activateScene(scene.id)}>{scene.name || scene.id}</button>
+						{/each}
+					</nav>
+				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -708,8 +734,8 @@
 						<summary aria-label="More model controls">More</summary>
 						<div class="secondary-menu">
 							<button type="button" onclick={() => viewport?.view('top')}>Top</button><button type="button" onclick={() => viewport?.view('front')}>Front</button><button type="button" onclick={() => viewport?.view('iso')}>Iso</button>
-							<label>Display<select aria-label="Display mode" value={viewMode} onchange={(event) => setMode((event.currentTarget as HTMLSelectElement).value as ViewMode)}><option value="solid">Solid</option><option value="xray">X-Ray</option><option value="wireframe">Wireframe</option></select></label>
-							{#if result.scenes.length}<label>Scene<select aria-label="Visible scene" value={sceneId} onchange={sceneChanged}>{#each result.scenes as scene}<option value={scene.id}>{scene.name || scene.id}</option>{/each}</select></label>{/if}
+							<label>Face style<select aria-label="Face style" value={faceStyle} onchange={(event) => setFaceStyle((event.currentTarget as HTMLSelectElement).value as FaceStyle)}><option value="wireframe">Wireframe</option><option value="hidden-line">Hidden Line</option><option value="shaded">Shaded</option><option value="shaded-textures">Shaded With Textures</option><option value="monochrome">Monochrome</option><option value="photoreal">Photoreal (fallback)</option></select></label>
+							<label class="effect-toggle"><input type="checkbox" checked={viewEffects.xray} onchange={toggleXray} />X-Ray</label>
 							<button type="button" onclick={downloadCapture} disabled={!ready}>Save view</button>
 							<button type="button" class="primary" onclick={openModel} disabled={busy || !sourceFile}>{busy ? 'Opening…' : 'Open model file'}</button>
 							<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Change artifact · {sourceFile?.name ?? 'choose file'}</button>

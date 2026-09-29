@@ -6,6 +6,7 @@ import { SceneVisibilityIndex, shouldRenderSourceEdge } from './scene-visibility
 import { applyInstancedMeshVisibility, applyMaterialClipPlanes, disposeInstancedMesh, isPointClipped, isReadyAfterRenderedFrame, prepareIndexedGeometry, refreshInstancedMeshBounds } from './viewport-render-state';
 import { cameraPresetPose, middleMouseAction, resolveNavigationShortcut } from './camera-navigation';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style';
+import { displayStateFromLegacyMode, legacyViewModeFromDisplayState, normalizeDisplayState } from './material-state';
 
 describe('prepared viewport policies', () => {
 	test('keeps source face selection paired with its occurrence', () => {
@@ -125,15 +126,32 @@ describe('prepared viewport policies', () => {
 		expect(middleMouseAction()).toBe(MOUSE.ROTATE);
 	});
 
-	test('matches the legacy source-edge material descriptor for every view mode', () => {
+	test('maps legacy display modes onto the richer face-style/effect state', () => {
+		expect(displayStateFromLegacyMode('solid')).toEqual({
+			faceStyle: 'shaded-textures', effects: { xray: false, ambientOcclusion: false }
+		});
+		expect(displayStateFromLegacyMode('xray')).toEqual({
+			faceStyle: 'shaded-textures', effects: { xray: true, ambientOcclusion: false }
+		});
+		expect(legacyViewModeFromDisplayState(normalizeDisplayState({
+			faceStyle: 'hidden-line', effects: { xray: true, ambientOcclusion: true }
+		}))).toBe('xray');
+	});
+
+	test('styles authored source edges distinctly for x-ray, wireframe and opaque face styles', () => {
 		expect(sourceEdgeMaterialDescriptor('solid')).toEqual({
 			color: '#111318', transparent: true, opacity: 0.58, depthTest: true, depthWrite: false
 		});
 		expect(sourceEdgeMaterialDescriptor('xray')).toEqual({
-			color: '#111318', transparent: true, opacity: 0.48, depthTest: true, depthWrite: false
+			color: '#111318', transparent: true, opacity: 0.26, depthTest: false, depthWrite: false
 		});
 		expect(sourceEdgeMaterialDescriptor('wireframe')).toEqual({
-			color: '#111318', transparent: true, opacity: 0.24, depthTest: true, depthWrite: false
+			color: '#111318', transparent: true, opacity: 0.74, depthTest: true, depthWrite: false
+		});
+		expect(sourceEdgeMaterialDescriptor({
+			faceStyle: 'hidden-line', effects: { xray: false, ambientOcclusion: false }
+		})).toEqual({
+			color: '#111318', transparent: true, opacity: 0.72, depthTest: true, depthWrite: false
 		});
 	});
 });

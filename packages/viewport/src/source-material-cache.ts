@@ -21,6 +21,14 @@ export type SourceMaterialDescriptor = {
 	textureAsset?: string;
 	textureWidthM?: number;
 	textureHeightM?: number;
+	roughness?: number;
+	metalness?: number;
+	roughnessTextureAsset?: string;
+	metalnessTextureAsset?: string;
+	normalTextureAsset?: string;
+	occlusionTextureAsset?: string;
+	emissiveTextureAsset?: string;
+	emissiveColor?: string;
 };
 
 export type RuntimeTextureResolver = {
@@ -103,8 +111,8 @@ export class RuntimeMaterialCache {
 			name: source?.name || source?.id || 'source-neutral',
 			color,
 			map,
-			roughness: 0.88,
-			metalness: 0.02,
+			roughness: clamp01(source?.roughness ?? 0.88),
+			metalness: clamp01(source?.metalness ?? 0.02),
 			opacity,
 			transparent: opacity < 1,
 			depthWrite: opacity > 0.35,
