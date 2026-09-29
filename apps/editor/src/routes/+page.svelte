@@ -339,6 +339,7 @@
 		sceneId = nextSceneId;
 		const selected = result?.scenes.find((scene) => scene.id === sceneId);
 		viewport?.setScene(selected ?? null);
+		viewport?.levelCamera();
 		const retained = selectedOccurrenceHandles.filter((handle) => viewport?.hasOccurrence(handle));
 		if (retained.length !== selectedOccurrenceHandles.length) {
 			selectedOccurrenceHandles = retained;
@@ -603,7 +604,12 @@
 	}
 	function zoomExtents() {
 		viewport?.fit();
+		viewport?.levelCamera();
 		editorNotice = 'Zoom Extents · camera and anchor reframed to the visible model.';
+	}
+	function levelCamera() {
+		viewport?.levelCamera();
+		editorNotice = 'Camera leveled · imported roll removed while preserving the current view direction.';
 	}
 	function applyTheme() {
 		document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
@@ -719,6 +725,8 @@
 			<summary>Camera</summary>
 			<div class="menu-popover">
 				<button type="button" onclick={zoomExtents} disabled={!viewport}>Zoom Extents<kbd>Shift+Z</kbd></button>
+				<button type="button" onclick={levelCamera} disabled={!viewport}>Level Camera</button>
+				<span class="menu-separator"></span>
 				<button type="button" onclick={() => viewport?.view('top')} disabled={!viewport}>Top</button>
 				<button type="button" onclick={() => viewport?.view('front')} disabled={!viewport}>Front</button>
 				<button type="button" onclick={() => viewport?.view('iso')} disabled={!viewport}>Iso</button>

@@ -1,4 +1,4 @@
-import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Vector3 } from 'three';
+import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Spherical, Vector3 } from 'three';
 
 export type CameraPose = { position: Vector3; target: Vector3 };
 export type CameraPreset = 'top' | 'front' | 'iso';
@@ -9,6 +9,20 @@ export type CameraNavigationAction = NavigationTool | null;
 const GROUND_Y = 0;
 const ANCHOR_EPSILON = 1e-7;
 export const ORBIT_RADIANS_PER_PIXEL = 0.003;
+const WORLD_UP = new Vector3(0, 1, 0);
+const TOP_VIEW_UP = new Vector3(0, 0, -1);
+
+/**
+ * Camera roll is not part of the Editor navigation model. Prefer the world-up
+ * axis, with a deterministic fallback for near-vertical views where lookAt
+ * would otherwise become singular.
+ */
+export function uprightCameraUp(pose: CameraPose): Vector3 {
+	const forward = pose.target.clone().sub(pose.position);
+	if (forward.lengthSq() < ANCHOR_EPSILON) return WORLD_UP.clone();
+	forward.normalize();
+	return Math.abs(forward.dot(WORLD_UP)) > 0.9995 ? TOP_VIEW_UP.clone() : WORLD_UP.clone();
+}
 
 /**
  * Resolve the editor orbit anchor from the camera's centre ray.
@@ -107,21 +121,19 @@ export function cameraPresetPose(bounds: CameraPresetBounds, name: CameraPreset)
 	return { position: target.clone().add(offset.normalize().multiplyScalar(span)), target };
 }
 
-export function orbitCameraDrag(start: CameraPose, deltaX: number, _deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
+export function orbitCameraDrag(start: CameraPose, deltaX: number, deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
 	const grounded = groundedCameraPose(start);
 	const offset = grounded.position.clone().sub(grounded.target);
-	const angle = -deltaX * radiansPerPixel;
-	const cos = Math.cos(angle);
-	const sin = Math.sin(angle);
-	// SketchUp-like constrained orbit: rotate only around the world vertical axis.
-	// Camera height and elevation angle remain fixed; vertical pointer movement does
-	// not pitch the camera. This prevents the spherical "too orbit-y" behavior.
-	const rotated = new Vector3(
-		offset.x * cos + offset.z * sin,
-		offset.y,
-		-offset.x * sin + offset.z * cos
-	);
-	return { position: grounded.target.clone().add(rotated), target: grounded.target.clone() };
+	const spherical = new Spherical().setFromVector3(offset);
+	// Yaw and pitch both orbit the grounded anchor, but roll is never introduced.
+	// Sensitivity is fixed in radians-per-pointer-pixel and therefore independent
+	// of zoom distance. Clamp only the poles to prevent the camera from flipping.
+	spherical.theta -= deltaX * radiansPerPixel;
+	spherical.phi = Math.max(0.035, Math.min(Math.PI - 0.035, spherical.phi - deltaY * radiansPerPixel));
+	return {
+		position: grounded.target.clone().add(new Vector3().setFromSpherical(spherical)),
+		target: grounded.target.clone()
+	};
 }
 export function panCameraDrag(camera: Camera, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number): CameraPose {
 	const grounded = groundedCameraPose(start);

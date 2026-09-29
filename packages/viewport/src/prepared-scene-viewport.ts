@@ -44,7 +44,7 @@ import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 import { RuntimeAssetResolver } from './runtime-asset-resolver.js';
 import { RuntimeMaterialCache } from './source-material-cache.js';
 import { buildPreparedInstancedSurfaceGroups } from './prepared-surface.js';
-import { groundedCameraPose, orbitCameraDrag, panCameraDrag, type CameraPose, type NavigationTool } from './camera-navigation.js';
+import { groundedCameraPose, orbitCameraDrag, panCameraDrag, uprightCameraUp, type CameraPose, type NavigationTool } from './camera-navigation.js';
 import { SceneVisibilityIndex } from './scene-visibility.js';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-program.js';
@@ -307,9 +307,13 @@ export class PreparedSceneViewport {
 		// emit another change/render while a pointer gesture is already driving frames.
 		this.camera.position.copy(pose.position);
 		this.controls.target.copy(pose.target);
+		this.camera.up.copy(uprightCameraUp(pose));
 		this.camera.lookAt(pose.target);
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
+	}
+	levelCamera() {
+		this.setCameraPose(this.getCameraPose());
 	}
 	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
 		this.setCameraPose(tool === 'orbit'
@@ -360,6 +364,7 @@ export class PreparedSceneViewport {
 		const grounded = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
 		this.camera.position.copy(grounded.position);
 		this.controls.target.copy(grounded.target);
+		this.camera.up.copy(uprightCameraUp(grounded));
 		this.camera.lookAt(grounded.target);
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);

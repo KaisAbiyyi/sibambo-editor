@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { PerspectiveCamera, Vector3 } from 'three';
-import { groundPlaneAnchor, groundedCameraPose, orbitCameraDrag, panCameraDrag, pinchZoomDelta, temporaryCameraTool } from '../../src/lib/editor/camera-navigation';
+import { groundPlaneAnchor, groundedCameraPose, orbitCameraDrag, panCameraDrag, pinchZoomDelta, temporaryCameraTool, uprightCameraUp } from '../../src/lib/editor/camera-navigation';
 
 describe('editor camera navigation', () => {
 	test('anchor is the centre-camera ray intersection with the Y=0 ground plane', () => {
@@ -13,24 +13,30 @@ describe('editor camera navigation', () => {
 		expect(anchorDirection.distanceTo(cameraDirection)).toBeLessThan(1e-9);
 	});
 
-	test('orbit uses the grounded anchor, rotates only horizontally, and keeps sensitivity independent of radius', () => {
+	test('orbit supports yaw and pitch around the grounded anchor with distance-independent sensitivity', () => {
 		const near = { position: new Vector3(8, 5, 7), target: new Vector3(2, 1, -3) };
 		const nearGrounded = groundedCameraPose(near);
 		const farDirection = nearGrounded.position.clone().sub(nearGrounded.target).normalize();
 		const far = { position: nearGrounded.target.clone().add(farDirection.multiplyScalar(100)), target: nearGrounded.target.clone() };
-		const nearMoved = orbitCameraDrag(near, 80, -200);
-		const nearMovedNoVerticalInput = orbitCameraDrag(near, 80, 0);
-		const farMoved = orbitCameraDrag(far, 80, 300);
+		const nearMoved = orbitCameraDrag(near, 80, -40);
+		const horizontalOnly = orbitCameraDrag(near, 80, 0);
+		const farMoved = orbitCameraDrag(far, 80, -40);
 		expect(nearMoved.target.y).toBeCloseTo(0, 10);
 		expect(farMoved.target.y).toBeCloseTo(0, 10);
-		expect(nearMoved.position.y).toBeCloseTo(nearGrounded.position.y, 10);
-		expect(nearMoved.position.distanceTo(nearMovedNoVerticalInput.position)).toBeLessThan(1e-9);
-		const nearStartHorizontal = new Vector3(nearGrounded.position.x - nearGrounded.target.x, 0, nearGrounded.position.z - nearGrounded.target.z).normalize();
-		const nearEndHorizontal = new Vector3(nearMoved.position.x - nearMoved.target.x, 0, nearMoved.position.z - nearMoved.target.z).normalize();
-		const farStartHorizontal = new Vector3(far.position.x - far.target.x, 0, far.position.z - far.target.z).normalize();
-		const farEndHorizontal = new Vector3(farMoved.position.x - farMoved.target.x, 0, farMoved.position.z - farMoved.target.z).normalize();
-		expect(nearStartHorizontal.angleTo(nearEndHorizontal)).toBeCloseTo(farStartHorizontal.angleTo(farEndHorizontal), 10);
+		expect(Math.abs(nearMoved.position.y - horizontalOnly.position.y)).toBeGreaterThan(1e-3);
+		const nearStart = nearGrounded.position.clone().sub(nearGrounded.target).normalize();
+		const nearEnd = nearMoved.position.clone().sub(nearMoved.target).normalize();
+		const farStart = far.position.clone().sub(far.target).normalize();
+		const farEnd = farMoved.position.clone().sub(farMoved.target).normalize();
+		expect(nearStart.angleTo(nearEnd)).toBeCloseTo(farStart.angleTo(farEnd), 10);
 		expect(Math.abs(nearMoved.position.distanceTo(nearMoved.target) - nearGrounded.position.distanceTo(nearGrounded.target))).toBeLessThan(1e-9);
+	});
+
+	test('camera leveling removes roll by choosing a canonical world-up axis', () => {
+		const perspective = { position: new Vector3(8, 5, 7), target: new Vector3(0, 0, 0) };
+		expect(uprightCameraUp(perspective)).toEqual(new Vector3(0, 1, 0));
+		const top = { position: new Vector3(0, 10, 0), target: new Vector3(0, 0, 0) };
+		expect(uprightCameraUp(top)).toEqual(new Vector3(0, 0, -1));
 	});
 
 	test('pan tracks pointer pixels at grounded-anchor depth and leaves the next anchor on Y=0', () => {

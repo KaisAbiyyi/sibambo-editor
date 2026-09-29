@@ -5,7 +5,7 @@ import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { SceneProfile } from '@sibambo/contracts';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { applyNavigationShortcutToControls, cameraPresetPose, middleMouseAction, orbitControlsMouseAction, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
+import { applyNavigationShortcutToControls, cameraPresetPose, middleMouseAction, orbitControlsMouseAction, uprightCameraUp, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
 import { DEFAULT_DISPLAY_STATE, displayStateFromLegacyMode, legacyViewModeFromDisplayState, normalizeDisplayState, type DisplayState, type ViewMode } from './material-state.js';
 import { addRendererSceneLighting, applyRendererColorDefaults, SIBAMBO_CAMERA_DEFAULTS } from './renderer-defaults.js';
 import { createViewerRenderer, isWebGlRenderer, type RendererBackendName, type ViewerRenderer } from './renderer-backend.js';
@@ -146,6 +146,8 @@ export class ViewportRendererHost {
 		const distance = this.camera instanceof PerspectiveCamera ? radius / Math.sin(this.camera.fov * Math.PI / 360) * 1.22 : Math.max(radius * 2.4, 1);
 		this.controls.target.copy(center);
 		this.camera.position.copy(center).add(new Vector3(distance * 1.15, distance * 0.9, distance * 1.25));
+		this.camera.up.copy(uprightCameraUp({ position: this.camera.position, target: center }));
+		this.camera.lookAt(center);
 		this.camera.near = Math.max(radius / 10000, 0.001);
 		this.camera.far = Math.max(radius * 100, distance * 3);
 		if (this.camera instanceof OrthographicCamera) {
@@ -181,9 +183,9 @@ export class ViewportRendererHost {
 
 	view(bounds: CameraPresetBounds, name: CameraPreset) {
 		const { position, target } = cameraPresetPose(bounds, name);
-		this.camera.up.set(0, 1, 0);
 		this.camera.position.copy(position);
 		this.controls.target.copy(target);
+		this.camera.up.copy(uprightCameraUp({ position, target }));
 		this.camera.lookAt(target);
 		this.controls.update();
 		this.updateClipRange(bounds);
@@ -196,7 +198,6 @@ export class ViewportRendererHost {
 		const width = Math.max(1, this.host.clientWidth), height = Math.max(1, this.host.clientHeight), aspect = width / height;
 		const target = fromSketchUp(scene.camera.targetM);
 		const eye = fromSketchUp(scene.camera.eyeM);
-		const up = fromSketchUp(scene.camera.up).normalize();
 		if (eye.distanceTo(target) < 1e-6) eye.copy(target).add(new Vector3(0, 0, 1));
 		if (scene.camera.projection === 'orthographic') {
 			const heightM = Math.max(scene.camera.orthographicHeightM ?? 1, 1e-4);
@@ -216,7 +217,9 @@ export class ViewportRendererHost {
 			camera.fov = Math.max(1, Math.min(179, fov));
 			camera.near = SIBAMBO_CAMERA_DEFAULTS.near; camera.far = Math.max(SIBAMBO_CAMERA_DEFAULTS.far, eye.distanceTo(target) * 100); camera.updateProjectionMatrix();
 		}
-		this.camera.position.copy(eye); this.camera.up.copy(up.lengthSq() ? up : new Vector3(0, 1, 0)); this.camera.lookAt(target);
+		this.camera.position.copy(eye);
+		this.camera.up.copy(uprightCameraUp({ position: eye, target }));
+		this.camera.lookAt(target);
 		this.controls.target.copy(target); this.controls.update();
 		this.requestRender();
 	}
