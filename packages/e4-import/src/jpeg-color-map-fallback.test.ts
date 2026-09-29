@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { decodeBomcJcmToPng, digestSha256 } from './jpeg-color-map';
+import { decodeBomcJcmPixels, decodeBomcJcmToPng, digestSha256 } from './jpeg-color-map';
 
 const fixtureJpeg = new Uint8Array([
 	255, 216, 255, 192, 0, 17, 8, 0, 1, 0, 1, 3, 1, 17, 0, 2, 17, 0, 3, 17, 0,
@@ -23,6 +23,31 @@ async function makeJcm() {
 	const entry = new Uint8Array([10, 20, 30, 11, 22, 33, 255]);
 	return { base, payload: new Uint8Array([...header, ...fixtureJpeg, ...entry]) };
 }
+
+
+test('decodes deflated dictionary and XOR residual correction codecs exactly', async () => {
+	const base = new Uint8Array([10, 20, 30, 255]);
+	const output = new Uint8Array([11, 22, 33, 255]);
+	const makeCompressed = async (codec: 1 | 2, correction: Uint8Array) => {
+		const header = new Uint8Array(128);
+		header.set(new TextEncoder().encode('BOMJCM\r\n'), 0);
+		header.set([1, 0, codec, 1], 8);
+		const view = new DataView(header.buffer);
+		view.setUint32(12, 1, true);
+		view.setUint32(16, 1, true);
+		view.setUint32(20, 1, true);
+		view.setUint32(24, fixtureJpeg.byteLength, true);
+		view.setUint32(28, correction.byteLength, true);
+		header.set(await digestSha256(fixtureJpeg), 32);
+		header.set(await digestSha256(base), 64);
+		header.set(await digestSha256(output), 96);
+		return new Uint8Array([...header, ...fixtureJpeg, ...correction]);
+	};
+	const dictionaryZlib = new Uint8Array([120, 218, 227, 18, 145, 227, 22, 83, 252, 15, 0, 3, 10, 1, 126]);
+	const residualZlib = new Uint8Array([120, 218, 99, 100, 178, 103, 0, 0, 0, 140, 0, 67]);
+	expect(await decodeBomcJcmPixels(await makeCompressed(1, dictionaryZlib), base, 1, 1)).toEqual(output);
+	expect(await decodeBomcJcmPixels(await makeCompressed(2, residualZlib), base, 1, 1)).toEqual(output);
+});
 
 test('encodes a JPEG color map through HTML canvas when OffscreenCanvas is unavailable', async () => {
 	const { base, payload } = await makeJcm();
