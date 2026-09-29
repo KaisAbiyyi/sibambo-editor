@@ -1,4 +1,4 @@
-export { orbitCameraDrag, panCameraDrag } from '@sibambo/viewport/camera-navigation';
+export { groundedCameraPose, groundPlaneAnchor, orbitCameraDrag, panCameraDrag, uprightCameraUp } from '@sibambo/viewport/camera-navigation';
 export type { CameraPose } from '@sibambo/viewport/camera-navigation';
 import type { EditorTool } from './EditorState';
 

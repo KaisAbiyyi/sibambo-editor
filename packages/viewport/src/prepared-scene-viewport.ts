@@ -44,7 +44,7 @@ import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 import { RuntimeAssetResolver } from './runtime-asset-resolver.js';
 import { RuntimeMaterialCache } from './source-material-cache.js';
 import { buildPreparedInstancedSurfaceGroups } from './prepared-surface.js';
-import { orbitCameraDrag, panCameraDrag, type CameraPose, type NavigationTool } from './camera-navigation.js';
+import { groundedCameraPose, orbitCameraDrag, panCameraDrag, uprightCameraUp, type CameraPose, type NavigationTool } from './camera-navigation.js';
 import { SceneVisibilityIndex } from './scene-visibility.js';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-program.js';
@@ -129,6 +129,7 @@ export class PreparedSceneViewport {
 	private readonly filteredMeshRecords: MeshRecord[] = [];
 	private readonly edgeRecords: EdgeRecord[] = [];
 	private readonly selectionHelpers: Box3Helper[] = [];
+	private navigationAxes: LineSegments | null = null;
 	private readonly domainOverlays = new Map<string, Object3D>();
 	private readonly requestedTextures = new Set<string>();
 	private readonly settledTextures = new Set<string>();
@@ -192,6 +193,7 @@ export class PreparedSceneViewport {
 
 		for (const asset of input.appearance?.assets ?? []) this.assetResolver.registerAsset(asset.path, asset.bytes);
 		this.buildMeshes();
+		this.createNavigationAxes();
 		const selectedScene = input.scenes?.find((scene) => scene.id === input.activeSceneId) ?? input.scenes?.find((scene) => scene.isActiveAtExport);
 		if (selectedScene) this.setScene(selectedScene);
 		rendererHost.setResizeHandler(() => {
@@ -260,6 +262,7 @@ export class PreparedSceneViewport {
 		this.refreshVisibility();
 		const visibleBounds = visibleSceneBounds(this.meshRecords);
 		if (visibleBounds) this.fittedBounds = visibleBounds;
+		this.refreshNavigationAxes();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 		this.rebuildSourceEdges();
 		this.renderOnce();
@@ -298,12 +301,19 @@ export class PreparedSceneViewport {
 	setOrbitControlsEnabled(enabled: boolean) { this.rendererHost.setOrbitControlsEnabled(enabled); }
 	getCameraPose(): CameraPose { return { position: this.camera.position.clone(), target: this.controls.target.clone() }; }
 	setCameraPose(pose: CameraPose) {
+		// Editor camera navigation owns the pose directly. The controls target is the
+		// persistent orbit anchor: orbit rotates around it, while pan/zoom translate
+		// camera and anchor together. Avoid OrbitControls.update() here because it can
+		// emit another change/render while a pointer gesture is already driving frames.
 		this.camera.position.copy(pose.position);
 		this.controls.target.copy(pose.target);
+		this.camera.up.copy(uprightCameraUp(pose));
 		this.camera.lookAt(pose.target);
-		this.controls.update();
+		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
-		this.renderOnce();
+	}
+	levelCamera() {
+		this.setCameraPose(this.getCameraPose());
 	}
 	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
 		this.setCameraPose(tool === 'orbit'
@@ -351,10 +361,13 @@ export class PreparedSceneViewport {
 			this.camera.position.add(travel);
 			this.controls.target.add(travel);
 		}
-		this.camera.lookAt(this.controls.target);
-		this.controls.update();
+		const grounded = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
+		this.camera.position.copy(grounded.position);
+		this.controls.target.copy(grounded.target);
+		this.camera.up.copy(uprightCameraUp(grounded));
+		this.camera.lookAt(grounded.target);
+		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
-		this.renderOnce();
 	}
 	pickAt(clientX: number, clientY: number): ViewportPick | null {
 		const rect = this.canvas.getBoundingClientRect();
@@ -437,6 +450,7 @@ export class PreparedSceneViewport {
 	fit() {
 		const bounds = visibleSceneBounds(this.meshRecords);
 		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
+		this.refreshNavigationAxes();
 		this.focusBounds(this.fittedBounds);
 	}
 
@@ -788,6 +802,52 @@ export class PreparedSceneViewport {
 		return created.material;
 	}
 
+	private createNavigationAxes() {
+		const geometry = new BufferGeometry();
+		geometry.setAttribute('position', new Float32BufferAttribute(new Float32Array(18), 3));
+		geometry.setAttribute('color', new Float32BufferAttribute([
+			0.86, 0.10, 0.10, 0.86, 0.10, 0.10, // X / red
+			0.08, 0.58, 0.22, 0.08, 0.58, 0.22, // Y / green
+			0.10, 0.32, 0.95, 0.10, 0.32, 0.95  // Z / blue
+		], 3));
+		const material = new LineBasicMaterial({
+			vertexColors: true,
+			transparent: true,
+			opacity: 0.82,
+			depthTest: false,
+			depthWrite: false,
+			toneMapped: false
+		});
+		this.navigationAxes = new LineSegments(geometry, material);
+		this.navigationAxes.name = 'sibambo-navigation-axes';
+		this.navigationAxes.renderOrder = 40;
+		this.scene3d.add(this.navigationAxes);
+		this.refreshNavigationAxes();
+	}
+
+	private refreshNavigationAxes() {
+		if (!this.navigationAxes) return;
+		const span = this.modelSpan();
+		const maxCoordinate = Math.max(
+			Math.abs(this.fittedBounds.min.x), Math.abs(this.fittedBounds.max.x),
+			Math.abs(this.fittedBounds.min.y), Math.abs(this.fittedBounds.max.y),
+			Math.abs(this.fittedBounds.min.z), Math.abs(this.fittedBounds.max.z)
+		);
+		const length = Math.max(10, span * 3, maxCoordinate * 1.5);
+		// Runtime is Three.js Y-up while SketchUp source semantics are Z-up.
+		// Draw source X red on runtime X, source Y green on runtime Z, and source
+		// Z blue on runtime Y so the visible guide matches SketchUp conventions.
+		const positions = [
+			-length, 0, 0, length, 0, 0,
+			0, 0, -length, 0, 0, length,
+			0, -length, 0, 0, length, 0
+		];
+		const attribute = this.navigationAxes.geometry.getAttribute('position') as BufferAttribute;
+		(attribute.array as Float32Array).set(positions);
+		attribute.needsUpdate = true;
+		this.navigationAxes.geometry.computeBoundingSphere();
+	}
+
 	private hasNativePbr() {
 		return (this.input.appearance?.materials ?? []).some((material) =>
 			material.roughness !== undefined || material.metalness !== undefined
@@ -807,8 +867,9 @@ export class PreparedSceneViewport {
 	}
 	private cursorSurfaceHit() {
 		const epsilon = Math.max(this.modelSpan() * 1e-6, 1e-6);
-		const records = new Map(this.meshRecords.map((record) => [record.mesh, record]));
-		return this.raycaster.intersectObjects(this.meshRecords.map((record) => record.mesh), false).find((candidate) => {
+		const visible = this.meshRecords.filter((record) => record.mesh.visible);
+		const records = new Map(visible.map((record) => [record.mesh, record]));
+		return this.raycaster.intersectObjects(visible.map((record) => record.mesh), false).find((candidate) => {
 			const record = records.get(candidate.object as InstancedMesh);
 			return Boolean(record && candidate.distance > epsilon && !isPointClipped(candidate.point, this.activeClipPlanes)
 				&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
@@ -960,7 +1021,7 @@ export class PreparedSceneViewport {
 			const bounds = this.occurrenceBounds(handle, true);
 			if (!bounds) continue;
 			bounds.expandByScalar(Math.max(bounds.getSize(new Vector3()).length() * 0.002, 0.002));
-			const helper = new Box3Helper(bounds, new Color('#f06a4f'));
+			const helper = new Box3Helper(bounds, new Color('#125dff'));
 			helper.renderOrder = 12;
 			this.selectionHelpers.push(helper);
 			this.scene3d.add(helper);

@@ -6,6 +6,48 @@ export type CameraPresetBounds = { min: { x: number; y: number; z: number }; max
 export type NavigationTool = 'pan' | 'orbit';
 export type CameraNavigationAction = NavigationTool | null;
 
+const GROUND_Y = 0;
+const ANCHOR_EPSILON = 1e-7;
+export const ORBIT_RADIANS_PER_PIXEL = 0.003;
+const WORLD_UP = new Vector3(0, 1, 0);
+const TOP_VIEW_UP = new Vector3(0, 0, -1);
+
+/**
+ * Camera roll is not part of the Editor navigation model. Prefer the world-up
+ * axis, with a deterministic fallback for near-vertical views where lookAt
+ * would otherwise become singular.
+ */
+export function uprightCameraUp(pose: CameraPose): Vector3 {
+	const forward = pose.target.clone().sub(pose.position);
+	if (forward.lengthSq() < ANCHOR_EPSILON) return WORLD_UP.clone();
+	forward.normalize();
+	return Math.abs(forward.dot(WORLD_UP)) > 0.9995 ? TOP_VIEW_UP.clone() : WORLD_UP.clone();
+}
+
+/**
+ * Resolve the editor orbit anchor from the camera's centre ray.
+ *
+ * Sibambo Editor treats Three.js Y as vertical, so the navigation anchor is the
+ * point where the current forward ray meets the world ground plane (Y=0).
+ * This keeps the pivot in front of the camera and prevents zoom from shrinking
+ * the orbit radius toward an arbitrary picked point.
+ */
+export function groundPlaneAnchor(pose: CameraPose, groundY = GROUND_Y): Vector3 | null {
+	const direction = pose.target.clone().sub(pose.position);
+	if (direction.lengthSq() < ANCHOR_EPSILON) return null;
+	direction.normalize();
+	if (Math.abs(direction.y) < ANCHOR_EPSILON) return null;
+	const distance = (groundY - pose.position.y) / direction.y;
+	if (!Number.isFinite(distance) || distance <= ANCHOR_EPSILON) return null;
+	return pose.position.clone().add(direction.multiplyScalar(distance));
+}
+
+/** Preserve the camera direction while replacing its target with the grounded centre-ray anchor. */
+export function groundedCameraPose(pose: CameraPose, groundY = GROUND_Y): CameraPose {
+	const anchor = groundPlaneAnchor(pose, groundY);
+	return anchor ? { position: pose.position.clone(), target: anchor } : { position: pose.position.clone(), target: pose.target.clone() };
+}
+
 /**
  * Keep middle mapped to ROTATE for both modifier states. OrbitControls itself
  * interprets Shift + ROTATE as PAN; mapping Shift + middle to MOUSE.PAN would
@@ -79,22 +121,39 @@ export function cameraPresetPose(bounds: CameraPresetBounds, name: CameraPreset)
 	return { position: target.clone().add(offset.normalize().multiplyScalar(span)), target };
 }
 
-export function orbitCameraDrag(start: CameraPose, deltaX: number, deltaY: number, radiansPerPixel = 0.006): CameraPose {
-	const offset = start.position.clone().sub(start.target);
+export function orbitCameraDrag(start: CameraPose, deltaX: number, deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
+	const grounded = groundedCameraPose(start);
+	const offset = grounded.position.clone().sub(grounded.target);
 	const spherical = new Spherical().setFromVector3(offset);
+	// Yaw and pitch both orbit the grounded anchor, but roll is never introduced.
+	// Sensitivity is fixed in radians-per-pointer-pixel and therefore independent
+	// of zoom distance. Clamp only the poles to prevent the camera from flipping.
 	spherical.theta -= deltaX * radiansPerPixel;
-	spherical.phi = Math.max(0.01, Math.min(Math.PI - 0.01, spherical.phi - deltaY * radiansPerPixel));
-	return { position: start.target.clone().add(new Vector3().setFromSpherical(spherical)), target: start.target.clone() };
+	spherical.phi = Math.max(0.035, Math.min(Math.PI - 0.035, spherical.phi - deltaY * radiansPerPixel));
+	return {
+		position: grounded.target.clone().add(new Vector3().setFromSpherical(spherical)),
+		target: grounded.target.clone()
+	};
 }
 export function panCameraDrag(camera: Camera, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number): CameraPose {
-	const direction = start.target.clone().sub(start.position).normalize();
+	const grounded = groundedCameraPose(start);
+	const direction = grounded.target.clone().sub(grounded.position).normalize();
 	const right = new Vector3().crossVectors(direction, camera.up).normalize();
 	const up = new Vector3().crossVectors(right, direction).normalize();
+	// Pan is defined in screen pixels at the grounded orbit-anchor depth. One
+	// pointer pixel maps to one projected pixel there, so sensitivity does not
+	// change arbitrarily after zooming.
 	const verticalSpan = camera instanceof PerspectiveCamera
-		? 2 * Math.tan(camera.fov * Math.PI / 360) * start.position.distanceTo(start.target)
+		? 2 * Math.tan(camera.getEffectiveFOV() * Math.PI / 360) * grounded.position.distanceTo(grounded.target)
 		: camera instanceof OrthographicCamera ? Math.abs(camera.top - camera.bottom) / Math.max(camera.zoom, 0.0001) : 2;
 	const worldPerPixel = verticalSpan / Math.max(viewportHeight, 1);
 	const translation = right.multiplyScalar(-deltaX * worldPerPixel).add(up.multiplyScalar(deltaY * worldPerPixel));
-	return { position: start.position.clone().add(translation), target: start.target.clone().add(translation) };
+	const translated = {
+		position: grounded.position.clone().add(translation),
+		target: grounded.target.clone().add(translation)
+	};
+	// Keep the viewing direction fixed, then re-intersect the centre ray with
+	// Y=0 so the next orbit starts from the same navigation model.
+	return groundedCameraPose(translated);
 }
 
