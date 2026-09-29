@@ -474,7 +474,16 @@ export class PreparedSceneViewport {
 			scene: { meshCount: visibleRecords.length, instanceCount: visibleRecords.reduce((sum, record) => sum + record.visibleOccurrenceCount, 0), uniqueTriangles: groupTriangles },
 			renderer: { initializationMs: this.rendererInitializationMs, render: { calls: info?.render.calls ?? null, triangles: info?.render.triangles ?? null }, memory: { geometries: info?.memory.geometries ?? null, textures: info?.memory.textures ?? null } },
 			resources: { jsHeapBytes: (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize ?? null, totalGpuMemoryBytes: null },
-			appearance: { viewMode: this.viewMode, failedDecodePaths: textureStats.failedDecodePaths, missingAssetPaths: textureStats.missingAssetPaths, unsupportedTexturePaths: textureStats.unsupportedTexturePaths },
+			appearance: {
+				viewMode: this.viewMode,
+				faceStyle: this.displayState.faceStyle,
+				effects: { ...this.displayState.effects },
+				ambientOcclusionSupported: this.rendererHost.supportsAmbientOcclusion,
+				photorealFallback: this.displayState.faceStyle === 'photoreal' && !this.hasNativePbr(),
+				failedDecodePaths: textureStats.failedDecodePaths,
+				missingAssetPaths: textureStats.missingAssetPaths,
+				unsupportedTexturePaths: textureStats.unsupportedTexturePaths
+			},
 			geometryCount: info?.memory.geometries ?? null,
 			textureCount: info?.memory.textures ?? null,
 			drawCallCount: info?.render.calls ?? null,
@@ -779,6 +788,12 @@ export class PreparedSceneViewport {
 		return created.material;
 	}
 
+	private hasNativePbr() {
+		return (this.input.appearance?.materials ?? []).some((material) =>
+			material.roughness !== undefined || material.metalness !== undefined
+			|| Boolean(material.roughnessTextureAsset || material.metalnessTextureAsset || material.normalTextureAsset || material.occlusionTextureAsset)
+		);
+	}
 	private isDenseScene() {
 		return (this.input.scene.totalTriangles ?? 0) > 250_000 || this.input.scene.groups.length > 1_500;
 	}

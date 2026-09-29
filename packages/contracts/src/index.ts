@@ -39,7 +39,16 @@ export type RendererObservation = {
 	scene?: { meshCount: number; instanceCount: number; uniqueTriangles: number };
 	renderer?: { initializationMs: number; render: { calls: number | null; triangles: number | null }; memory: { geometries: number | null; textures: number | null } };
 	resources?: { jsHeapBytes: number | null; totalGpuMemoryBytes: number | null };
-	appearance?: { viewMode: string; failedDecodePaths: string[]; missingAssetPaths: string[]; unsupportedTexturePaths: string[] };
+	appearance?: {
+		viewMode: string;
+		faceStyle?: string;
+		effects?: { xray: boolean; ambientOcclusion: boolean };
+		ambientOcclusionSupported?: boolean;
+		photorealFallback?: boolean;
+		failedDecodePaths: string[];
+		missingAssetPaths: string[];
+		unsupportedTexturePaths: string[];
+	};
 	geometryCount: number | null;
 	textureCount: number | null;
 	drawCallCount: number | null;
