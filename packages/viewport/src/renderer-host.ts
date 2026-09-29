@@ -5,7 +5,7 @@ import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { SceneProfile } from '@sibambo/contracts';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { applyNavigationShortcutToControls, cameraPresetPose, middleMouseAction, orbitControlsMouseAction, uprightCameraUp, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
+import { applyNavigationShortcutToControls, cameraPresetPose, groundedCameraPose, middleMouseAction, orbitControlsMouseAction, ORBIT_RADIANS_PER_PIXEL, uprightCameraUp, type CameraPreset, type CameraPresetBounds } from './camera-navigation.js';
 import { DEFAULT_DISPLAY_STATE, displayStateFromLegacyMode, legacyViewModeFromDisplayState, normalizeDisplayState, type DisplayState, type ViewMode } from './material-state.js';
 import { addRendererSceneLighting, applyRendererColorDefaults, SIBAMBO_CAMERA_DEFAULTS } from './renderer-defaults.js';
 import { createViewerRenderer, isWebGlRenderer, type RendererBackendName, type ViewerRenderer } from './renderer-backend.js';
@@ -263,6 +263,7 @@ export class ViewportRendererHost {
 		const height = Math.max(this.host.clientHeight, 1);
 		this.renderer.setSize(width, height, false);
 		this.composer?.setSize(width, height);
+		this.controls.rotateSpeed = this.orbitControlsRotateSpeed();
 		if (this.camera instanceof PerspectiveCamera) {
 			this.camera.aspect = width / height;
 		} else {
@@ -282,6 +283,8 @@ export class ViewportRendererHost {
 		this.canvas.removeEventListener('pointerup', this.restoreMiddleMouseMapping);
 		this.canvas.removeEventListener('pointercancel', this.restoreMiddleMouseMapping);
 		window.removeEventListener('keydown', this.handleNavigationKeyDown);
+		this.controls.removeEventListener('start', this.normalizeOrbitControlsAnchor);
+		this.controls.removeEventListener('end', this.normalizeOrbitControlsAnchor);
 		this.controls.dispose();
 		this.ssaoPass?.dispose();
 		this.outputPass?.dispose();
@@ -325,9 +328,14 @@ export class ViewportRendererHost {
 		controls.minZoom = 1e-8;
 		controls.maxZoom = 1e8;
 		controls.zoomToCursor = true;
+		controls.screenSpacePanning = true;
+		controls.panSpeed = 1;
+		controls.rotateSpeed = this.orbitControlsRotateSpeed();
 		controls.mouseButtons.MIDDLE = middleMouseAction();
 		controls.mouseButtons.LEFT = orbitControlsMouseAction('orbit');
 		controls.target.set(0, 0, 0);
+		controls.addEventListener('start', this.normalizeOrbitControlsAnchor);
+		controls.addEventListener('end', this.normalizeOrbitControlsAnchor);
 		controls.addEventListener('change', () => {
 			if (this.clipBounds) this.updateClipRange(this.clipBounds);
 			else this.requestRender();
@@ -338,6 +346,20 @@ export class ViewportRendererHost {
 		window.addEventListener('keydown', this.handleNavigationKeyDown);
 		return controls;
 	}
+
+	private orbitControlsRotateSpeed() {
+		return ORBIT_RADIANS_PER_PIXEL * Math.max(this.host.clientHeight, 1) / (2 * Math.PI);
+	}
+
+	private normalizeOrbitControlsAnchor = () => {
+		const pose = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
+		this.controls.target.copy(pose.target);
+		this.camera.up.copy(uprightCameraUp(pose));
+		this.camera.lookAt(pose.target);
+		this.camera.updateMatrixWorld();
+		if (this.clipBounds) this.updateClipRange(this.clipBounds);
+		else this.requestRender();
+	};
 
 	private handlePointerDownCapture = (event: PointerEvent) => {
 		if (event.button === 1) this.controls.mouseButtons.MIDDLE = middleMouseAction();

@@ -678,6 +678,23 @@
 		const saved = localStorage.getItem('sibambo-theme');
 		darkMode = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
 		applyTheme();
+
+		const closeMenusOutside = (event: PointerEvent) => {
+			const target = event.target as Node | null;
+			for (const menu of document.querySelectorAll<HTMLDetailsElement>('main[data-app="editor"] .menu-root[open]')) {
+				if (!target || !menu.contains(target)) menu.open = false;
+			}
+		};
+		const closeMenusOnEscape = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape') return;
+			for (const menu of document.querySelectorAll<HTMLDetailsElement>('main[data-app="editor"] .menu-root[open]')) menu.open = false;
+		};
+		document.addEventListener('pointerdown', closeMenusOutside, true);
+		document.addEventListener('keydown', closeMenusOnEscape);
+		return () => {
+			document.removeEventListener('pointerdown', closeMenusOutside, true);
+			document.removeEventListener('keydown', closeMenusOnEscape);
+		};
 	});
 	onDestroy(() => { generation += 1; evidenceGeneration += 1; controller?.abort(); unsubscribeOccurrenceTransforms?.(); viewport?.dispose(); session?.dispose(); });
 </script>
