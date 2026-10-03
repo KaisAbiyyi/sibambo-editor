@@ -522,7 +522,7 @@ export function makeWorkerDiagnosticProbe(channelName) {
 								if (seen.has(value)) return; seen.add(value); objects += 1; if (Array.isArray(value)) arrays += 1; else { const proto = Object.getPrototypeOf(value); if (proto !== Object.prototype && proto !== null) classes.push(value.constructor?.name || 'unknown'); } for (const key of Object.keys(value)) visit(value[key], !Array.isArray(value));
 								};
 							visit(message.result, false);
-							graph = { objects, arrays, views, viewBytes, uniqueBuffers: buffers.size, graphBufferBytes: bufferBytes, transferBufferCount: transfers.size, transferBytes: [...transfers].reduce((total, buffer) => total + buffer.byteLength, 0), viewBuffersMissingFromTransferList: [...buffers.keys()].filter((buffer) => !transfers.has(buffer)).length, sourceBufferRetainedBytes: __sourceBuffer?.byteLength ?? null, sourceBufferInTransferList: Boolean(__sourceBuffer && transfers.has(__sourceBuffer)), graphIncludesSourceBuffer: Boolean(__sourceBuffer && buffers.has(__sourceBuffer)), nakedArrayBufferProperties: nakedBuffers, sharedArrayBufferCount: sharedBuffers, nonPlainClasses: classes, runtimeCounts: { resultFacesLength: Number.isInteger(message.result?.faces?.length) ? message.result.faces.length : null, preparedRuntimeSceneGroupsLength: Number.isInteger(message.result?.preparedRuntimeScene?.groups?.length) ? message.result.preparedRuntimeScene.groups.length : null, sourceCounts: message.result?.diagnostics?.counts ?? null } };
+							graph = { objects, arrays, views, viewBytes, uniqueBuffers: buffers.size, graphBufferBytes: bufferBytes, transferBufferCount: transfers.size, transferBytes: [...transfers].reduce((total, buffer) => total + buffer.byteLength, 0), viewBuffersMissingFromTransferList: [...buffers.keys()].filter((buffer) => !transfers.has(buffer)).length, sourceBufferRetainedBytes: __sourceBuffer?.byteLength ?? null, sourceBufferInTransferList: Boolean(__sourceBuffer && transfers.has(__sourceBuffer)), graphIncludesSourceBuffer: Boolean(__sourceBuffer && buffers.has(__sourceBuffer)), nakedArrayBufferProperties: nakedBuffers, sharedArrayBufferCount: sharedBuffers, nonPlainClasses: classes, runtimeCounts: { resultFacesLength: Number.isInteger(message.result?.faces?.length) ? message.result.faces.length : null, preparedRuntimeSceneGroupsLength: Number.isInteger(message.result?.preparedRuntimeScene?.groups?.length) ? message.result.preparedRuntimeScene.groups.length : null, sourceCounts: message.result?.counts ?? null } };
 						} catch (error) { graph = { error: String(error) }; }
 					}
 					const kind = message?.type ?? 'unknown';
@@ -1371,7 +1371,7 @@ async function runBootSuite({ browser, apps, urls, outputDir, baseline, builds, 
 	return { summaries, rowCount: rows.length, outputFile: file, matrix, ...acceptance, allPrimeRowsPass: acceptance.allPrimeRowsPass, seriesAudits };
 }
 
-function workerTraceAudit(row, mode) {
+export function workerTraceAudit(row, mode) {
 	const events = row.diagnostic?.events ?? [];
 	const wrapped = mode === 'wrapped';
 	const expectedWorkerPhase = wrapped ? 'wrapped-worker' : 'native-worker';
@@ -1381,14 +1381,45 @@ function workerTraceAudit(row, mode) {
 	const importErrors = events.filter((event) => event.phase === 'worker-import-error');
 	const phases = wrapped ? ['worker-pre-post', 'worker-post-return', 'main-receive'] : ['native-main-receive'];
 	const completePositions = phases.map((phase) => events.findIndex((event) => event.phase === phase && event.type === 'complete'));
-	const completeLifecycle = completePositions.every((index) => index >= 0) && completePositions.every((index, position) => position === 0 || index > completePositions[position - 1]);
+	const completeEvents = phases.map((phase) => events.find((event) => event.phase === phase && event.type === 'complete') ?? null);
+	const completePhaseEpochs = completeEvents.map((event) => event?.epochMs ?? null);
+	const hasAllCompletePhases = completeEvents.every((event) => event !== null);
+	const completeEpochsFinite = completeEvents.every((event) => event !== null && Number.isFinite(event.epochMs));
+	const workerPostReturnedAfterPrePost = !wrapped || (
+		completeEvents[0] !== null && completeEvents[1] !== null &&
+		Number.isFinite(completeEvents[0].epochMs) && Number.isFinite(completeEvents[1].epochMs) &&
+		completeEvents[1].epochMs >= completeEvents[0].epochMs
+	);
+	const completeLifecycle = hasAllCompletePhases && completeEpochsFinite && workerPostReturnedAfterPrePost;
 	const phaseCounts = Object.fromEntries([...new Set(events.map((event) => event.phase))].map((phase) => [phase, events.filter((event) => event.phase === phase).length]));
 	return {
 		mode, matchedWorkerCount, unmatchedWorkers, importErrorCount: importErrors.length,
-		completePhaseNames: phases, completePhasePositions: completePositions,
+		completePhaseNames: phases, completePhasePositions: completePositions, completePhaseEpochs,
+		workerPostReturnedAfterPrePost,
 		completeLifecycle, missingCompletePhases: phases.filter((phase) => !events.some((event) => event.phase === phase && event.type === 'complete')),
 		phaseCounts, runtimeCounts: events.findLast((event) => event.phase === 'worker-pre-post' && event.type === 'complete')?.graph?.runtimeCounts ?? null
 	};
+}
+
+export function summarizeDiagnosticCases(cases) {
+	const lOld = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'L-old');
+	const s2Native = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'native');
+	const s2Wrapped = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'wrapped');
+	const roomsYOld = cases.find((item) => item.appId === 'rooms' && item.fixtureId === 'Y-old');
+	const runtimeCountAudit = cases.filter((item) => item.mode === 'wrapped' && SUPPORTED_ID_SET.has(item.fixtureId)).map((item) => ({ appId: item.appId, fixtureId: item.fixtureId, status: item.status, runtimeCounts: item.runtimeCounts, captured: item.acceptance.runtimeCountsCaptured, reason: item.acceptance.runtimeCountsCaptured ? null : item.status === 'ready' ? 'worker result did not expose all requested runtime fields' : `successful output unavailable: ${item.status}` }));
+	const lOldBoundedAndMatched = Boolean(
+		lOld && lOld.acceptance.pass === true && lOld.acceptance.boundedLoldDiagnostic === true
+	);
+	const acceptance = {
+		s2NativeComplete: s2Native?.acceptance.pass === true,
+		s2WrappedComplete: s2Wrapped?.acceptance.pass === true,
+		lOldBoundedAndMatched,
+		roomsYOldFrameTrace: roomsYOld?.acceptance.appReadyAndValidFrame === true && roomsYOld.tracePath !== null,
+		runtimeCountAuditComplete: runtimeCountAudit.every((item) => item.captured || item.status !== 'ready'),
+		allDiagnosticResourcesClean: cases.every((item) => item.acceptance.cleanupComplete),
+		pass: Boolean(s2Native?.acceptance.pass && s2Wrapped?.acceptance.pass && lOldBoundedAndMatched && roomsYOld?.acceptance.appReadyAndValidFrame && runtimeCountAudit.every((item) => item.captured || item.status !== 'ready') && cases.every((item) => item.acceptance.cleanupComplete))
+	};
+	return { caseCount: cases.length, cases, runtimeCountAudit, acceptance };
 }
 
 async function runDiagnostic({ browser, apps, fixtures, urls, outputDir, baseline, builds, environment, workspaceRoot }) {
@@ -1451,21 +1482,7 @@ async function runDiagnostic({ browser, apps, fixtures, urls, outputDir, baselin
 		if (row.cleanupStatus !== 'complete') throw new Error(`${spec.id}: diagnostic resource cleanup failed; stopping.`);
 		if (!row.identityAudit.valid) throw new Error(`${spec.id}: diagnostic build/environment/fixture identity drifted; stopping.`);
 	}
-	const lOld = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'L-old');
-	const s2Native = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'native');
-	const s2Wrapped = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'wrapped');
-	const roomsYOld = cases.find((item) => item.appId === 'rooms' && item.fixtureId === 'Y-old');
-	const runtimeCountAudit = cases.filter((item) => item.mode === 'wrapped' && SUPPORTED_ID_SET.has(item.fixtureId)).map((item) => ({ appId: item.appId, fixtureId: item.fixtureId, status: item.status, runtimeCounts: item.runtimeCounts, captured: item.acceptance.runtimeCountsCaptured, reason: item.acceptance.runtimeCountsCaptured ? null : item.status === 'ready' ? 'worker result did not expose all requested runtime fields' : `successful output unavailable: ${item.status}` }));
-	const acceptance = {
-		s2NativeComplete: s2Native?.acceptance.pass === true,
-		s2WrappedComplete: s2Wrapped?.acceptance.pass === true,
-		lOldBoundedAndMatched: lOld?.acceptance.boundedLoldDiagnostic === true && lOld.workerTraceAudit.matchedWorkerCount === 1,
-		roomsYOldFrameTrace: roomsYOld?.acceptance.appReadyAndValidFrame === true && roomsYOld.tracePath !== null,
-		runtimeCountAuditComplete: runtimeCountAudit.every((item) => item.captured || item.status !== 'ready'),
-		allDiagnosticResourcesClean: cases.every((item) => item.acceptance.cleanupComplete),
-		pass: Boolean(s2Native?.acceptance.pass && s2Wrapped?.acceptance.pass && lOld?.acceptance.boundedLoldDiagnostic && lOld?.workerTraceAudit.matchedWorkerCount === 1 && roomsYOld?.acceptance.appReadyAndValidFrame && runtimeCountAudit.every((item) => item.captured || item.status !== 'ready') && cases.every((item) => item.acceptance.cleanupComplete))
-	};
-	return { caseCount: cases.length, cases, runtimeCountAudit, acceptance };
+	return summarizeDiagnosticCases(cases);
 }
 
 export async function runBaseline(argv = process.argv.slice(2)) {
@@ -1505,7 +1522,7 @@ export async function runBaseline(argv = process.argv.slice(2)) {
 		const bootMatrix = ['all', 'boot'].includes(options.suite) ? buildBootScenarioMatrix(options.apps.map((app) => app.id)) : null;
 		const runnerSha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 		const metadata = {
-			schemaVersion: 'bomc-loader-baseline-v2', plan: PLAN, review: 'BOMC-LOADER-001/CP0/IMPLEMENTATION_REVIEW_2026-10-03_v1.0', baseline: options.baseline,
+			schemaVersion: 'bomc-loader-baseline-v2', plan: PLAN, review: 'BOMC-LOADER-001/CP0/IMPLEMENTATION_REVIEW_2026-10-03_v1.1', baseline: options.baseline,
 			capturedAt: new Date().toISOString(), runnerSha256, selectedAppIds: options.apps.map((app) => app.id), suite: options.suite,
 			environment, builds,
 			urls: Object.fromEntries(APPS.map((app) => [app.id, appUrl(options.urls[app.id], app)])),

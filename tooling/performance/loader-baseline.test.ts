@@ -11,7 +11,7 @@ const manifest = JSON.parse(readFileSync(path.join(import.meta.dir, 'fixtures.js
 const runnerUrl = new URL('./loader-baseline.mjs', import.meta.url).href;
 
 function runnerProbe(source: string) {
-	const script = `import { assertBuildIdentityUnchanged, assertFreshOutputDirectory, bootPollDelay, buildBootScenarioMatrix, buildModelScenarioMatrix, captureChooserEventEpoch, closeEnvironmentResources, enforceDeadline, evaluateBootAcceptance, evaluateModelAcceptance, isBootRequestEvidenceComplete, matchesReadyText, median, nearestRankPercentile, parseArgs, raceWithDeadline, summarizeBootTimingRows, summarizeTimingRows, verifyFixtureBytes, verifyScenarioRows, withNodeWatchdog } from ${JSON.stringify(runnerUrl)};\n${source}`;
+	const script = `import { assertBuildIdentityUnchanged, assertFreshOutputDirectory, bootPollDelay, buildBootScenarioMatrix, buildModelScenarioMatrix, captureChooserEventEpoch, closeEnvironmentResources, enforceDeadline, evaluateBootAcceptance, evaluateModelAcceptance, isBootRequestEvidenceComplete, matchesReadyText, median, nearestRankPercentile, parseArgs, raceWithDeadline, summarizeBootTimingRows, summarizeDiagnosticCases, summarizeTimingRows, verifyFixtureBytes, verifyScenarioRows, workerTraceAudit, withNodeWatchdog } from ${JSON.stringify(runnerUrl)};\n${source}`;
 	const result = spawnSync('node', ['--input-type=module', '-e', script], { cwd: path.resolve(import.meta.dir, '../..'), encoding: 'utf8' });
 	if (result.error) throw result.error;
 	if (result.status !== 0) throw new Error(result.stderr || `Node probe exited ${result.status}.`);
@@ -303,25 +303,87 @@ describe('baseline percentile contract', () => {
 	});
 });
 
+describe('worker diagnostic acceptance contracts', () => {
+	test('audits wrapped complete epochs without imposing cross-channel arrival order', () => {
+		const result = runnerProbe(`
+			const events=Array.from({length:71},(_,index)=>({phase:'other',type:'progress',epochMs:index}));
+			events[68]={phase:'worker-pre-post',type:'complete',epochMs:1791010688106.7002};
+			events[69]={phase:'main-receive',type:'complete',epochMs:1791010688190.9};
+			events[70]={phase:'worker-post-return',type:'complete',epochMs:1791010688181.6};
+			const actual=workerTraceAudit({diagnostic:{events}},'wrapped');
+			const receiptBeforeReturn=workerTraceAudit({diagnostic:{events:[
+				{phase:'worker-pre-post',type:'complete',epochMs:10},
+				{phase:'main-receive',type:'complete',epochMs:15},
+				{phase:'worker-post-return',type:'complete',epochMs:20}
+			]}},'wrapped');
+			console.log(JSON.stringify({actual,receiptBeforeReturn}));`);
+		expect(result.actual.completePhasePositions).toEqual([68, 70, 69]);
+		expect(result.actual.completePhaseEpochs).toEqual([1791010688106.7002, 1791010688181.6, 1791010688190.9]);
+		expect(result.actual.completeLifecycle).toBe(true);
+		expect(result.receiptBeforeReturn.completePhasePositions).toEqual([0, 2, 1]);
+		expect(result.receiptBeforeReturn.completePhaseEpochs).toEqual([10, 20, 15]);
+		expect(result.receiptBeforeReturn.completeLifecycle).toBe(true);
+	});
+
+	test('rejects missing or invalid wrapped phases and validates native receipt epochs', () => {
+		const result = runnerProbe(`
+			const pre={phase:'worker-pre-post',type:'complete',epochMs:10};
+			const post={phase:'worker-post-return',type:'complete',epochMs:20};
+			const receive={phase:'main-receive',type:'complete',epochMs:30};
+			const audit=events=>workerTraceAudit({diagnostic:{events}},'wrapped').completeLifecycle;
+			const native=events=>workerTraceAudit({diagnostic:{events}},'native').completeLifecycle;
+			console.log(JSON.stringify({missingReturn:audit([pre,receive]),nonfiniteWorkerEpoch:audit([pre,{...post,epochMs:Number.NaN},receive]),nonfiniteReceiveEpoch:audit([pre,post,{...receive,epochMs:Number.POSITIVE_INFINITY}]),reversedWorkerEpochs:audit([{...pre,epochMs:21},{...post,epochMs:20},receive]),nativeGood:native([{phase:'native-main-receive',type:'complete',epochMs:40}]),nativeMissing:native([]),nativeNonfinite:native([{phase:'native-main-receive',type:'complete',epochMs:Number.NaN}])}));`);
+		expect(result.missingReturn).toBe(false);
+		expect(result.nonfiniteWorkerEpoch).toBe(false);
+		expect(result.nonfiniteReceiveEpoch).toBe(false);
+		expect(result.reversedWorkerEpochs).toBe(false);
+		expect(result.nativeGood).toBe(true);
+		expect(result.nativeMissing).toBe(false);
+		expect(result.nativeNonfinite).toBe(false);
+	});
+
+	test('requires the bounded L-old row itself to pass in the diagnostic aggregate', () => {
+		const result = runnerProbe(`
+			const runtimeCounts={resultFacesLength:270,preparedRuntimeSceneGroupsLength:291,sourceCounts:{faces:300,materials:12}};
+			const baseAcceptance={runtimeCountsCaptured:true,cleanupComplete:true,appReadyAndValidFrame:true};
+			const makeCases=()=>[
+				{id:'s2-native',appId:'editor',fixtureId:'S2-jcm',mode:'native',status:'ready',tracePath:'native.json',runtimeCounts,acceptance:{...baseAcceptance,pass:true}},
+				{id:'s2-wrapped',appId:'editor',fixtureId:'S2-jcm',mode:'wrapped',status:'ready',tracePath:'wrapped.json',runtimeCounts,acceptance:{...baseAcceptance,pass:true}},
+				{id:'l-old',appId:'editor',fixtureId:'L-old',mode:'wrapped',status:'timeout',tracePath:'l-old.json',runtimeCounts,workerTraceAudit:{matchedWorkerCount:1,unmatchedWorkers:[],importErrorCount:0},acceptance:{...baseAcceptance,pass:true,boundedLoldDiagnostic:true}},
+				{id:'rooms-y-old',appId:'rooms',fixtureId:'Y-old',mode:'wrapped',status:'ready',tracePath:'rooms.json',runtimeCounts,acceptance:{...baseAcceptance,pass:true}}
+			];
+			const healthy=summarizeDiagnosticCases(makeCases());
+			const importFailure=makeCases();importFailure[2].workerTraceAudit.importErrorCount=1;importFailure[2].acceptance.pass=false;
+			const failedLoldRow=makeCases();failedLoldRow[2].acceptance.pass=false;
+			const badImport=summarizeDiagnosticCases(importFailure);const badRow=summarizeDiagnosticCases(failedLoldRow);
+			console.log(JSON.stringify({healthy:healthy.acceptance,importFailure:badImport.acceptance,failedLoldRow:badRow.acceptance}));`);
+		expect(result.healthy.pass).toBe(true);
+		expect(result.importFailure.lOldBoundedAndMatched).toBe(false);
+		expect(result.importFailure.pass).toBe(false);
+		expect(result.failedLoldRow.lOldBoundedAndMatched).toBe(false);
+		expect(result.failedLoldRow.pass).toBe(false);
+	});
+});
+
 describe('browser instrumentation contracts', () => {
 	test('buffers worker messages FIFO until its delayed dynamic module import is ready', () => {
 		const result = browserProbe(`
 			const server = createServer((req,res)=>{
-				if (req.url === '/e4-import.worker-race-test.js') { res.writeHead(200,{'content-type':'text/javascript'}); res.end("await new Promise(resolve=>setTimeout(resolve,200)); self.addEventListener('message',event=>{ if(event.data.type==='load') self.postMessage({type:'complete',order:'load'}); else if(event.data.type==='cancel') self.postMessage({type:'cancelled',order:'cancel'}); });"); return; }
-				res.writeHead(200,{'content-type':'text/html'}); res.end("<!doctype html><div class='viewport'></div><script>const worker=new Worker('/e4-import.worker-race-test.js',{type:'module'}); window.raceReplies=new Promise(resolve=>{const rows=[];worker.addEventListener('message',event=>{rows.push(event.data);if(rows.length===2)resolve(rows);});}); worker.postMessage({type:'load',buffer:new ArrayBuffer(8)});worker.postMessage({type:'cancel'});</script>");
+				if (req.url === '/e4-import.worker-race-test.js') { res.writeHead(200,{'content-type':'text/javascript'}); res.end("await new Promise(resolve=>setTimeout(resolve,200)); self.addEventListener('message',event=>{ if(event.data.type==='load') self.postMessage({type:'complete',order:'load',result:{counts:{sourceFaces:401,materials:12},faces:Array(5),preparedRuntimeScene:{groups:Array(7)},diagnostics:{}}}); else if(event.data.type==='missing-counts') self.postMessage({type:'complete',order:'missing-counts',result:{faces:Array(2),preparedRuntimeScene:{groups:Array(3)},diagnostics:{}}}); else if(event.data.type==='cancel') self.postMessage({type:'cancelled',order:'cancel'}); });"); return; }
+				res.writeHead(200,{'content-type':'text/html'}); res.end("<!doctype html><div class='viewport'></div><script>const worker=new Worker('/e4-import.worker-race-test.js',{type:'module'});window.raceWorker=worker;window.raceReplies=new Promise(resolve=>{const rows=[];worker.addEventListener('message',event=>{rows.push(event.data);if(rows.length===2)resolve(rows);});});worker.postMessage({type:'load',buffer:new ArrayBuffer(8)});worker.postMessage({type:'cancel'});</script>");
 			});
 			await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); const url='http://127.0.0.1:'+server.address().port+'/';
 			const browser=await launchBenchmarkBrowser(); const context=await browser.newContext(); const page=await context.newPage(); const channel='worker-race-'+Date.now(); await page.addInitScript(makeWorkerDiagnosticProbe(channel),channel); await page.goto(url,{waitUntil:'load'});
 			const replies=await page.evaluate(()=>Promise.race([window.raceReplies,new Promise((_,reject)=>setTimeout(()=>reject(new Error('worker replies timed out')),5000))]));
-			await page.waitForFunction(()=>{const e=window.__loaderWorkerProbe.events;return e.filter(x=>x.phase==='worker-ingress-replayed').length===2&&e.filter(x=>x.phase==='worker-post-return').length===2;},null,{timeout:5000});
+			const missingReply=await page.evaluate(()=>new Promise(resolve=>{const worker=window.raceWorker;const handler=event=>{if(event.data?.order==='missing-counts'){worker.removeEventListener('message',handler);resolve(event.data);}};worker.addEventListener('message',handler);worker.postMessage({type:'missing-counts'});}));
+			await page.waitForFunction(()=>{const e=window.__loaderWorkerProbe.events;return e.filter(x=>x.phase==='worker-ingress-replayed').length===2&&e.filter(x=>x.phase==='worker-pre-post'&&x.type==='complete').length===2&&e.filter(x=>x.phase==='worker-post-return'&&x.type==='complete').length===2;},null,{timeout:5000});
 			const events=await page.evaluate(()=>window.__loaderWorkerProbe.events); const queued=events.filter(x=>x.phase==='worker-ingress-queued'); const replayed=events.filter(x=>x.phase==='worker-ingress-replayed'); const prePost=events.filter(x=>x.phase==='worker-pre-post'); const postReturn=events.filter(x=>x.phase==='worker-post-return'); const received=events.filter(x=>x.phase==='main-receive');
-			assert.deepEqual(replies.map(x=>x.order),['load','cancel']); assert.equal(queued.length,2); assert.deepEqual(replayed.map(x=>x.type),['load','cancel']); assert.deepEqual(prePost.map(x=>x.type),['complete','cancelled']); assert.deepEqual(postReturn.map(x=>x.type),['complete','cancelled']); assert.deepEqual(received.map(x=>x.type),['complete','cancelled']); assert.equal(events.filter(x=>x.phase==='wrapped-worker').length,1); assert.equal(events.filter(x=>x.phase==='worker-import-error').length,0);
-			await context.close(); await browser.close(); await new Promise(resolve=>server.close(resolve)); console.log(JSON.stringify({queued:queued.length,replayed:replayed.map(x=>x.type),prePost:prePost.map(x=>x.type),postReturn:postReturn.map(x=>x.type),mainReceive:received.map(x=>x.type)}));`);
+			const completeGraphs=prePost.filter(x=>x.type==='complete').map(x=>x.graph.runtimeCounts); const fullResult=replies.find(x=>x.order==='load').result; assert.deepEqual(replies.map(x=>x.order),['load','cancel']); assert.equal(queued.length,2); assert.deepEqual(replayed.map(x=>x.type),['load','cancel']); assert.equal(prePost.filter(x=>x.type==='complete').length,2); assert.equal(prePost.filter(x=>x.type==='cancelled').length,1); assert.equal(postReturn.filter(x=>x.type==='complete').length,2); assert.equal(received.filter(x=>x.type==='complete').length,2); assert.deepEqual(completeGraphs[0],{resultFacesLength:5,preparedRuntimeSceneGroupsLength:7,sourceCounts:{sourceFaces:401,materials:12}}); assert.deepEqual(completeGraphs[1],{resultFacesLength:2,preparedRuntimeSceneGroupsLength:3,sourceCounts:null}); assert.deepEqual(fullResult.counts,{sourceFaces:401,materials:12}); assert.equal(fullResult.diagnostics.counts,undefined); assert.equal(missingReply.result.counts,undefined); assert.equal(events.filter(x=>x.phase==='wrapped-worker').length,1); assert.equal(events.filter(x=>x.phase==='worker-import-error').length,0);
+			await context.close(); await browser.close(); await new Promise(resolve=>server.close(resolve)); console.log(JSON.stringify({queued:queued.length,replayed:replayed.map(x=>x.type),completeGraphs}));`);
 		expect(result.queued).toBe(2);
 		expect(result.replayed).toEqual(['load', 'cancel']);
-		expect(result.prePost).toEqual(['complete', 'cancelled']);
-		expect(result.postReturn).toEqual(['complete', 'cancelled']);
-		expect(result.mainReceive).toEqual(['complete', 'cancelled']);
+		expect(result.completeGraphs[0]).toEqual({ resultFacesLength: 5, preparedRuntimeSceneGroupsLength: 7, sourceCounts: { sourceFaces: 401, materials: 12 } });
+		expect(result.completeGraphs[1]).toEqual({ resultFacesLength: 2, preparedRuntimeSceneGroupsLength: 3, sourceCounts: null });
 	});
 
 	test('observes an actual WebGL2 instanced triangle and excludes invalid draw targets', () => {
