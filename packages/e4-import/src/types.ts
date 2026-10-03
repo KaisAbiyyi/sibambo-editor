@@ -88,6 +88,27 @@ export type BomcSectionMetric = BomcSectionDescriptor & {
 	loaded: boolean;
 };
 
+export type GeometryTransferStats = {
+	originalBufferCount: number;
+	originalBufferBytes: number;
+	packedBufferCount: number;
+	packedBufferBytes: number;
+	packedSmallOriginalCount: number;
+	copiedBytes: number;
+	paddingBytes: number;
+	packingMs: number;
+};
+
+export type BomcWorkerTransferDiagnostics = {
+	version: 'bomc-packed-full-result-1';
+	geometry: GeometryTransferStats;
+	assetBufferCount: number;
+	assetBytes: number;
+	totalTransferBufferCount: number;
+	totalTransferBytes: number;
+	totalPackingMs: number;
+};
+
 export type BomcDiagnostics = {
 	version: string;
 	profile: 'production' | 'debug';
@@ -198,6 +219,7 @@ export type BomcDiagnostics = {
 	};
 	provenance?: BomcProvenance;
 	encodingContract?: BomcEncodingContract;
+	workerTransfer?: BomcWorkerTransferDiagnostics;
 };
 
 export type ProgressiveBomcCallbacks = {
