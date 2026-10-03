@@ -1,0 +1,62 @@
+{
+	"schemaVersion": "bomc-loader-fixture-manifest-v1",
+	"plan": "BOMC-LOADER-001/v1.0",
+	"fixtures": [
+		{
+			"id": "S1-new",
+			"locator": "skps/model-eval-exports/PROJECT SBOOST 1__SIBAMBO-BOMC-v1.2.0__EXACT.bomc",
+			"bytes": 2428754,
+			"sha256": "d306fb89c0a59edf5ecdbcaf26d27e795e521cceb1c689e59958e1038932918c",
+			"expected": { "materialVersion": 2, "textureTableVersion": 1, "sourceTextureCount": 15, "activeSemanticCount": 12 }
+		},
+		{
+			"id": "S2-new",
+			"locator": "skps/model-eval-exports/PROJECT SBOOST 2__SIBAMBO-BOMC-v1.2.0__EXACT.bomc",
+			"bytes": 2319634,
+			"sha256": "df19a9f07df845661d065b98b221dbcfc53e9ec2c3efe7a11f434b7fcb0ac452",
+			"expected": { "materialVersion": 2, "textureTableVersion": 1, "sourceTextureCount": 13, "activeSemanticCount": 10 }
+		},
+		{
+			"id": "I-new",
+			"locator": "skps/model-eval-exports/RUMAH I__SIBAMBO-BOMC-v1.2.0__EXACT.bomc",
+			"bytes": 28765513,
+			"sha256": "01bf898df9a8b377f4d48ea4825c51427f2e18dbded865144363d5642a235825",
+			"expected": { "materialVersion": 2, "textureTableVersion": 1, "sourceTextureCount": 68, "activeSemanticCount": 17 }
+		},
+		{
+			"id": "Y-new",
+			"locator": "skps/model-eval-exports/RUMAH Y__SIBAMBO-BOMC-v1.2.0__EXACT.bomc",
+			"bytes": 34496013,
+			"sha256": "5bca4efdf0ac4f502b810179d51e49defbbc63406e98bb1f7641db1fb1d14c6f",
+			"expected": { "materialVersion": 2, "textureTableVersion": 1, "sourceTextureCount": 43, "activeSemanticCount": 15 }
+		},
+		{
+			"id": "L-old",
+			"locator": "skps/model-eval-exports/RUMAHL__SIBAMBO-BOMC-v1.2.0__ALL-20260925-17888-54bqb8/RUMAH L__SIBAMBO-BOMC-v1.2.0__EXACT.bomc",
+			"bytes": 17202790,
+			"sha256": "ec35fe0ce92a8c72d9bc317990515d023f01e264fbfac8ff972ba682fca2f098",
+			"expected": { "materialVersion": 1, "textureTableVersion": 1, "sourceTextureCount": 43, "activeSemanticCount": 0 }
+		},
+		{
+			"id": "Y-old",
+			"locator": "skps/model-eval-exports/RUMAHY__SIBAMBO-BOMC-v1.2.0__ALL-20260925-37196-8p86tc/RUMAH Y__SIBAMBO-BOMC-v1.2.0__VISUAL.bomc",
+			"bytes": 17957535,
+			"sha256": "21765cf9adf90314480264747cf6b7b56ac82c3017ae55f275091e6392dfa4b3",
+			"expected": { "materialVersion": 1, "textureTableVersion": 1, "sourceTextureCount": 44, "activeSemanticCount": 0 }
+		},
+		{
+			"id": "I-old",
+			"locator": "skps/model-eval-exports/RUMAHI__SIBAMBO-BOMC-v1.2.0__ALL-20260925-30484-ff936g/RUMAH I__SIBAMBO-BOMC-v1.2.0__RESEARCH.bomc",
+			"bytes": 18876310,
+			"sha256": "3b6035e1e6383c5ac7d4982b6210af69c22589f48854a1e5929b8b0dab84a686",
+			"expected": { "materialVersion": 1, "textureTableVersion": 1, "sourceTextureCount": 69, "activeSemanticCount": 0 }
+		},
+		{
+			"id": "S2-jcm",
+			"locator": "docs/worklogs/reviews/2026-09-26_E4-BOMC-001_v1.4/containers/PROJECT SBOOST 2.jcm-best-deflate.diagnostic.bomc",
+			"bytes": 3354834,
+			"sha256": "39851b73848aa42cb742e1be6230965327a41c31ec6b1051848304ac09faf637",
+			"expected": { "materialVersion": 1, "textureTableVersion": 2, "sourceTextureCount": 14, "activeSemanticCount": 0 }
+		}
+	]
+}
