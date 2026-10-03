@@ -99,7 +99,7 @@ function parseModel(bytes: Uint8Array) {
 	};
 }
 
-function parseMaterials(bytes: Uint8Array) {
+export function parseMaterials(bytes: Uint8Array) {
 	const reader = new BomcBinaryReader(bytes);
 	const version = reader.readUint8();
 	if (version !== 1 && version !== 2) throw new Error(`BOMC invalid: material section version ${version}.`);
@@ -113,24 +113,55 @@ function parseMaterials(bytes: Uint8Array) {
 	reader.readIndices(stringWidth, count);
 	reader.readBytes(count * 4);
 	for (let index = 0; index < count; index += 1) reader.readUint16();
-	reader.readIndices(textureWidth, count);
+	const textureIndices = reader.readIndices(textureWidth, count).values;
 	for (let index = 0; index < count * 2; index += 1) reader.readFloat32();
-	const active: Array<{ materialIndex: number; materialType: number; colorizeMode: number; hls: [number, number, number]; outputRgbaSha256: string }> = [];
+	const active: Array<{ materialIndex: number; textureIndex: number; materialType: number; colorizeMode: number; hls: [number, number, number]; outputRgbaSha256: string }> = [];
 	const modes: Record<string, number> = {};
+	const semanticRecords: Array<{ materialIndex: number; textureIndex: number; materialType: number; colorizeMode: number; hls: [number, number, number]; outputRgbaSha256: string }> = [];
 	if (version === 2) {
 		const materialTypes = reader.readBytes(count);
 		const colorizeModes = reader.readBytes(count);
+		const hlsRows: Array<[number, number, number]> = [];
 		for (let index = 0; index < count; index += 1) {
 			const hls: [number, number, number] = [reader.readFloat64(), reader.readFloat64(), reader.readFloat64()];
-			modes[String(colorizeModes[index])] = (modes[String(colorizeModes[index])] ?? 0) + 1;
-			const outputRgbaSha256 = Buffer.from(reader.readBytes(32)).toString('hex');
-			if (colorizeModes[index] === 1 || colorizeModes[index] === 2) {
-				active.push({ materialIndex: index, materialType: materialTypes[index], colorizeMode: colorizeModes[index], hls, outputRgbaSha256 });
+			if (!hls.every(Number.isFinite)) throw new Error(`BOMC invalid: material ${index} has non-finite semantic delta.`);
+			hlsRows.push(hls);
+		}
+		const hashes = Array.from({ length: count }, () => Buffer.from(reader.readBytes(32)).toString('hex'));
+		for (let index = 0; index < count; index += 1) {
+			const hls = hlsRows[index];
+			const materialType = materialTypes[index];
+			const colorizeMode = colorizeModes[index];
+			if (![0, 1, 2].includes(materialType)) throw new Error(`BOMC invalid: material ${index} has unsupported material type ${materialType}.`);
+			if (![0, 1, 2].includes(colorizeMode)) throw new Error(`BOMC invalid: material ${index} has unsupported semantic mode ${colorizeMode}.`);
+			modes[String(colorizeMode)] = (modes[String(colorizeMode)] ?? 0) + 1;
+			const outputRgbaSha256 = hashes[index];
+			const record = { materialIndex: index, textureIndex: textureIndices[index], materialType, colorizeMode, hls, outputRgbaSha256 };
+			semanticRecords.push(record);
+			if (colorizeMode === 1 || colorizeMode === 2) {
+				if (materialType !== 2) throw new Error(`BOMC invalid: active semantic material ${index} is not type 2.`);
+				if (/^0{64}$/.test(outputRgbaSha256)) throw new Error(`BOMC invalid: active semantic material ${index} has a zero output hash.`);
+				active.push(record);
 			}
 		}
 	}
 	reader.finish('material section');
-	return { version, count, activeSemanticCount: active.length, semanticModeCounts: modes, activeSemanticMaterials: active };
+	return { version, count, activeSemanticCount: active.length, semanticModeCounts: modes, textureIndices: Array.from(textureIndices), semanticRecords, activeSemanticMaterials: active };
+}
+
+export function validateActiveSemanticReferences(material: ReturnType<typeof parseMaterials>, textureTable: ReturnType<typeof parseTextureTable> | null) {
+	if (material.activeSemanticMaterials.length === 0) return [];
+	if (!textureTable) throw new Error('BOMC invalid: active semantic material has no texture table.');
+	return material.activeSemanticMaterials.map((record) => {
+		const texture = textureTable.textures[record.textureIndex];
+		if (!Number.isInteger(record.textureIndex) || record.textureIndex < 0 || !texture) {
+			throw new Error(`BOMC invalid: active semantic material ${record.materialIndex} has invalid texture reference ${record.textureIndex}.`);
+		}
+		if (!['png', 'jpeg', 'webp'].includes(texture.media)) {
+			throw new Error(`BOMC invalid: active semantic material ${record.materialIndex} uses unsupported semantic media ${texture.media}.`);
+		}
+		return { ...record, referencedTexture: { media: texture.media, width: texture.width, height: texture.height, encodedPayloadSha256: texture.encodedPayloadSha256 } };
+	});
 }
 
 function parseTextureTable(bytes: Uint8Array, blobRawLength: number | undefined) {
@@ -393,6 +424,7 @@ async function inventoryFixture(workspaceRoot: string, fixture: ExpectedFixture)
 	if ((textureTable?.version ?? 0) !== fixture.expected.textureTableVersion) throw new Error(`${fixture.id}: texture-table version ${textureTable?.version ?? 'missing'} does not match manifest ${fixture.expected.textureTableVersion}.`);
 	if ((textureTable?.count ?? 0) !== fixture.expected.sourceTextureCount) throw new Error(`${fixture.id}: texture count ${textureTable?.count ?? 0} does not match manifest ${fixture.expected.sourceTextureCount}.`);
 	if (material.activeSemanticCount !== fixture.expected.activeSemanticCount) throw new Error(`${fixture.id}: active semantic count ${material.activeSemanticCount} does not match manifest ${fixture.expected.activeSemanticCount}.`);
+	material.activeSemanticMaterials = validateActiveSemanticReferences(material, textureTable);
 	const sidecar = await sidecarStatus(workspaceRoot, fixture, sha256, encoding?.profile ?? null);
 	return {
 		id: fixture.id, locator: fixture.locator, bytes: file.byteLength, sha256,

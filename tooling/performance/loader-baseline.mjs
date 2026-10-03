@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +20,25 @@ const B0_COMMITS = {
 	benchmark: '9d2322409b307473ae88ce39fda825bbf05211c0'
 };
 const B0_EDITOR_FINGERPRINT = '8e33a8bfa2739aa09c4e5721cfb7e5101bcd6dd7963b82e1dab645f924a185ed';
-const SUPPORTED_IDS = new Set(['L-old', 'Y-old', 'I-old', 'S2-jcm']);
-const V2_IDS = new Set(['S1-new', 'S2-new', 'I-new', 'Y-new']);
+const SUPPORTED_IDS = ['L-old', 'Y-old', 'I-old', 'S2-jcm'];
+const SUPPORTED_ID_SET = new Set(SUPPORTED_IDS);
+const V2_IDS = ['S1-new', 'S2-new', 'I-new', 'Y-new'];
+const V2_ID_SET = new Set(V2_IDS);
+const BROWSER_LAUNCH_ARGS = ['--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader'];
+
+function monotonicEpochNow() { return performance.timeOrigin + performance.now(); }
+
+export function captureChooserEventEpoch(event, readEpoch = monotonicEpochNow) {
+	return { event, chooserEpochMs: readEpoch() };
+}
+
+export function bootPollDelay(tickStartMs, nowMs, cadenceMs = POLL_MS) {
+	return Math.max(0, tickStartMs + cadenceMs - nowMs);
+}
+
+export function isBootRequestEvidenceComplete(audit) {
+	return audit.chooserObserved === true && audit.jsRequestCount > 0 && audit.jsGzipUnknownBodyCount === 0 && audit.jsHttpFailureCount === 0 && audit.jsTimingFailureCount === 0 && audit.jsPendingAtCutoffCount === 0 && audit.jsResourceTimingFailureCount === 0 && audit.missingResourceMatchCount === 0 && audit.resourceMissingCaptureCount === 0;
+}
 
 function argValue(args, name, fallback) {
 	const index = args.indexOf(name);
@@ -31,13 +48,14 @@ function argValue(args, name, fallback) {
 	return value;
 }
 
-function parseArgs(args) {
+export function parseArgs(args) {
 	const parsed = {
 		baseline: argValue(args, '--baseline', null),
 		workspaceRoot: argValue(args, '--workspace-root', null),
 		fixtures: argValue(args, '--fixtures', path.resolve('tooling/performance/fixtures.json')),
 		output: argValue(args, '--output', null),
 		suite: argValue(args, '--suite', 'all'),
+		appSelection: argValue(args, '--apps', null),
 		urls: {
 			editor: argValue(args, '--editor-url', null),
 			rooms: argValue(args, '--rooms-url', null),
@@ -49,6 +67,12 @@ function parseArgs(args) {
 		throw new Error('Required: --workspace-root, --editor-url, --rooms-url, --benchmark-url, and --output.');
 	}
 	if (!['all', 'model', 'boot', 'diagnostic'].includes(parsed.suite)) throw new Error('--suite must be all, model, boot, or diagnostic.');
+	const selectedIds = parsed.appSelection === null ? APPS.map((app) => app.id) : parsed.appSelection.split(',').map((id) => id.trim());
+	if (selectedIds.length === 0 || selectedIds.some((id) => id.length === 0)) throw new Error('--apps must contain one or more comma-separated app IDs.');
+	if (new Set(selectedIds).size !== selectedIds.length) throw new Error('--apps contains duplicate app IDs.');
+	const unknownIds = selectedIds.filter((id) => !APPS.some((app) => app.id === id));
+	if (unknownIds.length) throw new Error(`--apps contains unknown app IDs: ${unknownIds.join(', ')}.`);
+	parsed.apps = APPS.filter((app) => selectedIds.includes(app.id));
 	return parsed;
 }
 
@@ -65,6 +89,13 @@ export function verifyFixtureBytes(fixture, bytes) {
 	const sha256 = createHash('sha256').update(bytes).digest('hex');
 	if (sha256 !== fixture.sha256) throw new Error(`${fixture.id}: SHA-256 ${sha256} does not match pinned ${fixture.sha256}.`);
 	return sha256;
+}
+
+export function assertBuildIdentityUnchanged(expectedIdentity, actualIdentity, appId, fixtureId, stage) {
+	if (JSON.stringify(actualIdentity) !== JSON.stringify(expectedIdentity)) {
+		throw new Error(`${appId}/${fixtureId}: build identity changed ${stage} series.`);
+	}
+	return true;
 }
 
 export function median(values) {
@@ -101,6 +132,14 @@ export async function raceWithDeadline(promise, timeoutMs) {
 	finally { clearTimeout(timer); }
 }
 
+export async function withNodeWatchdog(operation, timeoutMs, label) {
+	const pending = typeof operation === 'function' ? Promise.resolve().then(operation) : Promise.resolve(operation);
+	const result = await raceWithDeadline(pending, timeoutMs);
+	if (result.kind === 'timeout') throw new Error(`${label} exceeded the ${timeoutMs}ms Node watchdog.`);
+	if (result.kind === 'error') throw result.error;
+	return result.value;
+}
+
 export function nearestRankPercentile(values, percentile) {
 	if (values.length === 0) return null;
 	if (!(percentile > 0 && percentile <= 1)) throw new Error('percentile must be within (0, 1].');
@@ -109,19 +148,140 @@ export function nearestRankPercentile(values, percentile) {
 }
 
 export function summarizeTimingRows(rows, expectedAttempts = 10) {
-	const durations = rows.map((row) => row.elapsedMs).filter((value) => Number.isFinite(value));
+	const durationRows = rows.map((row) => row.elapsedMs);
+	const validDurations = durationRows.filter((value) => Number.isFinite(value) && value >= 0);
+	const invalidDurationCount = durationRows.filter((value) => !Number.isFinite(value) || value < 0).length;
 	const failedCount = rows.filter((row) => row.status !== 'ready').length;
 	const timeoutCount = rows.filter((row) => row.status === 'timeout').length;
+	const clocksValid = rows.every((row) => row.openOccurred === true && Number.isFinite(row.startedAtEpochMs));
+	const completeTimings = rows.length === expectedAttempts && invalidDurationCount === 0 && clocksValid;
 	return {
-		attemptCount: rows.length,
-		p50Ms: median(durations),
-		p95Ms: nearestRankPercentile(durations, 0.95),
-		minMs: durations.length ? Math.min(...durations) : null,
-		maxMs: durations.length ? Math.max(...durations) : null,
+		expectedAttemptCount: expectedAttempts,
+		completedRowCount: rows.length,
+		validTimingRowCount: validDurations.length,
+		invalidOrMissingDurationCount: invalidDurationCount,
+		missingOpenClockCount: rows.filter((row) => row.openOccurred !== true || !Number.isFinite(row.startedAtEpochMs)).length,
+		p50Ms: completeTimings ? median(validDurations) : null,
+		p95Ms: completeTimings ? nearestRankPercentile(validDurations, 0.95) : null,
+		finiteRowsP50Ms: validDurations.length ? median(validDurations) : null,
+		finiteRowsP95Ms: validDurations.length ? nearestRankPercentile(validDurations, 0.95) : null,
+		minMs: completeTimings ? Math.min(...validDurations) : null,
+		maxMs: completeTimings ? Math.max(...validDurations) : null,
 		failedCount,
 		timeoutCount,
-		seriesPass: rows.length === expectedAttempts && failedCount === 0
+		seriesPass: completeTimings && failedCount === 0
 	};
+}
+
+export function summarizeBootTimingRows(rows, expectedAttempts = 10) {
+	const timedRows = rows.map((row) => {
+		const navigation = row.navigationStartedEpochMs;
+		const chooser = row.chooserEpochMs;
+		const valid = Number.isFinite(navigation) && Number.isFinite(chooser) && chooser >= navigation;
+		return { ...row, openOccurred: valid, startedAtEpochMs: navigation, elapsedMs: valid ? chooser - navigation : null, status: row.status === 'ready' ? 'ready' : 'failed' };
+	});
+	return { ...summarizeTimingRows(timedRows, expectedAttempts), missingNavigationOrChooserClockCount: timedRows.filter((row) => !row.openOccurred).length };
+}
+
+function modelRowId(appId, fixtureId, mode, attempt, prime = false) {
+	return `${appId}-${fixtureId}-${mode}-${prime ? 'prime' : String(attempt).padStart(2, '0')}`;
+}
+
+export function buildModelScenarioMatrix(baseline, appIds, fixtureIds) {
+	if (!['B0', 'B1', 'P1'].includes(baseline)) throw new Error(`Unsupported baseline ${baseline}.`);
+	if (!Array.isArray(appIds) || appIds.length === 0 || new Set(appIds).size !== appIds.length || appIds.some((id) => !APPS.some((app) => app.id === id))) {
+		throw new Error('Scenario matrix requires unique known app IDs in non-empty selection.');
+	}
+	if (!Array.isArray(fixtureIds) || fixtureIds.length !== 8 || new Set(fixtureIds).size !== fixtureIds.length || [...SUPPORTED_IDS, ...V2_IDS].some((id) => !fixtureIds.includes(id))) {
+		throw new Error('Scenario matrix requires the exact eight frozen fixture IDs.');
+	}
+	const scenarios = [];
+	const expectedRowIds = [];
+	for (const app of APPS.filter((item) => appIds.includes(item.id))) {
+		const timedFixtures = baseline === 'B0' ? fixtureIds.filter((id) => SUPPORTED_ID_SET.has(id)) : fixtureIds;
+		for (const fixtureId of timedFixtures) {
+			for (const mode of ['cold', 'warm']) {
+				const scenario = {
+					id: `${app.id}-${fixtureId}-${mode}`,
+					kind: 'timing-series', appId: app.id, fixtureId, mode, expectedOutcome: 'ready', expectedAttempts: 10,
+					primeRowId: mode === 'warm' ? modelRowId(app.id, fixtureId, mode, 0, true) : null,
+					attemptRowIds: Array.from({ length: 10 }, (_, index) => modelRowId(app.id, fixtureId, mode, index + 1))
+				};
+				scenarios.push(scenario);
+				if (scenario.primeRowId) expectedRowIds.push(scenario.primeRowId);
+				expectedRowIds.push(...scenario.attemptRowIds);
+			}
+		}
+		if (baseline === 'B0') {
+			for (const fixtureId of fixtureIds.filter((id) => V2_ID_SET.has(id))) {
+				const id = `${app.id}-${fixtureId}-rejection`;
+				scenarios.push({ id, kind: 'expected-rejection', appId: app.id, fixtureId, mode: 'cold', expectedOutcome: 'material-v2-rejection', expectedAttempts: 1, attemptRowIds: [id] });
+				expectedRowIds.push(id);
+			}
+		}
+	}
+	return { baseline, appIds: APPS.filter((app) => appIds.includes(app.id)).map((app) => app.id), fixtureIds: [...fixtureIds], scenarios, expectedRowIds, expectedRowCount: expectedRowIds.length };
+}
+
+export function verifyScenarioRows(rows, expectedRowIds) {
+	const seen = new Set();
+	const duplicateRowIds = [];
+	const unknownRowIds = [];
+	for (const row of rows) {
+		const rowId = row.scenarioRowId ?? row.id;
+		if (!expectedRowIds.includes(rowId)) unknownRowIds.push(rowId ?? null);
+		if (seen.has(rowId)) duplicateRowIds.push(rowId);
+		seen.add(rowId);
+	}
+	const missingRowIds = expectedRowIds.filter((id) => !seen.has(id));
+	return { expectedRowCount: expectedRowIds.length, actualRowCount: rows.length, duplicateRowIds, unknownRowIds, missingRowIds, matrixComplete: expectedRowIds.length > 0 && rows.length === expectedRowIds.length && duplicateRowIds.length === 0 && unknownRowIds.length === 0 && missingRowIds.length === 0 };
+}
+
+export function evaluateModelAcceptance(matrix, rows, summaries) {
+	const matrixAudit = verifyScenarioRows(rows, matrix.expectedRowIds);
+	const timingScenarios = matrix.scenarios.filter((scenario) => scenario.kind === 'timing-series');
+	const allTimingSeriesPass = timingScenarios.length > 0 && timingScenarios.every((scenario) => summaries[scenario.id]?.seriesPass === true);
+	const expectedRejections = matrix.scenarios.filter((scenario) => scenario.kind === 'expected-rejection');
+	const rowsById = new Map(rows.map((row) => [row.scenarioRowId ?? row.id, row]));
+	const allRejectionsPass = expectedRejections.length === 0
+		? matrix.baseline !== 'B0'
+		: expectedRejections.every((scenario) => {
+			const row = rowsById.get(scenario.attemptRowIds[0]);
+			return row?.status === 'expected-rejection' && row.rejectionMessageMatchesB0 === true && row.firstValidFrame === null;
+		});
+	const primeScenarios = matrix.scenarios.filter((scenario) => scenario.primeRowId);
+	const allPrimeRowsPass = primeScenarios.length > 0 && primeScenarios.every((scenario) => {
+		const row = rowsById.get(scenario.primeRowId);
+		return row?.status === 'prime-excluded' && row.openOccurred === true && Number.isFinite(row.startedAtEpochMs) && Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.firstValidFrame !== null;
+	});
+	return { matrixAudit, allTimingSeriesPass, allPrimeRowsPass, allRejectionsPass, pass: matrixAudit.matrixComplete && allTimingSeriesPass && allPrimeRowsPass && allRejectionsPass };
+}
+
+export function buildBootScenarioMatrix(appIds) {
+	if (!Array.isArray(appIds) || appIds.length === 0 || new Set(appIds).size !== appIds.length || appIds.some((id) => !APPS.some((app) => app.id === id))) {
+		throw new Error('Boot matrix requires unique known app IDs in non-empty selection.');
+	}
+	const appOrder = APPS.filter((app) => appIds.includes(app.id)).map((app) => app.id);
+	const scenarios = [];
+	for (const appId of appOrder) for (const viewport of ['desktop', 'mobile']) for (const mode of ['cold', 'warm']) {
+		const prefix = `${appId}-boot-${viewport}-${mode}`;
+		const scenario = { id: prefix, appId, viewport, mode, expectedAttempts: 10, primeRowId: mode === 'warm' ? `${prefix}-prime` : null, attemptRowIds: Array.from({ length: 10 }, (_, index) => `${prefix}-${String(index + 1).padStart(2, '0')}`) };
+		scenarios.push(scenario);
+	}
+	const expectedRowIds = scenarios.flatMap((scenario) => [...(scenario.primeRowId ? [scenario.primeRowId] : []), ...scenario.attemptRowIds]);
+	return { appIds: appOrder, scenarios, expectedRowIds, expectedRowCount: expectedRowIds.length };
+}
+
+export function evaluateBootAcceptance(matrix, rows, summaries) {
+	const matrixAudit = verifyScenarioRows(rows, matrix.expectedRowIds);
+	const allTimingSeriesPass = matrix.scenarios.length > 0 && matrix.scenarios.every((scenario) => summaries[scenario.id]?.seriesPass === true);
+	const rowsById = new Map(rows.map((row) => [row.scenarioRowId ?? row.id, row]));
+	const primeScenarios = matrix.scenarios.filter((scenario) => scenario.primeRowId);
+	const allPrimeRowsPass = primeScenarios.length > 0 && primeScenarios.every((scenario) => {
+		const row = rowsById.get(scenario.primeRowId);
+		return row?.status === 'prime-excluded' && row.clockValid === true && Number.isFinite(row.bootInteractivityMs) && row.bootInteractivityMs >= 0 && Number.isFinite(row.jsGzipLevel9Bytes) && row.jsGzipLevel9Bytes >= 0 && row.jsRequestCount > 0;
+	});
+	return { matrixAudit, allTimingSeriesPass, allPrimeRowsPass, pass: matrixAudit.matrixComplete && allTimingSeriesPass && allPrimeRowsPass };
 }
 
 function readManifest(workspaceRoot, fixturePath) {
@@ -152,9 +312,9 @@ function appUrl(baseUrl, app) {
 
 async function readBuild(url, app, baseline) {
 	const endpoint = new URL('/__build.json', url);
-	const response = await fetch(endpoint, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } });
+	const response = await withNodeWatchdog(() => fetch(endpoint, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(5_000) }), 5_000, `${app.id} build identity request`);
 	if (!response.ok) throw new Error(`${app.id}: GET ${endpoint} returned HTTP ${response.status}.`);
-	const data = await response.json();
+	const data = await withNodeWatchdog(() => response.json(), 5_000, `${app.id} build identity body`);
 	if (data.schema !== 'sibambo-app-build-identity-v2' || data.app !== app.id || !/^[0-9a-f]{40}$/.test(data.commit) || !/^[0-9a-f]{64}$/.test(data.sourceSha256)) {
 		throw new Error(`${app.id}: invalid production build identity response.`);
 	}
@@ -167,39 +327,134 @@ async function readBuild(url, app, baseline) {
 	return { endpoint: endpoint.href, status: response.status, identity: data };
 }
 
-function makeFrameProbe() {
+export function makeFrameProbe() {
 	return () => {
-		const state = { drawCanvases: new Set(), firstFrame: null };
+		const state = { drawCanvases: new Map(), firstFrame: null, unavailableHooks: [], extensionHooks: {} };
 		const wrapped = new WeakSet();
-		function observePrototype(prototype) {
-			if (!prototype || wrapped.has(prototype)) return;
-			wrapped.add(prototype);
-			for (const name of ['drawArrays', 'drawElements', 'drawRangeElements']) {
-				const original = prototype[name];
-				if (typeof original !== 'function') continue;
-				try {
-					prototype[name] = function (...args) {
-						const result = original.apply(this, args);
-						if (this.canvas) state.drawCanvases.add(this.canvas);
-						return result;
-					};
-				} catch { /* Protected browser prototype; the frame will remain unverified. */ }
+		const wrappedMethods = new WeakMap();
+		const extensionContexts = new WeakMap();
+		function drawable(context) {
+			const canvas = context?.canvas;
+			if (!canvas || context.isContextLost?.() || !canvas.isConnected || !canvas.closest('.viewport')) return null;
+			const rect = canvas.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0 || canvas.width <= 0 || canvas.height <= 0) return null;
+			return { canvas, rect };
+		}
+		function positiveCount(value) { return Number.isFinite(value) && value > 0; }
+		function addressedPositive(list, offset, count) {
+			if (!list || !Number.isInteger(offset) || !Number.isInteger(count) || count <= 0 || offset < 0 || offset + count > list.length) return false;
+			for (let index = offset; index < offset + count; index += 1) if (positiveCount(list[index])) return true;
+			return false;
+		}
+		function pairedPositive(counts, countsOffset, instances, instancesOffset, drawCount) {
+			if (!counts || !instances || !Number.isInteger(countsOffset) || !Number.isInteger(instancesOffset) || !Number.isInteger(drawCount) || drawCount <= 0 || countsOffset < 0 || instancesOffset < 0 || countsOffset + drawCount > counts.length || instancesOffset + drawCount > instances.length) return false;
+			for (let index = 0; index < drawCount; index += 1) if (positiveCount(counts[countsOffset + index]) && positiveCount(instances[instancesOffset + index])) return true;
+			return false;
+		}
+		function validCount(name, args) {
+			switch (name) {
+				case 'drawArrays': return positiveCount(args[2]);
+				case 'drawElements': return positiveCount(args[1]);
+				case 'drawRangeElements': return positiveCount(args[3]);
+				case 'drawArraysInstanced':
+				case 'drawArraysInstancedANGLE': return positiveCount(args[2]) && positiveCount(args[3]);
+				case 'drawElementsInstanced':
+				case 'drawElementsInstancedANGLE': return positiveCount(args[1]) && positiveCount(args[4]);
+				case 'multiDrawArraysWEBGL': return addressedPositive(args[3], args[4], args[5]);
+				case 'multiDrawElementsWEBGL': return addressedPositive(args[1], args[2], args[6]);
+				case 'multiDrawArraysInstancedWEBGL': {
+					return pairedPositive(args[3], args[4], args[5], args[6], args[7]);
+				}
+				case 'multiDrawElementsInstancedWEBGL': {
+					return pairedPositive(args[1], args[2], args[6], args[7], args[8]);
+				}
+				default: return false;
 			}
 		}
-		observePrototype(window.WebGLRenderingContext?.prototype);
-		observePrototype(window.WebGL2RenderingContext?.prototype);
+		function noteSuccessfulDraw(context, name, args) {
+			if (!validCount(name, args)) return;
+			const current = drawable(context);
+			if (!current) return;
+			const rows = state.drawCanvases.get(current.canvas) ?? [];
+			rows.push({ context, method: name });
+			state.drawCanvases.set(current.canvas, rows);
+		}
+		function hookMethods(target, names, label, contextOverride = null) {
+			if (!target) return;
+			const hookedNames = wrappedMethods.get(target) ?? new Set();
+			wrappedMethods.set(target, hookedNames);
+			for (const name of names) {
+				if (hookedNames.has(name)) continue;
+				hookedNames.add(name);
+				const original = target[name];
+				if (typeof original === 'function' && !Object.prototype.hasOwnProperty.call(target, name)) continue;
+				if (typeof original !== 'function') {
+					state.unavailableHooks.push(`${label}.${name}: unavailable`);
+					continue;
+				}
+				try {
+					const replacement = function (...args) {
+						const result = original.apply(this, args);
+						noteSuccessfulDraw(typeof contextOverride === 'function' ? contextOverride(this) : contextOverride ?? this, name, args);
+						return result;
+					};
+					target[name] = replacement;
+					if (target[name] !== replacement) throw new Error('protected method');
+				} catch {
+					state.unavailableHooks.push(`${label}.${name}: protected`);
+				}
+			}
+		}
+		function observePrototype(prototype, label) {
+			if (!prototype || wrapped.has(prototype)) return;
+			wrapped.add(prototype);
+			hookMethods(prototype, ['drawArrays', 'drawElements', 'drawRangeElements'], label);
+			hookMethods(prototype, ['drawArraysInstanced', 'drawElementsInstanced'], label);
+			const getExtension = prototype.getExtension;
+			if (typeof getExtension !== 'function') {
+				state.extensionHooks[label] = 'getExtension-unavailable';
+				return;
+			}
+			try {
+				const replacement = function (name, ...args) {
+					const extension = getExtension.call(this, name, ...args);
+					if (extension && name === 'ANGLE_instanced_arrays') {
+						extensionContexts.set(extension, this);
+						hookMethods(Object.getPrototypeOf(extension), ['drawArraysInstancedANGLE', 'drawElementsInstancedANGLE'], `${label}.ANGLE_instanced_arrays`, (receiver) => extensionContexts.get(receiver) ?? null);
+						state.extensionHooks[`${label}.ANGLE_instanced_arrays`] = 'observed';
+					} else if (!extension && name === 'ANGLE_instanced_arrays') {
+						state.extensionHooks[`${label}.ANGLE_instanced_arrays`] = 'unavailable';
+						state.unavailableHooks.push(`${label}.ANGLE_instanced_arrays: unsupported`);
+					}
+					if (extension && name === 'WEBGL_multi_draw') {
+						extensionContexts.set(extension, this);
+						hookMethods(Object.getPrototypeOf(extension), ['multiDrawArraysWEBGL', 'multiDrawElementsWEBGL', 'multiDrawArraysInstancedWEBGL', 'multiDrawElementsInstancedWEBGL'], `${label}.WEBGL_multi_draw`, (receiver) => extensionContexts.get(receiver) ?? null);
+						state.extensionHooks[`${label}.WEBGL_multi_draw`] = 'observed';
+					} else if (!extension && name === 'WEBGL_multi_draw') {
+						state.extensionHooks[`${label}.WEBGL_multi_draw`] = 'unavailable';
+						state.unavailableHooks.push(`${label}.WEBGL_multi_draw: unsupported`);
+					}
+					return extension;
+				};
+				prototype.getExtension = replacement;
+				if (prototype.getExtension !== replacement) throw new Error('protected getExtension');
+			} catch { state.unavailableHooks.push(`${label}.getExtension: protected`); }
+		}
+		observePrototype(window.WebGLRenderingContext?.prototype, 'WebGLRenderingContext');
+		observePrototype(window.WebGL2RenderingContext?.prototype, 'WebGL2RenderingContext');
 		const originalRaf = window.requestAnimationFrame.bind(window);
 		window.requestAnimationFrame = (callback) => originalRaf((timestamp) => {
 			callback(timestamp);
 			if (state.firstFrame) return;
-			for (const canvas of state.drawCanvases) {
-				const rect = canvas.getBoundingClientRect();
-				if (!canvas.closest('.viewport') || !canvas.isConnected || rect.width <= 0 || rect.height <= 0 || canvas.width <= 0 || canvas.height <= 0) continue;
+			for (const [canvas, draws] of state.drawCanvases) {
+				const current = canvas.isConnected ? draws.find((draw) => drawable(draw.context)) : null;
+				const geometry = current && drawable(current.context);
+				if (!current || !geometry) continue;
 				state.firstFrame = {
-					perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now(),
-					cssWidth: rect.width, cssHeight: rect.height,
+					perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now(), method: current.method,
+					cssWidth: geometry.rect.width, cssHeight: geometry.rect.height,
 					bufferWidth: canvas.width, bufferHeight: canvas.height,
-					tagName: canvas.tagName, viewportCanvas: Boolean(canvas.closest('.viewport'))
+					tagName: canvas.tagName, viewportCanvas: true
 				};
 				break;
 			}
@@ -209,7 +464,7 @@ function makeFrameProbe() {
 	};
 }
 
-function makeWorkerDiagnosticProbe(channelName) {
+export function makeWorkerDiagnosticProbe(channelName) {
 	return (channel) => {
 		const NativeWorker = window.Worker;
 		const bus = new BroadcastChannel(channel);
@@ -230,12 +485,21 @@ function makeWorkerDiagnosticProbe(channelName) {
 				const __channel = new BroadcastChannel(${JSON.stringify(channel)});
 				const __epoch = () => performance.timeOrigin + performance.now();
 				let __sourceBuffer = null;
+			let __moduleReady = false;
+			const __ingressQueue = [];
 				self.addEventListener('message', (event) => {
 					if (!__sourceBuffer && event.data && event.data.buffer instanceof ArrayBuffer) {
 						__sourceBuffer = event.data.buffer;
 						__channel.postMessage({ phase: 'worker-input-buffer', byteLength: __sourceBuffer.byteLength, epochMs: __epoch() });
 					}
 				}, true);
+				const __ingressGate = (event) => {
+					if (__moduleReady) return;
+					__ingressQueue.push({ data: event.data, origin: event.origin, lastEventId: event.lastEventId, source: event.source, ports: [...event.ports] });
+					__channel.postMessage({ phase: 'worker-ingress-queued', queueLength: __ingressQueue.length, epochMs: __epoch() });
+					event.stopImmediatePropagation();
+				};
+				self.addEventListener('message', __ingressGate, true);
 				try {
 					const __originalDigest = crypto.subtle.digest.bind(crypto.subtle);
 					crypto.subtle.digest = function(algorithm, data) {
@@ -249,7 +513,7 @@ function makeWorkerDiagnosticProbe(channelName) {
 					if (message?.type === 'complete' && message.result) {
 						try {
 							const seen = new WeakSet(); const buffers = new Map(); const transfers = new Set(Array.isArray(transferList) ? transferList.filter((item) => item instanceof ArrayBuffer) : []);
-							let objects = 0, arrays = 0, views = 0, viewBytes = 0, bufferBytes = 0, nakedBuffers = 0, sharedBuffers = 0, classes = [];
+						let objects = 0, arrays = 0, views = 0, viewBytes = 0, bufferBytes = 0, nakedBuffers = 0, sharedBuffers = 0, classes = [];
 							const visit = (value, property) => {
 								if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return;
 								if (value instanceof ArrayBuffer) { if (!buffers.has(value)) { buffers.set(value, true); bufferBytes += value.byteLength; } if (property) nakedBuffers += 1; return; }
@@ -258,7 +522,7 @@ function makeWorkerDiagnosticProbe(channelName) {
 								if (seen.has(value)) return; seen.add(value); objects += 1; if (Array.isArray(value)) arrays += 1; else { const proto = Object.getPrototypeOf(value); if (proto !== Object.prototype && proto !== null) classes.push(value.constructor?.name || 'unknown'); } for (const key of Object.keys(value)) visit(value[key], !Array.isArray(value));
 								};
 							visit(message.result, false);
-							graph = { objects, arrays, views, viewBytes, uniqueBuffers: buffers.size, graphBufferBytes: bufferBytes, transferBufferCount: transfers.size, transferBytes: [...transfers].reduce((total, buffer) => total + buffer.byteLength, 0), viewBuffersMissingFromTransferList: [...buffers.keys()].filter((buffer) => !transfers.has(buffer)).length, sourceBufferRetainedBytes: __sourceBuffer?.byteLength ?? null, sourceBufferInTransferList: Boolean(__sourceBuffer && transfers.has(__sourceBuffer)), graphIncludesSourceBuffer: Boolean(__sourceBuffer && buffers.has(__sourceBuffer)), nakedArrayBufferProperties: nakedBuffers, sharedArrayBufferCount: sharedBuffers, nonPlainClasses: classes };
+							graph = { objects, arrays, views, viewBytes, uniqueBuffers: buffers.size, graphBufferBytes: bufferBytes, transferBufferCount: transfers.size, transferBytes: [...transfers].reduce((total, buffer) => total + buffer.byteLength, 0), viewBuffersMissingFromTransferList: [...buffers.keys()].filter((buffer) => !transfers.has(buffer)).length, sourceBufferRetainedBytes: __sourceBuffer?.byteLength ?? null, sourceBufferInTransferList: Boolean(__sourceBuffer && transfers.has(__sourceBuffer)), graphIncludesSourceBuffer: Boolean(__sourceBuffer && buffers.has(__sourceBuffer)), nakedArrayBufferProperties: nakedBuffers, sharedArrayBufferCount: sharedBuffers, nonPlainClasses: classes, runtimeCounts: { resultFacesLength: Number.isInteger(message.result?.faces?.length) ? message.result.faces.length : null, preparedRuntimeSceneGroupsLength: Number.isInteger(message.result?.preparedRuntimeScene?.groups?.length) ? message.result.preparedRuntimeScene.groups.length : null, sourceCounts: message.result?.diagnostics?.counts ?? null } };
 						} catch (error) { graph = { error: String(error) }; }
 					}
 					const kind = message?.type ?? 'unknown';
@@ -268,7 +532,20 @@ function makeWorkerDiagnosticProbe(channelName) {
 					__channel.postMessage({ phase: 'worker-post-return', type: kind, epochMs: __epoch() });
 					return returned;
 				};
-				import(${JSON.stringify(sourceUrl)}).catch((error) => __channel.postMessage({ phase: 'worker-import-error', error: String(error), epochMs: __epoch() }));
+				(async () => {
+					try {
+						await import(${JSON.stringify(sourceUrl)});
+						__moduleReady = true;
+						self.removeEventListener('message', __ingressGate, true);
+						for (const queued of __ingressQueue) {
+							self.dispatchEvent(new MessageEvent('message', { data: queued.data, origin: queued.origin, lastEventId: queued.lastEventId, source: queued.source, ports: queued.ports }));
+							__channel.postMessage({ phase: 'worker-ingress-replayed', queueLength: __ingressQueue.length, type: queued.data?.type ?? null, epochMs: __epoch() });
+						}
+						__ingressQueue.length = 0;
+					} catch (error) {
+						__channel.postMessage({ phase: 'worker-import-error', error: String(error), epochMs: __epoch() });
+					}
+				})();
 			`;
 			const objectUrl = URL.createObjectURL(new Blob([moduleSource], { type: 'text/javascript' }));
 			objectUrls.add(objectUrl);
@@ -298,31 +575,61 @@ function makeWorkerDiagnosticProbe(channelName) {
 	};
 }
 
+export function makeWorkerNativeControlProbe(channelName) {
+	return (channel) => {
+		const NativeWorker = window.Worker;
+		const bus = new BroadcastChannel(channel);
+		const events = [];
+		const emit = (event) => { events.push(event); bus.postMessage(event); };
+		bus.onmessage = (event) => events.push(event.data);
+		window.Worker = function Worker(url, options) {
+			if (!new.target) throw new TypeError("Failed to construct 'Worker': Please use the 'new' operator.");
+			const absolute = new URL(url, document.baseURI).href;
+			const matched = /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search);
+			const worker = options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
+			if (matched) {
+				emit({ phase: 'native-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
+				worker.addEventListener('message', (event) => emit({ phase: 'native-main-receive', type: event.data?.type ?? null, id: event.data?.id ?? null, epochMs: performance.timeOrigin + performance.now() }), true);
+				worker.addEventListener('error', (event) => emit({ phase: 'native-worker-error', message: event.message, epochMs: performance.timeOrigin + performance.now() }), true);
+			} else emit({ phase: 'native-unmatched-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
+			return worker;
+		};
+		window.Worker.prototype = NativeWorker.prototype;
+		Object.setPrototypeOf(window.Worker, NativeWorker);
+		window.__loaderWorkerControlProbe = { channel, events, cleanup() { bus.close(); } };
+	};
+}
+
 function isJavaScriptResponse(request) {
 	return request.resourceType() === 'script' || /\.m?js(?:[?#]|$)/i.test(request.url());
 }
 
 function installRequestCapture(page) {
 	const rows = [];
-	const responses = new Map();
+	const rowByRequest = new WeakMap();
+	const bodyPromises = new WeakMap();
 	page.on('request', (request) => {
-		rows.push({ url: request.url(), method: request.method(), resourceType: request.resourceType(), requestEpochMs: Date.now() });
+		const row = { url: request.url(), method: request.method(), resourceType: request.resourceType(), requestEpochMs: monotonicEpochNow() };
+		rows.push(row);
+		rowByRequest.set(request, row);
 	});
 	page.on('response', (response) => {
 		const request = response.request();
-		const row = [...rows].reverse().find((item) => item.url === request.url() && item.method === request.method() && item.status === undefined);
+		const row = rowByRequest.get(request);
 		if (row) {
 			row.status = response.status();
+			row.responseEpochMs = monotonicEpochNow();
+			row.responseTiming = request.timing();
 			row.contentType = response.headers()['content-type'] ?? null;
 			row.fromServiceWorker = response.fromServiceWorker();
+			bodyPromises.set(row, response.body().then((body) => body).catch(() => null));
 		}
-		if (isJavaScriptResponse(request)) responses.set(request.url(), response.body().then((body) => body).catch(() => null));
 	});
 	page.on('requestfailed', (request) => {
-		const row = [...rows].reverse().find((item) => item.url === request.url() && item.method === request.method() && item.failure === undefined);
+		const row = rowByRequest.get(request);
 		if (row) row.failure = request.failure()?.errorText ?? 'request failed';
 	});
-	return { rows, responses };
+	return { rows, bodyFor: (row) => bodyPromises.get(row) ?? Promise.resolve(null) };
 }
 
 function installPageErrorCapture(page) {
@@ -332,10 +639,11 @@ function installPageErrorCapture(page) {
 	return errors;
 }
 
-async function newPage(context, { diagnostic = false, channelName = null } = {}) {
+async function newPage(context, { diagnostic = false, workerControl = false, channelName = null } = {}) {
 	const page = await context.newPage();
 	await page.addInitScript(makeFrameProbe());
 	if (diagnostic) await page.addInitScript(makeWorkerDiagnosticProbe(channelName), channelName);
+	else if (workerControl) await page.addInitScript(makeWorkerNativeControlProbe(channelName), channelName);
 	return page;
 }
 
@@ -346,13 +654,18 @@ async function gotoApplication(page, app, baseUrl) {
 	return response;
 }
 
-async function selectFixture(page, app, fixture) {
+async function selectFixture(page, app, fixture, onOpenClock = () => {}) {
+	const captureOpenClock = async () => {
+		const start = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
+		onOpenClock(start);
+		return start;
+	};
 	const payload = { name: path.basename(fixture.locator), mimeType: 'application/octet-stream', buffer: fixture.payloadBytes };
 	if (app.id === 'editor') {
 		const chooserPromise = page.waitForEvent('filechooser', { timeout: 10_000 });
 		await page.locator('button.empty-open').click();
 		const chooser = await chooserPromise;
-		const start = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
+		const start = await captureOpenClock();
 		await chooser.setFiles(payload);
 		return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'native file selection accepted; Editor auto-opens on selection' };
 	}
@@ -361,13 +674,13 @@ async function selectFixture(page, app, fixture) {
 		await page.locator('dialog.import-dialog').waitFor({ state: 'visible', timeout: 10_000 });
 		await page.getByLabel('BOMC 1.2 file').setInputFiles(payload);
 		await page.getByRole('button', { name: 'Open and review' }).waitFor({ state: 'visible', timeout: 15_000 });
-		const start = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
+		const start = await captureOpenClock();
 		await page.getByRole('button', { name: 'Open and review' }).click();
 		return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'Open and review submit' };
 	}
 	await page.getByLabel('BOMC 1.2 file').setInputFiles(payload);
 	await page.getByRole('button', { name: 'Open model file' }).last().waitFor({ state: 'visible', timeout: 15_000 });
-	const start = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
+	const start = await captureOpenClock();
 	await page.getByRole('button', { name: 'Open model file' }).last().click();
 	return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'Open model file submit' };
 }
@@ -413,8 +726,8 @@ async function waitForOutcome(page, app, startPerfMs, startEpochMs) {
 
 async function readFrame(page, startPerfMs, readyPerfElapsedMs) {
 	try {
-		await page.waitForFunction(() => Boolean(window.__loaderBaselineProbe?.firstFrame), null, { timeout: 2_000, polling: POLL_MS });
-		const frame = await page.evaluate(() => window.__loaderBaselineProbe.firstFrame);
+		await withNodeWatchdog(() => page.waitForFunction(() => Boolean(window.__loaderBaselineProbe?.firstFrame), null, { timeout: 2_000, polling: POLL_MS }), 2_000, 'Frame observer wait');
+		const frame = await withNodeWatchdog(() => page.evaluate(() => window.__loaderBaselineProbe.firstFrame), 2_000, 'Frame observer read');
 		return { ...frame, elapsedFromOpenMs: frame.perfMs - startPerfMs, afterReadyMs: frame.perfMs - (startPerfMs + readyPerfElapsedMs) };
 	} catch {
 		return null;
@@ -442,381 +755,820 @@ async function makeContext(browser, { viewport = { width: 1440, height: 900 }, c
 
 async function addFailureCapture(page, outputDir, id, timeoutMs = 10_000) {
 	const file = path.join(outputDir, 'screenshots', `${id}.png`);
-	try { mkdirSync(path.dirname(file), { recursive: true }); await page.screenshot({ path: file, fullPage: true, timeout: timeoutMs }); return path.relative(outputDir, file).replaceAll('\\', '/'); }
+	try { mkdirSync(path.dirname(file), { recursive: true }); await withNodeWatchdog(() => page.screenshot({ path: file, fullPage: true, timeout: Math.min(timeoutMs, 4_500) }), 5_000, 'Failure screenshot'); return path.relative(outputDir, file).replaceAll('\\', '/'); }
 	catch { return null; }
 }
 
-async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outputDir, index, diagnostic = false }) {
+async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outputDir, index, diagnostic = false, workerControl = false, expectedOutcome = 'ready', scenarioRowId = null, prime = false }) {
 	const id = `${app.id}-${fixture.id}-${mode}-${String(index).padStart(2, '0')}${diagnostic ? '-diagnostic' : ''}`;
-	const { context, configure } = await makeContext(browser, { cacheDisabled: mode === 'cold' });
-	const channelName = diagnostic ? `bomc-loader-diagnostic-${Date.now()}-${Math.random()}` : null;
-	const page = await newPage(context, { diagnostic, channelName });
-	const errorCapture = installPageErrorCapture(page);
-	const requestCapture = installRequestCapture(page);
+	const setupStart = performance.now();
+	let context = null;
+	let page = null;
+	let configure = null;
+	const channelName = diagnostic || workerControl ? `bomc-loader-diagnostic-${Date.now()}-${Math.random()}` : null;
+	const errorCapture = { console: [], page: [] };
+	const requestCapture = { rows: [], responses: new Map() };
 	let startPerfMs = null;
 	let startEpochMs = null;
 	let openAction = 'app-specific open action';
 	let tracePath = null;
-	if (diagnostic) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
-	let outcome = { kind: 'setup-error', text: null, elapsedMs: 0 };
+	let traceStarted = false;
+	let diagnosticData = null;
+	let outcome = { kind: 'setup-error', text: null, elapsedMs: null };
 	let frame = null;
 	try {
-		await configure(page);
+		const made = await withNodeWatchdog(() => makeContext(browser, { cacheDisabled: mode === 'cold' }), 5_000, 'Browser context creation');
+		context = made.context;
+		configure = made.configure;
+		page = await withNodeWatchdog(() => newPage(context, { diagnostic, workerControl, channelName }), 5_000, 'Browser page creation');
+		Object.assign(errorCapture, installPageErrorCapture(page));
+		Object.assign(requestCapture, installRequestCapture(page));
+		if (diagnostic || workerControl) { await withNodeWatchdog(() => context.tracing.start({ screenshots: true, snapshots: true, sources: false }), 5_000, 'Trace start'); traceStarted = true; }
+		await withNodeWatchdog(() => configure(page), 5_000, 'Browser context configuration');
 		await gotoApplication(page, app, baseUrl);
-		const selected = await selectFixture(page, app, fixture);
-		startPerfMs = selected.startPerfMs;
-		startEpochMs = selected.startEpochMs;
+		const selected = await selectFixture(page, app, fixture, (clock) => { startPerfMs = clock.perfMs; startEpochMs = clock.epochMs; });
+		startPerfMs ??= selected.startPerfMs;
+		startEpochMs ??= selected.startEpochMs;
 		openAction = selected.openAction;
 		outcome = await waitForOutcome(page, app, startPerfMs, startEpochMs);
 		const readySignal = outcome.kind === 'ready' ? outcome : outcome.lateOutcome?.kind === 'ready' ? outcome.lateOutcome : outcome.postDeadlineObservation?.outcome?.kind === 'ready' ? outcome.postDeadlineObservation : null;
 		if (readySignal) frame = await readFrame(page, startPerfMs, readySignal.observedElapsedMs ?? readySignal.elapsedMs ?? DEADLINE_MS);
 		if (outcome.kind === 'ready' && !frame) outcome = { ...outcome, kind: 'failed-no-valid-frame', text: 'App reported ready without observable connected positive-size WebGL draw frame.' };
 	} catch (error) {
-		outcome = { kind: 'setup-error', text: error instanceof Error ? `${error.name}: ${error.message}` : String(error), elapsedMs: startPerfMs === null ? 0 : DEADLINE_MS };
+		const errorText = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		outcome = startEpochMs === null
+			? { kind: 'setup-error', text: errorText, elapsedMs: null }
+			: { kind: 'failed-after-open', text: errorText, elapsedMs: Math.max(0, Date.now() - startEpochMs) };
 	}
-	const diagnosticData = diagnostic ? await page.evaluate(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		const probe = window.__loaderWorkerProbe;
-		const value = probe ? { matchedWorkerCount: probe.events.filter((event) => event.phase === 'wrapped-worker').length, unmatchedWorkers: probe.events.filter((event) => event.phase === 'unmatched-worker').map((event) => event.url), events: probe.events } : { matchedWorkerCount: 0, unmatchedWorkers: [], events: [] };
-		probe?.cleanup();
-		return value;
-	}) : null;
-	if (diagnostic) {
+	const diagnosticErrors = [];
+	if ((diagnostic || workerControl) && page) {
+		try {
+			diagnosticData = await withNodeWatchdog(() => page.evaluate(async ({ probeName }) => {
+				await new Promise((resolve) => setTimeout(resolve, 300));
+				const probe = probeName === 'wrapped' ? window.__loaderWorkerProbe : window.__loaderWorkerControlProbe;
+				const matchedPhases = probeName === 'wrapped' ? ['wrapped-worker'] : ['native-worker'];
+				const unmatchedPhases = probeName === 'wrapped' ? ['unmatched-worker'] : ['native-unmatched-worker'];
+				const value = probe ? { matchedWorkerCount: probe.events.filter((event) => matchedPhases.includes(event.phase)).length, unmatchedWorkers: probe.events.filter((event) => unmatchedPhases.includes(event.phase)).map((event) => event.url), events: probe.events } : { matchedWorkerCount: 0, unmatchedWorkers: [], events: [] };
+				probe?.cleanup();
+				return value;
+			}, { probeName: diagnostic ? 'wrapped' : 'native' }), 5_000, 'Diagnostic collection');
+		} catch (error) { diagnosticErrors.push(error instanceof Error ? error.message : String(error)); }
+	}
+	if (diagnostic && traceStarted && context) {
 		tracePath = path.join(outputDir, 'traces', `${id}.zip`);
 		mkdirSync(path.dirname(tracePath), { recursive: true });
-		try { await context.tracing.stop({ path: tracePath }); tracePath = path.relative(outputDir, tracePath).replaceAll('\\', '/'); }
-		catch { tracePath = null; }
+		try { await withNodeWatchdog(() => context.tracing.stop({ path: tracePath }), 5_000, 'Trace stop'); tracePath = path.relative(outputDir, tracePath).replaceAll('\\', '/'); }
+		catch (error) { diagnosticErrors.push(error instanceof Error ? error.message : String(error)); tracePath = null; }
 	}
-	const screenshotPath = outcome.kind === 'ready' || outcome.kind === 'expected-rejection' ? null : await addFailureCapture(page, outputDir, id, outcome.kind === 'timeout' ? 1_000 : 10_000);
+	let screenshotPath = null;
+	if (page && !['ready', 'expected-rejection'].includes(outcome.kind)) screenshotPath = await addFailureCapture(page, outputDir, id, outcome.kind === 'timeout' ? 1_000 : 4_500);
+	const cleanupErrors = [];
+	if (page) try { await withNodeWatchdog(() => page.close(), 5_000, 'Page cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
+	if (context) try { await withNodeWatchdog(() => context.close(), 5_000, 'Context cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
 	const row = {
-		kind: diagnostic ? 'diagnostic' : 'model', baseline: null,
+		id: scenarioRowId ?? id, scenarioRowId, kind: prime ? 'prime' : diagnostic ? 'diagnostic' : 'model', baseline: null,
 		app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
-		mode, attempt: index, openAction,
-		status: outcome.kind, expectedOutcome: V2_IDS.has(fixture.id) ? 'rejection' : 'ready',
+		mode, attempt: index, prime, openAction,
+		status: cleanupErrors.length ? 'harness-error-cleanup' : prime && outcome.kind === 'ready' ? 'prime-excluded' : outcome.kind,
+		expectedOutcome, openOccurred: startEpochMs !== null,
+		setupDurationMs: performance.now() - setupStart,
 		startedAtEpochMs: startEpochMs, elapsedMs: outcome.elapsedMs, firstValidFrame: frame,
 		outcomeText: outcome.text, lateOutcome: outcome.lateOutcome ?? null, postDeadlineObservation: outcome.postDeadlineObservation ?? null,
 		consoleErrors: errorCapture.console, pageErrors: errorCapture.page,
-		requestGraph: requestCapture.rows, screenshotPath, tracePath, diagnostic: diagnosticData
+		requestGraph: requestCapture.rows, screenshotPath, tracePath, diagnostic: diagnosticData,
+		diagnosticErrors, cleanupStatus: cleanupErrors.length ? 'failed' : 'complete', cleanupErrors
 	};
 	if (startEpochMs !== null) row.startedAt = new Date(startEpochMs).toISOString();
-	await page.close().catch(() => {});
-	await context.close().catch(() => {});
 	return row;
 }
 
-async function performExpectedRejection({ browser, app, fixture, baseUrl, outputDir }) {
-	const row = await performModelAttempt({ browser, app, fixture, baseUrl, mode: 'cold', outputDir, index: 1 });
-	const expected = /BOMC invalid: material section version\.?/i.test(row.outcomeText ?? '');
-	row.status = row.status === 'error' && expected ? 'expected-rejection' : row.status === 'timeout' ? 'timeout' : 'failed';
+async function performExpectedRejection({ browser, app, fixture, baseUrl, outputDir, scenarioRowId }) {
+	const row = await performModelAttempt({ browser, app, fixture, baseUrl, mode: 'cold', outputDir, index: 1, expectedOutcome: 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview', scenarioRowId });
+	const expected = /^BOMC invalid: material section version\.$/i.test((row.outcomeText ?? '').trim());
+	row.status = row.status === 'error' && expected && row.firstValidFrame === null && row.openOccurred ? 'expected-rejection' : row.status === 'timeout' ? 'timeout' : 'failed';
 	row.expectedOutcome = 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview';
-	row.rejectionMessageMatchesB0 = expected;
+	row.rejectionMessageMatchesB0 = expected && row.firstValidFrame === null;
 	return row;
+}
+
+async function currentBootOpenPoint(page, app) {
+	const target = await withNodeWatchdog(() => page.evaluate((appId) => {
+		let element = null;
+		if (appId === 'editor') element = document.querySelector('button.empty-open');
+		else if (appId === 'rooms') {
+			const dialog = document.querySelector('dialog.import-dialog');
+			element = dialog?.open ? dialog.querySelector('input[aria-label="BOMC 1.2 file"]') : document.querySelector('button.start-import');
+		} else {
+			element = [...document.querySelectorAll('button')].find((button) => (button.innerText ?? button.textContent ?? '').trim() === 'Choose model file');
+		}
+		if (!(element instanceof HTMLElement) || element.matches(':disabled') || element.hidden) return null;
+		const style = getComputedStyle(element);
+		if (style.display === 'none' || style.visibility === 'hidden') return null;
+		const rect = element.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) return null;
+		return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, tagName: element.tagName, className: typeof element.className === 'string' ? element.className : '' };
+	}, app.id), 1_000, 'Current Open target lookup');
+	if (!target) return null;
+	await withNodeWatchdog(() => page.mouse.click(target.x, target.y), 5_000, 'Current Open action');
+	return target;
+}
+
+function validBootRequestTiming(timing) {
+	return timing && Number.isFinite(timing.startTime) && timing.startTime > 0 && Number.isFinite(timing.responseStart) && timing.responseStart >= 0 && Number.isFinite(timing.responseEnd) && timing.responseEnd >= timing.responseStart;
 }
 
 async function performBootAttempt({ browser, context: reusedContext = null, app, baseUrl, viewportName, mode, outputDir, index, prime = false, baseline = null }) {
 	const id = `${app.id}-boot-${viewportName}-${mode}-${prime ? 'prime' : String(index).padStart(2, '0')}`;
 	const viewport = viewportName === 'mobile' ? { width: 390, height: 844 } : { width: 1440, height: 900 };
-	const { context, configure } = reusedContext
-		? { context: reusedContext, configure: async (page) => {
-			const cdp = await reusedContext.newCDPSession(page);
+	let context = reusedContext;
+	let page = null;
+	let errors = { console: [], page: [] };
+	let capture = { rows: [], bodyFor: () => Promise.resolve(null) };
+	let navigationStartedEpochMs = null;
+	let chooserEpochMs = null;
+	let navigationResponse = null;
+	let chooser = null;
+	let row = null;
+	let actualTickEpochs = [];
+	let openTargetTrace = [];
+	let chooserResolve;
+	const chooserObserved = new Promise((resolve) => { chooserResolve = resolve; });
+	try {
+		if (!context) {
+			const made = await withNodeWatchdog(() => makeContext(browser, { viewport, cacheDisabled: mode === 'cold', throttled: true }), 5_000, 'Boot context creation');
+			context = made.context;
+		}
+		page = await withNodeWatchdog(() => newPage(context), 5_000, 'Boot page creation');
+		errors = installPageErrorCapture(page);
+		capture = installRequestCapture(page);
+		const cdp = await withNodeWatchdog(() => context.newCDPSession(page), 5_000, 'Boot CDP session');
+		await withNodeWatchdog(async () => {
 			await cdp.send('Network.enable');
 			await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
-			await cdp.send('Network.emulateNetworkConditions', {
-				offline: false, latency: 150, downloadThroughput: 4_000_000 / 8, uploadThroughput: 1_000_000 / 8, connectionType: 'cellular3g'
-			});
-			return cdp;
-		} }
-		: await makeContext(browser, { viewport, cacheDisabled: mode === 'cold', throttled: true });
-	const page = await newPage(context);
-	const errors = installPageErrorCapture(page);
-	const capture = installRequestCapture(page);
-	let cdp = null;
-	let row;
-	try {
-		cdp = await configure(page);
-		const navigationStartedEpochMs = Date.now();
-		await gotoApplication(page, app, baseUrl);
-		const navigationStartEpochMs = await page.evaluate(() => performance.timeOrigin);
-		const deadline = Date.now() + 30_000;
-		let chooser = null;
-		let attempts = 0;
-		const chooserPromise = page.waitForEvent('filechooser', { timeout: 30_000 }).then((value) => { chooser = value; return value; });
-		while (!chooser && Date.now() < deadline) {
-			attempts += 1;
-			try {
-				if (app.id === 'editor') await page.locator('button.empty-open').click({ timeout: 100 });
-				else if (app.id === 'rooms') {
-					const dialog = page.locator('dialog.import-dialog');
-					if (!(await dialog.evaluate((node) => node.open).catch(() => false))) await page.locator('button.start-import').click({ timeout: 100 });
-					else await page.getByLabel('BOMC 1.2 file').click({ timeout: 100 });
-				} else await page.getByRole('button', { name: 'Choose model file' }).click({ timeout: 100 });
-			} catch { /* Retry the current Open flow at the frozen 50ms cadence. */ }
-			await Promise.race([chooserPromise.then(() => undefined).catch(() => undefined), new Promise((resolve) => setTimeout(resolve, POLL_MS))]);
-		}
-		if (!chooser) throw new Error('Actual native file chooser was not observed within the 30s boot deadline.');
-		const chooserClock = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
-		const chooserPerfMs = chooserClock.perfMs;
-		await chooser.setFiles([]).catch(() => {});
-		await new Promise((resolve) => setTimeout(resolve, 150));
-		const preOpen = await page.evaluate(() => {
-			const resources = performance.getEntriesByType('resource');
-			return resources.map((entry) => ({ name: entry.name, initiatorType: entry.initiatorType, startTime: entry.startTime, responseEnd: entry.responseEnd, transferSize: entry.transferSize, encodedBodySize: entry.encodedBodySize, decodedBodySize: entry.decodedBodySize }));
+			await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 150, downloadThroughput: 4_000_000 / 8, uploadThroughput: 1_000_000 / 8, connectionType: 'cellular3g' });
+		}, 5_000, 'Boot throttle setup');
+		page.on('filechooser', (event) => {
+			if (chooser) return;
+			const observation = captureChooserEventEpoch(event);
+			chooser = observation.event;
+			chooserEpochMs = observation.chooserEpochMs;
+			chooserResolve({ chooser, chooserEpochMs });
 		});
-		const jsResources = preOpen.filter((entry) => entry.responseEnd <= chooserPerfMs && (entry.initiatorType === 'script' || /\.m?js(?:[?#]|$)/i.test(entry.name)));
-		const scripts = [];
-		for (const resource of jsResources) {
-			const bodyPromise = capture.responses.get(resource.name);
-			const body = bodyPromise ? await bodyPromise : null;
-			const request = capture.rows.find((item) => item.url === resource.name);
-			scripts.push({
-				url: resource.name, gzipLevel9Bytes: body ? gzipSync(body, { level: 9 }).byteLength : null,
-				responseBodyBytes: body?.byteLength ?? null, transferBytes: resource.transferSize,
-				status: request?.status ?? null, contentType: request?.contentType ?? null,
-				webglTokens: body ? ['WebGLRenderer', 'BufferGeometry', 'WebGL2RenderingContext'].filter((token) => body.includes(Buffer.from(token))) : []
+		navigationStartedEpochMs = monotonicEpochNow();
+		const navigationDeadline = performance.now() + 30_000;
+		navigationResponse = await withNodeWatchdog(() => page.goto(appUrl(baseUrl, app), { waitUntil: 'domcontentloaded', timeout: 30_000 }), 30_000, 'Boot navigation');
+		if (!navigationResponse || !navigationResponse.ok()) throw new Error(`Navigation failed with HTTP ${navigationResponse?.status() ?? 'no response'}.`);
+		let tickStart = performance.now();
+		while (!chooser && performance.now() < navigationDeadline) {
+			const actualStart = performance.now();
+			actualTickEpochs.push(monotonicEpochNow());
+			const target = await currentBootOpenPoint(page, app).catch((error) => {
+				if (/Node watchdog/i.test(error instanceof Error ? error.message : String(error))) throw error;
+				return null;
 			});
+			openTargetTrace.push({ tick: actualTickEpochs.length, target });
+			if (chooser) break;
+			const nextTick = tickStart + POLL_MS;
+			const waitMs = bootPollDelay(tickStart, performance.now());
+			if (waitMs > 0) await Promise.race([new Promise((resolve) => setTimeout(resolve, waitMs)), chooserObserved]);
+			tickStart = Math.max(nextTick, actualStart);
 		}
-		const probe = await page.evaluate(() => window.__loaderBaselineProbe?.firstFrame ?? null);
-		const unknownBodyCount = scripts.filter((item) => item.gzipLevel9Bytes === null).length;
+		if (chooser) {
+			await withNodeWatchdog(() => chooser.setFiles([]), 5_000, 'Boot chooser cancellation');
+		}
+		const cutoffEpochMs = chooserEpochMs;
+		let preOpenJsRequests = [];
+		let jsUnknownBodyCount = 0;
+		let jsHttpFailureCount = 0;
+		let jsTimingFailureCount = 0;
+		let jsPendingAtCutoffCount = 0;
+		let jsResourceTimingFailureCount = 0;
+		let missingResourceMatchCount = 0;
+		let resourceMissingCaptureCount = 0;
+		let firstFrame = null;
+		if (cutoffEpochMs !== null) {
+			const browserResourceSnapshot = await withNodeWatchdog(() => page.evaluate(() => ({ timeOriginEpochMs: performance.timeOrigin, resources: performance.getEntriesByType('resource').map((entry) => ({ name: entry.name, startTime: entry.startTime, responseEnd: entry.responseEnd, transferSize: entry.transferSize, initiatorType: entry.initiatorType })) })), 5_000, 'Boot resource timing read');
+			const browserResources = browserResourceSnapshot.resources;
+			const browserJsResources = browserResources.map((entry, index2) => ({ entry, index: index2 })).filter(({ entry }) => browserResourceSnapshot.timeOriginEpochMs + entry.startTime <= cutoffEpochMs && (entry.initiatorType === 'script' || /\.m?js(?:[?#]|$)/i.test(entry.name)));
+			const jsRows = capture.rows.filter((request) => (request.resourceType === 'script' || /\.m?js(?:[?#]|$)/i.test(request.url)) && request.requestEpochMs <= cutoffEpochMs);
+			const resourceUsed = new Set();
+			for (const request of jsRows) {
+				const resourceIndex = browserResources.findIndex((entry, index2) => !resourceUsed.has(index2) && entry.name === request.url && (entry.initiatorType === 'script' || /\.m?js(?:[?#]|$)/i.test(entry.name)));
+				const resource = resourceIndex < 0 ? null : browserResources[resourceIndex];
+				if (resourceIndex >= 0) resourceUsed.add(resourceIndex); else missingResourceMatchCount += 1;
+				const responseBeforeCutoff = Number.isFinite(request.responseEpochMs) && request.responseEpochMs <= cutoffEpochMs;
+				const body = responseBeforeCutoff ? await withNodeWatchdog(() => capture.bodyFor(request), 5_000, `JavaScript body ${request.url}`).catch(() => null) : null;
+				const status = request.status ?? null;
+				const requestTimingValid = validBootRequestTiming(request.responseTiming);
+				const resourceResponseEpochMs = resource ? browserResourceSnapshot.timeOriginEpochMs + resource.responseEnd : null;
+				const resourceTimingValid = resource && Number.isFinite(resourceResponseEpochMs) && resourceResponseEpochMs <= cutoffEpochMs && Number.isFinite(resource.transferSize) && resource.transferSize >= 0;
+				if (!responseBeforeCutoff) jsPendingAtCutoffCount += 1;
+				if (!body) jsUnknownBodyCount += 1;
+				if (status === null || status >= 400 || request.failure) jsHttpFailureCount += 1;
+				if (!requestTimingValid) jsTimingFailureCount += 1;
+				if (!resourceTimingValid) jsResourceTimingFailureCount += 1;
+				const gzipBytes = body ? gzipSync(body, { level: 9 }).byteLength : null;
+				preOpenJsRequests.push({ url: request.url, requestEpochMs: request.requestEpochMs, responseEpochMs: request.responseEpochMs ?? null, status, responseTiming: request.responseTiming ?? null, gzipLevel9Bytes: gzipBytes, responseBodyBytes: body?.byteLength ?? null, transferBytes: resourceTimingValid ? resource.transferSize : null, contentType: request.contentType ?? null, fromServiceWorker: request.fromServiceWorker ?? false, failure: request.failure ?? null, webglTokens: body ? ['WebGLRenderer', 'BufferGeometry', 'WebGL2RenderingContext'].filter((token) => body.includes(Buffer.from(token))) : [] });
+			}
+			resourceMissingCaptureCount = browserJsResources.filter(({ index: resourceIndex }) => !resourceUsed.has(resourceIndex)).length;
+			firstFrame = await withNodeWatchdog(() => page.evaluate(() => window.__loaderBaselineProbe?.firstFrame ?? null), 5_000, 'Pre-open frame read');
+		}
+		const intervals = actualTickEpochs.slice(1).map((epoch, index2) => epoch - actualTickEpochs[index2]);
+		const bodyComplete = isBootRequestEvidenceComplete({ chooserObserved: Boolean(chooser), jsRequestCount: preOpenJsRequests.length, jsGzipUnknownBodyCount: jsUnknownBodyCount, jsHttpFailureCount, jsTimingFailureCount, jsPendingAtCutoffCount, jsResourceTimingFailureCount, missingResourceMatchCount, resourceMissingCaptureCount });
+		const clockValid = Number.isFinite(navigationStartedEpochMs) && Number.isFinite(chooserEpochMs) && chooserEpochMs >= navigationStartedEpochMs;
+		const pass = Boolean(chooser) && clockValid && bodyComplete;
 		row = {
-			kind: 'boot', app: app.id, baseline, viewport: viewportName, mode, attempt: index, prime,
-			status: unknownBodyCount === 0 ? 'ready' : 'failed-js-response-body-missing', navigationStartedEpochMs, navigationStartEpochMs, chooserEpochMs: chooserClock.epochMs,
-			bootInteractivityMs: chooserClock.epochMs - navigationStartEpochMs,
-			pollIntervalMs: POLL_MS, chooserPollAttempts: attempts,
-			jsGzipLevel9Bytes: scripts.reduce((sum, item) => sum + (item.gzipLevel9Bytes ?? 0), 0),
-			jsGzipUnknownBodyCount: unknownBodyCount,
-			jsNetworkTransferBytes: jsResources.reduce((sum, item) => sum + item.transferSize, 0),
-			preOpenJsRequests: scripts,
-			requestGraph: capture.rows, firstWebglFrameBeforeOpen: probe !== null,
-			preOpenJsContainsWebglTokens: scripts.some((script) => script.webglTokens.length > 0),
+			id, scenarioRowId: id, kind: 'boot', app: app.id, baseline, viewport: viewportName, mode, attempt: index, prime,
+			status: pass ? prime ? 'prime-excluded' : 'ready' : !chooser ? 'timeout' : 'failed',
+			navigationStartedEpochMs, chooserEpochMs,
+			bootInteractivityMs: clockValid ? chooserEpochMs - navigationStartedEpochMs : null,
+			clockBasis: 'Node performance.timeOrigin + performance.now captured in filechooser event callback', clockValid,
+			nominalPollingResolutionMs: POLL_MS, observedTickEpochs: actualTickEpochs, actualTickIntervalsMs: intervals,
+			maxObservedTickIntervalMs: intervals.length ? Math.max(...intervals) : null, chooserPollAttempts: actualTickEpochs.length,
+			openTargetTrace, chooserObserved: Boolean(chooser), chooserCancellation: chooser ? 'empty-file-selection-sent' : 'not-applicable',
+			jsGzipLevel9Bytes: bodyComplete ? preOpenJsRequests.reduce((sum, item) => sum + item.gzipLevel9Bytes, 0) : null,
+			jsRequestCount: preOpenJsRequests.length, jsGzipUnknownBodyCount: jsUnknownBodyCount, jsHttpFailureCount, jsTimingFailureCount, jsPendingAtCutoffCount, jsResourceTimingFailureCount, missingResourceMatchCount, resourceMissingCaptureCount,
+			jsNetworkTransferBytes: bodyComplete ? preOpenJsRequests.reduce((sum, item) => sum + item.transferBytes, 0) : null,
+			preOpenJsRequests, requestGraph: capture.rows, firstFrameBeforeOpen: firstFrame,
+			preOpenRendererEvidence: { observedFrame: firstFrame !== null, webglTokenRequestCount: preOpenJsRequests.filter((item) => item.webglTokens.length > 0).length, informationalOnlyForB0Baseline: baseline === 'B0' },
+			preOpenJsContainsWebglTokens: preOpenJsRequests.some((item) => item.webglTokens.length > 0),
 			consoleErrors: errors.console, pageErrors: errors.page,
 			cdpThrottle: { cpuRate: 4, downloadBitsPerSecond: 4_000_000, uploadBitsPerSecond: 1_000_000, rttMs: 150 }
 		};
-		if (prime && row.status === 'ready') row.status = 'prime-excluded';
 	} catch (error) {
-		row = {
-			kind: 'boot', app: app.id, baseline, viewport: viewportName, mode, attempt: index, prime,
-			status: 'failed', startedAtEpochMs: Date.now(), elapsedMs: 30_000,
-			outcomeText: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-			requestGraph: capture.rows, consoleErrors: errors.console, pageErrors: errors.page,
-			cdpThrottle: { cpuRate: 4, downloadBitsPerSecond: 4_000_000, uploadBitsPerSecond: 1_000_000, rttMs: 150 }
-		};
+		const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		const intervals = actualTickEpochs.slice(1).map((epoch, index2) => epoch - actualTickEpochs[index2]);
+		row = { id, scenarioRowId: id, kind: 'boot', app: app.id, baseline, viewport: viewportName, mode, attempt: index, prime, status: 'failed', navigationStartedEpochMs, chooserEpochMs, bootInteractivityMs: null, clockValid: false, nominalPollingResolutionMs: POLL_MS, observedTickEpochs: actualTickEpochs, actualTickIntervalsMs: intervals, maxObservedTickIntervalMs: intervals.length ? Math.max(...intervals) : null, chooserPollAttempts: actualTickEpochs.length, openTargetTrace, chooserObserved: Boolean(chooser), outcomeText: text, requestGraph: capture.rows, consoleErrors: errors.console, pageErrors: errors.page, cdpThrottle: { cpuRate: 4, downloadBitsPerSecond: 4_000_000, uploadBitsPerSecond: 1_000_000, rttMs: 150 } };
 	}
-	await page.close().catch(() => {});
-	if (!reusedContext) await context.close().catch(() => {});
+	const cleanupErrors = [];
+	if (page) try { await withNodeWatchdog(() => page.close(), 5_000, 'Boot page cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
+	if (!reusedContext && context) try { await withNodeWatchdog(() => context.close(), 5_000, 'Boot context cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
+	row.cleanupStatus = cleanupErrors.length ? 'failed' : 'complete';
+	row.cleanupErrors = cleanupErrors;
+	if (cleanupErrors.length) row.status = 'harness-error-cleanup';
 	return row;
 }
 
 async function discoverBrowserEnvironment(browser) {
-	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-	const page = await context.newPage();
+	let context = null;
+	let page = null;
 	let webgl = null;
 	try {
-		webgl = await page.evaluate(() => {
+		context = await withNodeWatchdog(() => browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 }), 5_000, 'Environment context creation');
+		page = await withNodeWatchdog(() => context.newPage(), 5_000, 'Environment page creation');
+		webgl = await withNodeWatchdog(() => page.evaluate(() => {
 			const canvas = document.createElement('canvas');
-			const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-			if (!gl) return { available: false };
+			const gl = canvas.getContext('webgl2');
+			if (!gl || gl.isContextLost()) return { available: false, backend: 'webgl2', contextLost: Boolean(gl?.isContextLost()) };
 			const extension = gl.getExtension('WEBGL_debug_renderer_info');
 			return {
-				available: true, version: gl.getParameter(gl.VERSION), shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+				available: true, backend: 'webgl2', contextLost: false, version: gl.getParameter(gl.VERSION), shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
 				vendor: gl.getParameter(extension?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR),
 				renderer: gl.getParameter(extension?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER), maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE)
 			};
-		});
+		}), 5_000, 'WebGL2 environment read');
 	} catch (error) { webgl = { available: false, error: String(error) }; }
-	await context.close();
+	const cleanupErrors = await closeEnvironmentResources([
+		{ resource: page, label: 'Environment page cleanup' },
+		{ resource: context, label: 'Environment context cleanup' }
+	]);
+	if (cleanupErrors.length) throw new Error(`Browser environment cleanup failed: ${cleanupErrors.join('; ')}.`);
+	if (webgl?.available !== true || webgl.backend !== 'webgl2' || webgl.contextLost) throw new Error(`Required fixed WebGL2/SwiftShader environment unavailable: ${JSON.stringify(webgl)}.`);
 	return {
 		os: `${os.platform()} (${os.arch()})`, osRelease: os.release(), nodeVersion: process.version,
-		browser: browser.version(), viewport: { width: 1440, height: 900 }, devicePixelRatio: 1,
+		browser: browser.version(), browserLaunchArgs: [...BROWSER_LAUNCH_ARGS], viewport: { width: 1440, height: 900 }, devicePixelRatio: 1,
 		webglAdapter: webgl, capturedAt: new Date().toISOString()
 	};
 }
 
-async function appendRow(file, row) {
-	appendFileSync(file, `${JSON.stringify(row)}\n`, 'utf8');
+function stableEnvironment(environment) {
+	const { capturedAt, ...stable } = environment;
+	return stable;
+}
+
+async function verifySeriesIdentity({ browser, app, baseUrl, baseline, fixture = null, workspaceRoot, expectedBuild, expectedEnvironment, stage }) {
+	const build = await readBuild(baseUrl, app, baseline);
+	const fixtureLabel = fixture?.id ?? 'boot';
+	assertBuildIdentityUnchanged(expectedBuild.identity, build.identity, app.id, fixtureLabel, stage);
+	const url = new URL(appUrl(baseUrl, app));
+	if (url.searchParams.get('renderer') !== 'webgl2' || url.searchParams.get('renderProfile') !== 'cpu-safe') throw new Error(`${app.id}/${fixtureLabel}: benchmark renderer/profile changed ${stage} series.`);
+	const actualFixtureHash = fixture ? verifyFixtureBytes(fixture, readFileSync(fixture.filePath)) : null;
+	const environment = await discoverBrowserEnvironment(browser);
+	if (JSON.stringify(stableEnvironment(environment)) !== JSON.stringify(stableEnvironment(expectedEnvironment))) throw new Error(`${app.id}/${fixtureLabel}: machine/browser/WebGL environment changed ${stage} series.`);
+	return { stage, appId: app.id, fixtureId: fixture?.id ?? null, commit: build.identity.commit, sourceSha256: build.identity.sourceSha256, dirty: build.identity.dirty, renderer: url.searchParams.get('renderer'), renderProfile: url.searchParams.get('renderProfile'), fixtureSha256: actualFixtureHash, environment: stableEnvironment(environment) };
+}
+
+async function captureSeriesIdentity(args) {
+	try {
+		return { valid: true, identity: await verifySeriesIdentity(args), error: null };
+	} catch (error) {
+		return {
+			valid: false,
+			identity: { stage: args.stage, appId: args.app.id, fixtureId: args.fixture?.id ?? null },
+			error: error instanceof Error ? error.message : String(error)
+		};
+	}
+}
+
+export async function closeEnvironmentResources(resources) {
+	const errors = [];
+	for (const { resource, label } of resources) {
+		if (!resource) continue;
+		try { await withNodeWatchdog(() => resource.close(), 5_000, label); }
+		catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+	}
+	return errors;
+}
+
+let activeRunState = null;
+let activeRunStatePath = null;
+
+function writeAtomicJson(file, value) {
+	const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+	writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+	renameSync(temporary, file);
 }
 
 async function writeMetadata(file, metadata) {
-	writeFileSync(file, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+	writeAtomicJson(file, metadata);
 }
 
-async function runModelSuite({ browser, apps, fixtures, urls, outputDir, baseline }) {
+export function assertFreshOutputDirectory(outputDir) {
+	if (!existsSync(outputDir)) return;
+	const existing = readdirSync(outputDir);
+	if (existing.length > 0) throw new Error(`Refusing to mix benchmark evidence in non-empty output directory: ${outputDir} (${existing.join(', ')}).`);
+}
+
+export async function launchBenchmarkBrowser() {
+	return chromium.launch({ headless: true, args: BROWSER_LAUNCH_ARGS });
+}
+
+function writeRunState(update) {
+	if (!activeRunState || !activeRunStatePath) return;
+	activeRunState = { ...activeRunState, ...update, updatedAt: new Date().toISOString() };
+	writeAtomicJson(activeRunStatePath, activeRunState);
+}
+
+async function appendRow(file, row) {
+	appendFileSync(file, `${JSON.stringify(row)}\n`, 'utf8');
+	writeRunState({ rowCount: (activeRunState?.rowCount ?? 0) + 1, lastCompletedCell: row.scenarioId ?? row.scenarioRowId ?? `${row.kind}:${row.app ?? 'unknown'}:${row.fixtureId ?? row.viewport ?? 'unknown'}:${row.mode ?? 'unknown'}`, lastCompletedRowId: row.scenarioRowId ?? row.id ?? null });
+}
+
+function assertRunActive() {
+	if (activeRunState?.state === 'interrupted') throw new Error(`Benchmark interrupted by ${activeRunState.interruptReason ?? 'external signal'}; no further attempt may start.`);
+}
+
+async function runModelSuite({ browser, apps, fixtures, urls, outputDir, baseline, builds, environment, workspaceRoot }) {
 	const file = path.join(outputDir, 'model-attempts.jsonl');
 	const summaries = {};
-	let rowCount = 0;
-	for (const app of apps) {
-		for (const fixture of fixtures.filter((item) => SUPPORTED_IDS.has(item.id))) {
-			for (const mode of ['cold', 'warm']) {
-				let warmContext = null;
-				let warmPrimePassed = true;
-				if (mode === 'warm') {
-					// The warm prime is a complete excluded load in the same context used by its ten attempts.
-					const { context } = await makeContext(browser, { cacheDisabled: false });
-					warmContext = context;
-					const prime = await performModelAttemptInContext({ context, browser, app, fixture, baseUrl: urls[app.id], outputDir, mode, index: 0, prime: true });
-					prime.baseline = baseline;
-					await appendRow(file, prime);
-					rowCount += 1;
-					warmPrimePassed = prime.status === 'prime-excluded';
-					if (!warmPrimePassed) summaries[`${app.id}-${fixture.id}-warm-prime`] = { passed: false, status: prime.status, outcomeText: prime.outcomeText };
-				}
-				const rows = [];
-				for (let attempt = 1; attempt <= 10; attempt += 1) {
-					const row = mode === 'cold'
-						? await performModelAttempt({ browser, app, fixture, baseUrl: urls[app.id], mode, outputDir, index: attempt })
-						: await performModelAttemptInContext({ context: warmContext, browser, app, fixture, baseUrl: urls[app.id], outputDir, mode, index: attempt });
-					row.baseline = baseline;
-					rows.push(row);
-					await appendRow(file, row);
-					rowCount += 1;
-					console.log(JSON.stringify({ progress: 'model', app: app.id, fixture: fixture.id, mode, attempt, status: row.status, elapsedMs: row.elapsedMs }));
-				}
-				if (warmContext) await warmContext.close().catch(() => {});
-				const summary = summarizeTimingRows(rows, 10);
-				if (mode === 'warm' && !warmPrimePassed) summary.seriesPass = false;
-				summaries[`${app.id}-${fixture.id}-${mode}`] = summary;
-				await writeMetadata(path.join(outputDir, 'model-summary-progress.json'), summaries);
+	const matrix = buildModelScenarioMatrix(baseline, apps.map((app) => app.id), fixtures.map((fixture) => fixture.id));
+	const rows = [];
+	const seriesAudits = [];
+	let allPrimeRowsPass = true;
+	for (const scenario of matrix.scenarios) {
+		assertRunActive();
+		const app = apps.find((item) => item.id === scenario.appId);
+		const fixture = fixtures.find((item) => item.id === scenario.fixtureId);
+		if (!app || !fixture) throw new Error(`Scenario ${scenario.id} refers to an unselected app or missing fixture.`);
+		const expectedBuild = builds[app.id];
+		const beforeCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, fixture, workspaceRoot, expectedBuild, expectedEnvironment: environment, stage: 'before' });
+		if (!beforeCheck.valid) {
+			seriesAudits.push({ scenarioId: scenario.id, before: beforeCheck.identity, after: null, valid: false, identityError: beforeCheck.error, status: 'not-started' });
+			await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+			throw new Error(`${scenario.id}: identity check failed before cell start: ${beforeCheck.error}`);
+		}
+		const before = beforeCheck.identity;
+		if (scenario.kind === 'expected-rejection') {
+			const row = await performExpectedRejection({ browser, app, fixture, baseUrl: urls[app.id], outputDir, scenarioRowId: scenario.attemptRowIds[0] });
+			row.scenarioId = scenario.id;
+			row.baseline = baseline;
+			rows.push(row);
+			await appendRow(file, row);
+			console.log(JSON.stringify({ progress: 'v2-admission', app: app.id, fixture: fixture.id, status: row.status, outcomeText: row.outcomeText }));
+			if (row.cleanupStatus !== 'complete') {
+				seriesAudits.push({ scenarioId: scenario.id, before, after: null, valid: false, cleanupFailure: row.cleanupErrors, expectedOutcome: scenario.expectedOutcome, status: row.status });
+				await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+				throw new Error(`${scenario.id}: owned attempt cleanup failed; stopping before next cell.`);
+			}
+			const afterCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, fixture, workspaceRoot, expectedBuild, expectedEnvironment: environment, stage: 'after' });
+			seriesAudits.push({ scenarioId: scenario.id, before, after: afterCheck.identity, valid: afterCheck.valid, identityError: afterCheck.error, expectedOutcome: scenario.expectedOutcome, status: row.status });
+			await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+			if (!afterCheck.valid) throw new Error(`${scenario.id}: identity check failed after cell: ${afterCheck.error}`);
+			continue;
+		}
+		let warmContext = null;
+		let primeRow = null;
+		let primePassed = true;
+		if (scenario.mode === 'warm') {
+			const made = await withNodeWatchdog(() => makeContext(browser, { cacheDisabled: false }), 5_000, 'Warm context creation');
+			warmContext = made.context;
+			primeRow = await performModelAttemptInContext({ context: warmContext, browser, app, fixture, baseUrl: urls[app.id], outputDir, mode: scenario.mode, index: 0, prime: true, scenarioRowId: scenario.primeRowId, expectedOutcome: scenario.expectedOutcome });
+			primeRow.baseline = baseline;
+			primeRow.scenarioId = scenario.id;
+			rows.push(primeRow);
+			await appendRow(file, primeRow);
+			primePassed = primeRow.status === 'prime-excluded' && primeRow.openOccurred && Number.isFinite(primeRow.elapsedMs) && primeRow.firstValidFrame !== null;
+			allPrimeRowsPass &&= primePassed;
+			if (!primePassed) summaries[`${scenario.id}-prime`] = { passed: false, status: primeRow.status, elapsedMs: primeRow.elapsedMs, outcomeText: primeRow.outcomeText };
+		}
+		const measuredRows = [];
+		let beforeMeasured = null;
+		let after = null;
+		let cleanupFailure = null;
+		let seriesFailure = null;
+		let identityFailure = null;
+		try {
+			if (primeRow?.cleanupStatus !== undefined && primeRow.cleanupStatus !== 'complete') throw new Error(`${scenario.id}: prime cleanup failed; stopping before measured attempts.`);
+			const beforeMeasuredCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, fixture, workspaceRoot, expectedBuild, expectedEnvironment: environment, stage: 'before-measured' });
+			beforeMeasured = beforeMeasuredCheck.identity;
+			if (!beforeMeasuredCheck.valid) {
+				identityFailure = `${scenario.id}: identity check failed before measured series: ${beforeMeasuredCheck.error}`;
+				throw new Error(identityFailure);
+			}
+			for (let attempt = 1; attempt <= scenario.expectedAttempts; attempt += 1) {
+				assertRunActive();
+				const scenarioRowId = scenario.attemptRowIds[attempt - 1];
+				const row = scenario.mode === 'cold'
+					? await performModelAttempt({ browser, app, fixture, baseUrl: urls[app.id], mode: scenario.mode, outputDir, index: attempt, expectedOutcome: scenario.expectedOutcome, scenarioRowId })
+					: await performModelAttemptInContext({ context: warmContext, browser, app, fixture, baseUrl: urls[app.id], outputDir, mode: scenario.mode, index: attempt, expectedOutcome: scenario.expectedOutcome, scenarioRowId });
+				row.baseline = baseline;
+				row.scenarioId = scenario.id;
+				measuredRows.push(row);
+				rows.push(row);
+				await appendRow(file, row);
+				console.log(JSON.stringify({ progress: 'model', app: app.id, fixture: fixture.id, mode: scenario.mode, attempt, status: row.status, elapsedMs: row.elapsedMs }));
+				if (row.cleanupStatus !== 'complete') throw new Error(`${scenario.id}: attempt cleanup failed; stopping before next attempt.`);
+			}
+			const afterCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, fixture, workspaceRoot, expectedBuild, expectedEnvironment: environment, stage: 'after' });
+			after = afterCheck.identity;
+			if (!afterCheck.valid) {
+				identityFailure = `${scenario.id}: identity check failed after measured series: ${afterCheck.error}`;
+				throw new Error(identityFailure);
+			}
+		} catch (error) {
+			seriesFailure = error instanceof Error ? error.message : String(error);
+		} finally {
+			if (warmContext) {
+				try { await withNodeWatchdog(() => warmContext.close(), 5_000, 'Warm context cleanup'); }
+				catch (error) { cleanupFailure = error instanceof Error ? error.message : String(error); }
 			}
 		}
-		for (const fixture of fixtures.filter((item) => V2_IDS.has(item.id))) {
-			const row = await performExpectedRejection({ browser, app, fixture, baseUrl: urls[app.id], outputDir });
-			row.baseline = baseline;
-			await appendRow(file, row);
-			rowCount += 1;
-			console.log(JSON.stringify({ progress: 'v2-rejection', app: app.id, fixture: fixture.id, status: row.status, outcomeText: row.outcomeText }));
+		const summary = summarizeTimingRows(measuredRows, scenario.expectedAttempts);
+		if (scenario.mode === 'warm') {
+			summary.warmPrimeStatus = primeRow?.status ?? 'missing';
+			summary.warmPrimePassed = primePassed;
+			if (!primePassed) summary.seriesPass = false;
 		}
+		const identityValid = beforeMeasured !== null && after !== null && identityFailure === null;
+		if (!identityValid || identityFailure !== null || seriesFailure !== null || cleanupFailure !== null) summary.seriesPass = false;
+		summaries[scenario.id] = summary;
+		seriesAudits.push({ scenarioId: scenario.id, before, beforeMeasured, after, identityValid, valid: identityValid && cleanupFailure === null, identityError: identityFailure, seriesFailure, cleanupFailure, summary });
+		await writeMetadata(path.join(outputDir, 'model-summary-progress.json'), summaries);
+		await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+		if (cleanupFailure) throw new Error(`${scenario.id}: warm context cleanup did not finish; stopping dependent work.`);
+		if (seriesFailure) throw new Error(`${scenario.id}: stopping dependent work after series failure: ${seriesFailure}`);
 	}
-	return { summaries, rowCount, outputFile: file };
+	const acceptance = evaluateModelAcceptance(matrix, rows, summaries);
+	const expectedPrimeCount = matrix.scenarios.filter((scenario) => scenario.primeRowId).length;
+	const actualPrimeCount = rows.filter((row) => row.kind === 'prime').length;
+	acceptance.allPrimeRowsPass &&= actualPrimeCount === expectedPrimeCount;
+	const rejectionRows = rows.filter((row) => row.expectedOutcome === 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview');
+	return { summaries, rowCount: rows.length, outputFile: file, matrix, ...acceptance, allPrimeRowsPass: acceptance.allPrimeRowsPass, rejectionRows: rejectionRows.map(({ id, app, fixtureId, status, outcomeText, firstValidFrame, rejectionMessageMatchesB0 }) => ({ id, app, fixtureId, status, outcomeText, firstValidFrame, rejectionMessageMatchesB0 })), seriesAudits };
 }
 
-async function performModelAttemptInContext({ context, browser, app, fixture, baseUrl, mode, outputDir, index, prime = false }) {
-	const id = `${app.id}-${fixture.id}-${mode}-${prime ? 'prime' : String(index).padStart(2, '0')}`;
-	const page = await newPage(context);
-	const errorCapture = installPageErrorCapture(page);
-	const requestCapture = installRequestCapture(page);
+async function performModelAttemptInContext({ context, browser, app, fixture, baseUrl, mode, outputDir, index, prime = false, expectedOutcome = 'ready', scenarioRowId = null }) {
+	const id = scenarioRowId ?? modelRowId(app.id, fixture.id, mode, index, prime);
+	const setupStart = performance.now();
+	let page = null;
+	const errorCapture = { console: [], page: [] };
+	const requestCapture = { rows: [], responses: new Map() };
 	let startPerfMs = null;
 	let startEpochMs = null;
 	let openAction = 'app-specific open action';
-	let outcome;
+	let outcome = { kind: 'setup-error', text: null, elapsedMs: null };
 	let frame = null;
 	try {
+		page = await withNodeWatchdog(() => newPage(context), 5_000, 'Warm browser page creation');
+		Object.assign(errorCapture, installPageErrorCapture(page));
+		Object.assign(requestCapture, installRequestCapture(page));
 		await gotoApplication(page, app, baseUrl);
-		const selected = await selectFixture(page, app, fixture);
-		startPerfMs = selected.startPerfMs;
-		startEpochMs = selected.startEpochMs;
+		const selected = await selectFixture(page, app, fixture, (clock) => { startPerfMs = clock.perfMs; startEpochMs = clock.epochMs; });
+		startPerfMs ??= selected.startPerfMs;
+		startEpochMs ??= selected.startEpochMs;
 		openAction = selected.openAction;
 		outcome = await waitForOutcome(page, app, startPerfMs, startEpochMs);
 		const readySignal = outcome.kind === 'ready' ? outcome : outcome.lateOutcome?.kind === 'ready' ? outcome.lateOutcome : outcome.postDeadlineObservation?.outcome?.kind === 'ready' ? outcome.postDeadlineObservation : null;
 		if (readySignal) frame = await readFrame(page, startPerfMs, readySignal.observedElapsedMs ?? readySignal.elapsedMs ?? DEADLINE_MS);
 		if (outcome.kind === 'ready' && !frame) outcome = { ...outcome, kind: 'failed-no-valid-frame', text: 'App reported ready without observable connected positive-size WebGL draw frame.' };
 	} catch (error) {
-		outcome = { kind: 'setup-error', text: error instanceof Error ? `${error.name}: ${error.message}` : String(error), elapsedMs: startPerfMs === null ? 0 : DEADLINE_MS };
+		const errorText = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		outcome = startEpochMs === null
+			? { kind: 'setup-error', text: errorText, elapsedMs: null }
+			: { kind: 'failed-after-open', text: errorText, elapsedMs: Math.max(0, Date.now() - startEpochMs) };
 	}
-	const screenshotPath = outcome.kind === 'ready' || outcome.kind === 'expected-rejection' || outcome.kind === 'error' ? null : await addFailureCapture(page, outputDir, id);
+	const screenshotPath = page && !['ready', 'expected-rejection', 'error'].includes(outcome.kind) ? await addFailureCapture(page, outputDir, id) : null;
+	const cleanupErrors = [];
+	if (page) try { await withNodeWatchdog(() => page.close(), 5_000, 'Warm page cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
 	const row = {
-		kind: prime ? 'prime' : 'model', app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
-		mode, attempt: index, prime, openAction, status: prime && outcome.kind === 'ready' ? 'prime-excluded' : outcome.kind,
-		expectedOutcome: 'ready', startedAtEpochMs: startEpochMs, elapsedMs: outcome.elapsedMs, firstValidFrame: frame,
+		id, scenarioRowId: id, kind: prime ? 'prime' : 'model', app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
+		mode, attempt: index, prime, openAction, status: cleanupErrors.length ? 'harness-error-cleanup' : prime && outcome.kind === 'ready' ? 'prime-excluded' : outcome.kind,
+		expectedOutcome, openOccurred: startEpochMs !== null, setupDurationMs: performance.now() - setupStart, startedAtEpochMs: startEpochMs, elapsedMs: outcome.elapsedMs, firstValidFrame: frame,
 		outcomeText: outcome.text, lateOutcome: outcome.lateOutcome ?? null, postDeadlineObservation: outcome.postDeadlineObservation ?? null,
 		consoleErrors: errorCapture.console, pageErrors: errorCapture.page,
-		requestGraph: requestCapture.rows, screenshotPath
+		requestGraph: requestCapture.rows, screenshotPath, cleanupStatus: cleanupErrors.length ? 'failed' : 'complete', cleanupErrors
 	};
-	await page.close().catch(() => {});
 	return row;
 }
 
-async function runBootSuite({ browser, apps, urls, outputDir, baseline }) {
+async function runBootSuite({ browser, apps, urls, outputDir, baseline, builds, environment }) {
 	const file = path.join(outputDir, 'boot-attempts.jsonl');
 	const summaries = {};
-	let rowCount = 0;
-	for (const app of apps) {
-		for (const viewportName of ['desktop', 'mobile']) {
-			for (const mode of ['cold', 'warm']) {
-				let warmContext = null;
-				let warmPrimePassed = true;
-				if (mode === 'warm') {
-					warmContext = await browser.newContext({ viewport: viewportName === 'mobile' ? { width: 390, height: 844 } : { width: 1440, height: 900 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false });
-					const prime = await performBootAttempt({ browser, context: warmContext, app, baseUrl: urls[app.id], viewportName, mode, outputDir, index: 0, prime: true, baseline });
-					await appendRow(file, prime);
-					rowCount += 1;
-					warmPrimePassed = prime.status === 'prime-excluded';
-				}
-				const rows = [];
-				for (let attempt = 1; attempt <= 10; attempt += 1) {
-					const row = await performBootAttempt({ browser, context: warmContext, app, baseUrl: urls[app.id], viewportName, mode, outputDir, index: attempt, baseline });
-					rows.push(row);
-					await appendRow(file, row);
-					rowCount += 1;
-					console.log(JSON.stringify({ progress: 'boot', app: app.id, viewport: viewportName, mode, attempt, status: row.status, bootInteractivityMs: row.bootInteractivityMs }));
-				}
-				if (warmContext) await warmContext.close().catch(() => {});
-				const bootSummary = summarizeTimingRows(rows.map((row) => ({ ...row, elapsedMs: row.bootInteractivityMs ?? row.elapsedMs, status: row.status === 'ready' ? 'ready' : 'failed' })), 10);
-				if (mode === 'warm' && !warmPrimePassed) bootSummary.seriesPass = false;
-				summaries[`${app.id}-${viewportName}-${mode}`] = bootSummary;
-				await writeMetadata(path.join(outputDir, 'boot-summary-progress.json'), summaries);
-			}
+	const matrix = buildBootScenarioMatrix(apps.map((app) => app.id));
+	const rows = [];
+	const seriesAudits = [];
+	let allPrimeRowsPass = true;
+	for (const scenario of matrix.scenarios) {
+		const app = apps.find((item) => item.id === scenario.appId);
+		if (!app) throw new Error(`Boot scenario ${scenario.id} refers to an unselected app.`);
+		const beforeCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, expectedBuild: builds[app.id], expectedEnvironment: environment, stage: 'before' });
+		if (!beforeCheck.valid) {
+			seriesAudits.push({ scenarioId: scenario.id, before: beforeCheck.identity, after: null, identityValid: false, valid: false, identityError: beforeCheck.error, status: 'not-started' });
+			await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+			throw new Error(`${scenario.id}: identity check failed before boot cell start: ${beforeCheck.error}`);
 		}
+		const before = beforeCheck.identity;
+		const viewportName = scenario.viewport;
+		let warmContext = null;
+		let primeRow = null;
+		let primePassed = true;
+		if (scenario.mode === 'warm') {
+			warmContext = await withNodeWatchdog(() => browser.newContext({ viewport: viewportName === 'mobile' ? { width: 390, height: 844 } : { width: 1440, height: 900 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false }), 5_000, 'Warm boot context creation');
+			primeRow = await performBootAttempt({ browser, context: warmContext, app, baseUrl: urls[app.id], viewportName, mode: scenario.mode, outputDir, index: 0, prime: true, baseline });
+			primeRow.scenarioRowId = scenario.primeRowId;
+			primeRow.scenarioId = scenario.id;
+			rows.push(primeRow);
+			await appendRow(file, primeRow);
+			primePassed = primeRow.status === 'prime-excluded' && primeRow.clockValid === true && Number.isFinite(primeRow.bootInteractivityMs) && primeRow.bootInteractivityMs >= 0 && Number.isFinite(primeRow.jsGzipLevel9Bytes) && primeRow.jsGzipLevel9Bytes >= 0 && primeRow.jsRequestCount > 0;
+			allPrimeRowsPass &&= primePassed;
+			if (primeRow.cleanupStatus !== 'complete') throw new Error(`${scenario.id}: prime cleanup failed; stopping boot series.`);
+		}
+		const measuredRows = [];
+		let beforeMeasured = null;
+		let after = null;
+		let cleanupFailure = null;
+		let seriesFailure = null;
+		let identityFailure = null;
+		try {
+			if (primeRow?.cleanupStatus !== undefined && primeRow.cleanupStatus !== 'complete') throw new Error(`${scenario.id}: prime cleanup failed; stopping boot series.`);
+			const beforeMeasuredCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, expectedBuild: builds[app.id], expectedEnvironment: environment, stage: 'before-measured' });
+			beforeMeasured = beforeMeasuredCheck.identity;
+			if (!beforeMeasuredCheck.valid) {
+				identityFailure = `${scenario.id}: identity check failed before measured boot series: ${beforeMeasuredCheck.error}`;
+				throw new Error(identityFailure);
+			}
+			for (let attempt = 1; attempt <= scenario.expectedAttempts; attempt += 1) {
+				assertRunActive();
+				const row = await performBootAttempt({ browser, context: warmContext, app, baseUrl: urls[app.id], viewportName, mode: scenario.mode, outputDir, index: attempt, baseline });
+				row.scenarioRowId = scenario.attemptRowIds[attempt - 1];
+				row.scenarioId = scenario.id;
+				rows.push(row);
+				measuredRows.push(row);
+				await appendRow(file, row);
+				console.log(JSON.stringify({ progress: 'boot', app: app.id, viewport: viewportName, mode: scenario.mode, attempt, status: row.status, bootInteractivityMs: row.bootInteractivityMs, chooserResolutionMs: row.maxObservedTickIntervalMs }));
+				if (row.cleanupStatus !== 'complete') throw new Error(`${scenario.id}: attempt cleanup failed; stopping before next boot attempt.`);
+			}
+			const afterCheck = await captureSeriesIdentity({ browser, app, baseUrl: urls[app.id], baseline, expectedBuild: builds[app.id], expectedEnvironment: environment, stage: 'after' });
+			after = afterCheck.identity;
+			if (!afterCheck.valid) {
+				identityFailure = `${scenario.id}: identity check failed after measured boot series: ${afterCheck.error}`;
+				throw new Error(identityFailure);
+			}
+		} catch (error) {
+			seriesFailure = error instanceof Error ? error.message : String(error);
+		} finally {
+			if (warmContext) try { await withNodeWatchdog(() => warmContext.close(), 5_000, 'Warm boot context cleanup'); }
+			catch (error) { cleanupFailure = error instanceof Error ? error.message : String(error); }
+		}
+		const summary = summarizeBootTimingRows(measuredRows, scenario.expectedAttempts);
+		if (scenario.mode === 'warm') {
+			summary.warmPrimeStatus = primeRow?.status ?? 'missing';
+			summary.warmPrimePassed = primePassed;
+			if (!primePassed) summary.seriesPass = false;
+		}
+		const identityValid = beforeMeasured !== null && after !== null && identityFailure === null;
+		if (!identityValid || identityFailure !== null || seriesFailure !== null || cleanupFailure !== null) summary.seriesPass = false;
+		summaries[scenario.id] = summary;
+		seriesAudits.push({ scenarioId: scenario.id, before, beforeMeasured, after, identityValid, valid: identityValid && cleanupFailure === null, identityError: identityFailure, seriesFailure, cleanupFailure, summary });
+		await writeMetadata(path.join(outputDir, 'boot-summary-progress.json'), summaries);
+		await writeMetadata(path.join(outputDir, 'series-identity-audit-progress.json'), seriesAudits);
+		if (cleanupFailure) throw new Error(`${scenario.id}: boot warm context cleanup did not finish; stopping dependent work.`);
+		if (seriesFailure) throw new Error(`${scenario.id}: stopping dependent boot work after series failure: ${seriesFailure}`);
 	}
-	return { summaries, rowCount, outputFile: file };
+	const acceptance = evaluateBootAcceptance(matrix, rows, summaries);
+	const expectedPrimeCount = matrix.scenarios.filter((scenario) => scenario.primeRowId).length;
+	const actualPrimeCount = rows.filter((row) => row.prime).length;
+	acceptance.allPrimeRowsPass &&= actualPrimeCount === expectedPrimeCount;
+	return { summaries, rowCount: rows.length, outputFile: file, matrix, ...acceptance, allPrimeRowsPass: acceptance.allPrimeRowsPass, seriesAudits };
 }
 
-async function runDiagnostic({ browser, editor, fixture, baseUrl, outputDir, baseline }) {
-	const row = await performModelAttempt({ browser, app: editor, fixture, baseUrl, mode: 'diagnostic-excluded', outputDir, index: 1, diagnostic: true });
-	row.baseline = baseline;
-	const file = path.join(outputDir, 'diagnostic.json');
-	writeFileSync(file, `${JSON.stringify(row, null, 2)}\n`, 'utf8');
-	return row;
+function workerTraceAudit(row, mode) {
+	const events = row.diagnostic?.events ?? [];
+	const wrapped = mode === 'wrapped';
+	const expectedWorkerPhase = wrapped ? 'wrapped-worker' : 'native-worker';
+	const unmatchedPhase = wrapped ? 'unmatched-worker' : 'native-unmatched-worker';
+	const matchedWorkerCount = events.filter((event) => event.phase === expectedWorkerPhase).length;
+	const unmatchedWorkers = events.filter((event) => event.phase === unmatchedPhase).map((event) => event.url);
+	const importErrors = events.filter((event) => event.phase === 'worker-import-error');
+	const phases = wrapped ? ['worker-pre-post', 'worker-post-return', 'main-receive'] : ['native-main-receive'];
+	const completePositions = phases.map((phase) => events.findIndex((event) => event.phase === phase && event.type === 'complete'));
+	const completeLifecycle = completePositions.every((index) => index >= 0) && completePositions.every((index, position) => position === 0 || index > completePositions[position - 1]);
+	const phaseCounts = Object.fromEntries([...new Set(events.map((event) => event.phase))].map((phase) => [phase, events.filter((event) => event.phase === phase).length]));
+	return {
+		mode, matchedWorkerCount, unmatchedWorkers, importErrorCount: importErrors.length,
+		completePhaseNames: phases, completePhasePositions: completePositions,
+		completeLifecycle, missingCompletePhases: phases.filter((phase) => !events.some((event) => event.phase === phase && event.type === 'complete')),
+		phaseCounts, runtimeCounts: events.findLast((event) => event.phase === 'worker-pre-post' && event.type === 'complete')?.graph?.runtimeCounts ?? null
+	};
+}
+
+async function runDiagnostic({ browser, apps, fixtures, urls, outputDir, baseline, builds, environment, workspaceRoot }) {
+	const specs = [];
+	const supportedFixtures = fixtures.filter((fixture) => SUPPORTED_ID_SET.has(fixture.id));
+	for (const app of apps) for (const fixture of supportedFixtures) {
+		specs.push({ id: `diagnostic-${app.id}-${fixture.id}-wrapped`, app, fixture, mode: 'wrapped' });
+	}
+	const editor = apps.find((app) => app.id === 'editor');
+	if (editor) {
+		const jcm = fixtures.find((fixture) => fixture.id === 'S2-jcm');
+		const legacy = fixtures.find((fixture) => fixture.id === 'L-old');
+		if (jcm) specs.push({ id: 'diagnostic-editor-S2-jcm-native', app: editor, fixture: jcm, mode: 'native' });
+		if (legacy) specs.push({ id: 'diagnostic-editor-L-old-wrapped', app: editor, fixture: legacy, mode: 'wrapped' });
+	}
+	const attemptsFile = path.join(outputDir, 'diagnostic-attempts.jsonl');
+	const cases = [];
+	for (const spec of specs) {
+		assertRunActive();
+		const before = await verifySeriesIdentity({ browser, app: spec.app, baseUrl: urls[spec.app.id], baseline, fixture: spec.fixture, workspaceRoot, expectedBuild: builds[spec.app.id], expectedEnvironment: environment, stage: 'before-diagnostic' });
+		const row = await performModelAttempt({
+			browser, app: spec.app, fixture: spec.fixture, baseUrl: urls[spec.app.id], mode: 'diagnostic-excluded', outputDir,
+			index: 1, diagnostic: spec.mode === 'wrapped', workerControl: spec.mode === 'native', expectedOutcome: 'ready', scenarioRowId: spec.id
+		});
+		row.baseline = baseline;
+		row.diagnosticMode = spec.mode;
+		row.scenarioId = spec.id;
+		row.workerTraceAudit = workerTraceAudit(row, spec.mode);
+		row.runtimeCounts = row.workerTraceAudit.runtimeCounts;
+		row.identityAudit = { before, after: null, valid: false, error: null };
+		try {
+			row.identityAudit.after = await verifySeriesIdentity({ browser, app: spec.app, baseUrl: urls[spec.app.id], baseline, fixture: spec.fixture, workspaceRoot, expectedBuild: builds[spec.app.id], expectedEnvironment: environment, stage: 'after-diagnostic' });
+			row.identityAudit.valid = true;
+		} catch (error) {
+			row.identityAudit.error = error instanceof Error ? error.message : String(error);
+		}
+		const complete = row.status === 'ready' && row.openOccurred === true && Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.firstValidFrame !== null && row.workerTraceAudit.matchedWorkerCount === 1 && row.workerTraceAudit.unmatchedWorkers.length === 0;
+		const boundedLold = spec.app.id === 'editor' && spec.fixture.id === 'L-old'
+			? row.openOccurred === true && Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.elapsedMs <= DEADLINE_MS && row.tracePath !== null && row.diagnosticErrors.length === 0
+			: null;
+		row.acceptance = {
+			appReadyAndValidFrame: row.status === 'ready' && row.firstValidFrame !== null,
+			workerMatchedExactlyOnce: row.workerTraceAudit.matchedWorkerCount === 1,
+			noUnmatchedWorker: row.workerTraceAudit.unmatchedWorkers.length === 0,
+			noWorkerImportError: row.workerTraceAudit.importErrorCount === 0,
+			completeWorkerLifecycle: row.workerTraceAudit.completeLifecycle,
+			boundedLoldDiagnostic: boundedLold,
+			runtimeCountsCaptured: Boolean(row.runtimeCounts && Number.isInteger(row.runtimeCounts.resultFacesLength) && Number.isInteger(row.runtimeCounts.preparedRuntimeSceneGroupsLength) && row.runtimeCounts.sourceCounts && typeof row.runtimeCounts.sourceCounts === 'object'),
+			identityStable: row.identityAudit.valid,
+			cleanupComplete: row.cleanupStatus === 'complete',
+			pass: spec.mode === 'native'
+				? complete && row.workerTraceAudit.completeLifecycle && row.identityAudit.valid && row.cleanupStatus === 'complete'
+				: complete && row.workerTraceAudit.completeLifecycle && row.workerTraceAudit.importErrorCount === 0 && row.identityAudit.valid && row.cleanupStatus === 'complete'
+		};
+		if (boundedLold !== null) row.acceptance.pass = boundedLold && row.workerTraceAudit.matchedWorkerCount === 1 && row.workerTraceAudit.unmatchedWorkers.length === 0 && row.workerTraceAudit.importErrorCount === 0 && row.identityAudit.valid && row.cleanupStatus === 'complete';
+		writeAtomicJson(path.join(outputDir, 'diagnostics', `${spec.id}.json`), row);
+		await appendRow(attemptsFile, row);
+		cases.push({ id: spec.id, appId: spec.app.id, fixtureId: spec.fixture.id, mode: spec.mode, status: row.status, elapsedMs: row.elapsedMs, tracePath: row.tracePath, firstValidFrame: row.firstValidFrame, workerTraceAudit: row.workerTraceAudit, runtimeCounts: row.runtimeCounts, identityAudit: row.identityAudit, acceptance: row.acceptance });
+		await writeMetadata(path.join(outputDir, 'diagnostic-summary-progress.json'), cases);
+		if (row.cleanupStatus !== 'complete') throw new Error(`${spec.id}: diagnostic resource cleanup failed; stopping.`);
+		if (!row.identityAudit.valid) throw new Error(`${spec.id}: diagnostic build/environment/fixture identity drifted; stopping.`);
+	}
+	const lOld = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'L-old');
+	const s2Native = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'native');
+	const s2Wrapped = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'wrapped');
+	const roomsYOld = cases.find((item) => item.appId === 'rooms' && item.fixtureId === 'Y-old');
+	const runtimeCountAudit = cases.filter((item) => item.mode === 'wrapped' && SUPPORTED_ID_SET.has(item.fixtureId)).map((item) => ({ appId: item.appId, fixtureId: item.fixtureId, status: item.status, runtimeCounts: item.runtimeCounts, captured: item.acceptance.runtimeCountsCaptured, reason: item.acceptance.runtimeCountsCaptured ? null : item.status === 'ready' ? 'worker result did not expose all requested runtime fields' : `successful output unavailable: ${item.status}` }));
+	const acceptance = {
+		s2NativeComplete: s2Native?.acceptance.pass === true,
+		s2WrappedComplete: s2Wrapped?.acceptance.pass === true,
+		lOldBoundedAndMatched: lOld?.acceptance.boundedLoldDiagnostic === true && lOld.workerTraceAudit.matchedWorkerCount === 1,
+		roomsYOldFrameTrace: roomsYOld?.acceptance.appReadyAndValidFrame === true && roomsYOld.tracePath !== null,
+		runtimeCountAuditComplete: runtimeCountAudit.every((item) => item.captured || item.status !== 'ready'),
+		allDiagnosticResourcesClean: cases.every((item) => item.acceptance.cleanupComplete),
+		pass: Boolean(s2Native?.acceptance.pass && s2Wrapped?.acceptance.pass && lOld?.acceptance.boundedLoldDiagnostic && lOld?.workerTraceAudit.matchedWorkerCount === 1 && roomsYOld?.acceptance.appReadyAndValidFrame && runtimeCountAudit.every((item) => item.captured || item.status !== 'ready') && cases.every((item) => item.acceptance.cleanupComplete))
+	};
+	return { caseCount: cases.length, cases, runtimeCountAudit, acceptance };
 }
 
 export async function runBaseline(argv = process.argv.slice(2)) {
 	const options = parseArgs(argv);
 	const outputDir = path.resolve(options.output);
+	const workspaceRoot = path.resolve(options.workspaceRoot);
+	const fixturePath = path.resolve(options.fixtures);
+	const fixtureManifestPath = path.relative(workspaceRoot, fixturePath);
+	if (fixtureManifestPath === '..' || fixtureManifestPath.startsWith(`..${path.sep}`) || path.isAbsolute(fixtureManifestPath)) {
+		throw new Error('Fixture manifest must be inside --workspace-root so run metadata uses a workspace-relative identity.');
+	}
+	const { manifest, fixtures } = readManifest(workspaceRoot, fixturePath);
+	assertFreshOutputDirectory(outputDir);
 	mkdirSync(outputDir, { recursive: true });
-	const { manifest, fixtures } = readManifest(path.resolve(options.workspaceRoot), path.resolve(options.fixtures));
-	const apps = APPS;
-	const builds = {};
-	for (const app of apps) builds[app.id] = await readBuild(options.urls[app.id], app, options.baseline);
-	const browser = await chromium.launch({ headless: true });
-	let modelResult = null;
-	let bootResult = null;
-	let diagnosticResult = null;
+	activeRunStatePath = path.join(outputDir, 'run-state.json');
+	activeRunState = { schemaVersion: 'bomc-loader-run-state-v1', state: 'running', baseline: options.baseline, suite: options.suite, selectedAppIds: options.apps.map((app) => app.id), startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), rowCount: 0, lastCompletedCell: null, lastCompletedRowId: null };
+	writeAtomicJson(activeRunStatePath, activeRunState);
+	let browser = null;
+	let interruptedBy = null;
+	const onInterrupt = (signal) => {
+		if (interruptedBy) return;
+		interruptedBy = signal;
+		writeRunState({ state: 'interrupted', interruptReason: signal, interruptedAt: new Date().toISOString() });
+		process.exitCode = signal === 'SIGINT' ? 130 : 143;
+		if (browser) void browser.close().catch(() => {});
+	};
+	const onSigint = () => onInterrupt('SIGINT');
+	const onSigterm = () => onInterrupt('SIGTERM');
+	process.on('SIGINT', onSigint);
+	process.on('SIGTERM', onSigterm);
 	try {
-		const environment = await discoverBrowserEnvironment(browser);
+		const builds = {};
+		for (const app of APPS) builds[app.id] = await readBuild(options.urls[app.id], app, options.baseline);
+		browser = await withNodeWatchdog(() => launchBenchmarkBrowser(), 10_000, 'Chromium launch');
+		const environment = await withNodeWatchdog(() => discoverBrowserEnvironment(browser), 10_000, 'Browser environment discovery');
+		const modelMatrix = ['all', 'model'].includes(options.suite) ? buildModelScenarioMatrix(options.baseline, options.apps.map((app) => app.id), fixtures.map((fixture) => fixture.id)) : null;
+		const bootMatrix = ['all', 'boot'].includes(options.suite) ? buildBootScenarioMatrix(options.apps.map((app) => app.id)) : null;
+		const runnerSha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 		const metadata = {
-			schemaVersion: 'bomc-loader-baseline-v1', plan: PLAN, baseline: options.baseline,
-			capturedAt: new Date().toISOString(), environment, builds,
-			urls: Object.fromEntries(apps.map((app) => [app.id, appUrl(options.urls[app.id], app)])),
-			fixtureManifest: { path: path.resolve(options.fixtures), schemaVersion: manifest.schemaVersion, fixtureCount: fixtures.length, fixtures: fixtures.map(({ id, locator, bytes, sha256, expected }) => ({ id, locator, bytes, sha256, expected })) },
+			schemaVersion: 'bomc-loader-baseline-v2', plan: PLAN, review: 'BOMC-LOADER-001/CP0/IMPLEMENTATION_REVIEW_2026-10-03_v1.0', baseline: options.baseline,
+			capturedAt: new Date().toISOString(), runnerSha256, selectedAppIds: options.apps.map((app) => app.id), suite: options.suite,
+			environment, builds,
+			urls: Object.fromEntries(APPS.map((app) => [app.id, appUrl(options.urls[app.id], app)])),
+			fixtureManifest: { path: fixtureManifestPath.replaceAll('\\', '/'), schemaVersion: manifest.schemaVersion, fixtureCount: fixtures.length, fixtures: fixtures.map(({ id, locator, bytes, sha256, expected }) => ({ id, locator, bytes, sha256, expected })) },
+			scenarioManifest: { model: modelMatrix, boot: bootMatrix, diagnostic: options.suite === 'diagnostic' || options.suite === 'all' ? { appIds: options.apps.map((app) => app.id), supportedRuntimeCapturesPerApp: SUPPORTED_IDS, controls: ['S2-jcm-native', 'S2-jcm-wrapped'], workerDiagnostic: 'Editor/L-old-wrapped', roomsFrameTrace: 'Rooms/Y-old-wrapped', excludedFromTiming: true } : null },
 			measurement: {
-				deadlineMs: DEADLINE_MS, pollIntervalMs: POLL_MS, modelViewport: { width: 1440, height: 900, devicePixelRatio: 1 },
+				deadlineMs: DEADLINE_MS, modelViewport: { width: 1440, height: 900, devicePixelRatio: 1 },
 				modelConditions: ['cold: new context + cache disabled', 'warm: one excluded full-load prime + same cache-enabled context'],
-				bootConditions: ['cold: new context + cache disabled', 'warm: one excluded boot prime + same cache-enabled context'],
+				bootConditions: ['cold: new context + cache disabled', 'warm: one excluded chooser prime + same cache-enabled context'],
 				bootViewport: { desktop: { width: 1440, height: 900, devicePixelRatio: 1 }, mobile: { width: 390, height: 844, devicePixelRatio: 1 } },
 				bootThrottle: { cpuRate: 4, downloadBitsPerSecond: 4_000_000, uploadBitsPerSecond: 1_000_000, latencyMs: 150 },
-				series: { supportedFixtureCount: SUPPORTED_IDS.size, expectedRejectionFixtureCount: V2_IDS.size, attemptsPerSupportedFixtureAppCondition: 10, apps: apps.map((app) => app.id), bootAttemptsPerAppViewportCondition: 10 },
-				excludedDiagnostic: 'One L-old Editor worker diagnostic with a Blob dynamic-import wrapper; excluded from timing percentiles.'
+				expectedModelRows: modelMatrix?.expectedRowCount ?? null, expectedBootRows: bootMatrix?.expectedRowCount ?? null,
+				excludedDiagnostic: 'All selected-app supported runtime-count captures, S2-jcm native/wrapped controls, Editor L-old worker diagnostic, and Rooms Y-old frame trace; excluded from timing percentiles.'
 			}
 		};
 		await writeMetadata(path.join(outputDir, 'metadata.json'), metadata);
-		if (['all', 'model'].includes(options.suite)) modelResult = await runModelSuite({ browser, apps, fixtures, urls: options.urls, outputDir, baseline: options.baseline });
-		if (['all', 'boot'].includes(options.suite)) bootResult = await runBootSuite({ browser, apps, urls: options.urls, outputDir, baseline: options.baseline });
-		if (['all', 'diagnostic'].includes(options.suite)) {
-			const diagnosticFixture = fixtures.find((fixture) => fixture.id === 'L-old');
-			diagnosticResult = await runDiagnostic({ browser, editor: apps[0], fixture: diagnosticFixture, baseUrl: options.urls.editor, outputDir, baseline: options.baseline });
+		let modelResult = null;
+		let bootResult = null;
+		let diagnosticResult = null;
+		if (modelMatrix) {
+			modelResult = await runModelSuite({ browser, apps: options.apps, fixtures, urls: options.urls, outputDir, baseline: options.baseline, builds, environment, workspaceRoot });
+			if (!modelResult.matrixAudit.matrixComplete) throw new Error('Model scenario matrix is incomplete; no complete summary will be written.');
 		}
+		if (bootMatrix) {
+			bootResult = await runBootSuite({ browser, apps: options.apps, urls: options.urls, outputDir, baseline: options.baseline, builds, environment });
+			if (!bootResult.matrixAudit.matrixComplete) throw new Error('Boot scenario matrix is incomplete; no complete summary will be written.');
+		}
+		if (options.suite === 'diagnostic' || options.suite === 'all') {
+			diagnosticResult = await runDiagnostic({ browser, apps: options.apps, fixtures, urls: options.urls, outputDir, baseline: options.baseline, builds, environment, workspaceRoot });
+		}
+		await withNodeWatchdog(() => browser.close(), 5_000, 'Browser shutdown');
+		browser = null;
+		const modelAcceptance = modelResult ? Boolean(modelResult.matrixAudit.matrixComplete && modelResult.allTimingSeriesPass && modelResult.allPrimeRowsPass && modelResult.allRejectionsPass) : null;
+		const bootAcceptance = bootResult ? Boolean(bootResult.matrixAudit.matrixComplete && bootResult.allTimingSeriesPass && bootResult.allPrimeRowsPass) : null;
 		const summary = {
-			schemaVersion: 'bomc-loader-baseline-summary-v1', plan: PLAN, baseline: options.baseline,
-			completedAt: new Date().toISOString(), model: modelResult, boot: bootResult,
-			diagnostic: diagnosticResult ? { status: diagnosticResult.status, matchedWorkerCount: diagnosticResult.diagnostic?.matchedWorkerCount ?? null, tracePath: diagnosticResult.tracePath, outcomeText: diagnosticResult.outcomeText } : null,
+			schemaVersion: 'bomc-loader-baseline-summary-v2', plan: PLAN, review: metadata.review, baseline: options.baseline, suite: options.suite,
+			selectedAppIds: options.apps.map((app) => app.id), completedAt: new Date().toISOString(), model: modelResult, boot: bootResult, diagnostic: diagnosticResult,
 			acceptance: {
-				allModelRowsPass: modelResult ? Object.values(modelResult.summaries).every((value) => value.seriesPass) : null,
-				allBootRowsPass: bootResult ? Object.values(bootResult.summaries).every((value) => value.seriesPass) : null,
-				diagnosticWorkerMatched: diagnosticResult ? diagnosticResult.diagnostic?.matchedWorkerCount === 1 : null,
-				allPinnedFixturesReverifiedBeforeRun: true
+				allModelRowsPass: modelAcceptance,
+					allBootRowsPass: bootAcceptance,
+					diagnosticWorkerMatched: diagnosticResult ? diagnosticResult.acceptance.lOldBoundedAndMatched : null,
+					diagnosticAllControlsAndRuntimeCountsPass: diagnosticResult ? diagnosticResult.acceptance.pass : null,
+				allPinnedFixturesReverifiedBeforeRun: true,
+				selectedModelMatrixComplete: modelResult?.matrixAudit.matrixComplete ?? null,
+				selectedBootMatrixComplete: bootResult?.matrixAudit.matrixComplete ?? null
 			}
 		};
-		await writeMetadata(path.join(outputDir, 'summary.json'), summary);
+		writeAtomicJson(path.join(outputDir, 'summary.json'), summary);
+		writeRunState({ state: 'completed', completedAt: new Date().toISOString(), acceptance: summary.acceptance, expectedModelRows: modelMatrix?.expectedRowCount ?? null, actualModelRows: modelResult?.rowCount ?? null, expectedBootRows: bootMatrix?.expectedRowCount ?? null, actualBootRows: bootResult?.rowCount ?? null });
 		return summary;
-	} finally { await browser.close(); }
+	} catch (error) {
+		if (interruptedBy) writeRunState({ state: 'interrupted', interruptReason: interruptedBy, failure: error instanceof Error ? error.message : String(error) });
+		else writeRunState({ state: 'failed', failedAt: new Date().toISOString(), failure: error instanceof Error ? error.stack ?? error.message : String(error) });
+		throw error;
+	} finally {
+		if (browser) await withNodeWatchdog(() => browser.close(), 5_000, 'Browser shutdown after failure').catch((error) => {
+			if (!interruptedBy) writeRunState({ state: 'failed', cleanupFailure: error instanceof Error ? error.message : String(error) });
+		});
+		process.off('SIGINT', onSigint);
+		process.off('SIGTERM', onSigterm);
+		activeRunState = null;
+		activeRunStatePath = null;
+	}
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -824,6 +1576,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 		console.log(JSON.stringify({ summary: path.join(path.resolve(argValue(process.argv.slice(2), '--output', '.')), 'summary.json'), acceptance: summary.acceptance }, null, 2));
 	}).catch((error) => {
 		console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-		process.exitCode = 1;
+		process.exitCode ??= 1;
 	});
 }
