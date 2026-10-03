@@ -208,6 +208,7 @@ async function runAssignedJob(message) {
 	send('environment-before', { environment: stable(beforeEnvironment) });
 	if (job.kind === 'environment-recovery') {
 		const afterEnvironment = stable(await discoverBrowserEnvironment(browser));
+		send('environment-after', { environment: afterEnvironment });
 		const terminalSeq = await sendAndWait('job-terminal', { status: 'ok', lastAttemptId: null, afterEnvironment, afterEnvironmentStatus: 'available', recoveryOnly: true });
 		if (terminalSeq === 'continue') await browser.close();
 		browser = null;
@@ -243,15 +244,18 @@ async function runAssignedJob(message) {
 		if (item.prime) {
 			warmPrimePassed = row.outcomeStatus === 'ready' || row.status === 'prime-excluded';
 			warmPrimePassed = warmPrimePassed && Number.isFinite(row.elapsedMs) && row.elapsedMs <= 120_000 && row.firstValidFrame !== null && row.cleanupStatus === 'complete' && !row.observerError;
-			if (!warmPrimePassed) {
+			if (!warmPrimePassed && row.cleanupStatus === 'complete') {
 				terminalStatus = 'prime-failed';
 				break;
 			}
 		}
 		if (resultDecision !== 'continue') {
-			if (item.prime && ['error', 'timeout', 'failed-no-valid-frame'].includes(row.outcomeStatus ?? row.status) && row.cleanupStatus === 'complete' && !row.observerError) terminalStatus = 'prime-failed';
-			else if (job.kind === 'warm' && warmPrimePassed && row.openOccurred && row.cleanupStatus !== 'complete' && !row.observerError) terminalStatus = 'warm-context-lost';
-			else terminalStatus = row.cleanupStatus !== 'complete' ? 'cleanup-failed' : 'attempt-failed';
+			if (row.cleanupStatus !== 'complete') {
+				const primeReadyWithFrame = item.prime && row.outcomeStatus === 'ready' && Boolean(row.firstValidFrame) && !row.observerError;
+				const measuredWarmContextLost = job.kind === 'warm' && !item.prime && warmPrimePassed && row.openOccurred && !row.observerError;
+				terminalStatus = primeReadyWithFrame || measuredWarmContextLost ? 'warm-context-lost' : 'cleanup-failed';
+			} else if (item.prime && ['error', 'timeout', 'failed-no-valid-frame'].includes(row.outcomeStatus ?? row.status) && !row.observerError) terminalStatus = 'prime-failed';
+			else terminalStatus = 'attempt-failed';
 			break;
 		}
 		if (setupPageResult(row) || row.cleanupStatus !== 'complete' || row.observerError) {
@@ -265,7 +269,8 @@ async function runAssignedJob(message) {
 
 	let afterEnvironment = null;
 	let afterEnvironmentStatus = 'available';
-	if (warmContext) {
+	const quarantinedTerminal = ['cleanup-failed', 'warm-context-lost'].includes(terminalStatus);
+	if (warmContext && !quarantinedTerminal) {
 		try { await warmContext.close(); warmContext = null; }
 		catch (error) {
 			if (terminalStatus === 'prime-failed' && !warmPrimePassed) terminalStatus = 'prime-failed-context-cleanup-failed';
@@ -273,8 +278,10 @@ async function runAssignedJob(message) {
 			terminalError = error instanceof Error ? error.message : String(error);
 		}
 	}
-	if (['ok', 'prime-failed'].includes(terminalStatus)) afterEnvironment = stable(await discoverBrowserEnvironment(browser));
-	else afterEnvironmentStatus = 'unavailable-quarantined';
+	if (['ok', 'prime-failed'].includes(terminalStatus)) {
+		afterEnvironment = stable(await discoverBrowserEnvironment(browser));
+		send('environment-after', { environment: afterEnvironment });
+	} else afterEnvironmentStatus = 'unavailable-quarantined';
 	const terminalSeq = await sendAndWait('job-terminal', {
 		status: terminalStatus,
 		error: terminalError,

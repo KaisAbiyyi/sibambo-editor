@@ -19,7 +19,7 @@ function runnerProbe(source: string) {
 }
 
 function browserProbe(source: string) {
-	const script = `import assert from 'node:assert/strict'; import { createServer } from 'node:http'; import { launchBenchmarkBrowser, makeFrameProbe, makeWorkerDiagnosticProbe } from ${JSON.stringify(runnerUrl)};\n${source}`;
+	const script = `import assert from 'node:assert/strict'; import { createServer } from 'node:http'; import { APPS, launchBenchmarkBrowser, makeContext, makeFrameProbe, makeWorkerDiagnosticProbe, performExpectedRejection, performModelAttempt, performModelAttemptInContext } from ${JSON.stringify(runnerUrl)};\n${source}`;
 	const result = spawnSync('node', ['--input-type=module', '-e', script], { cwd: path.resolve(import.meta.dir, '../..'), encoding: 'utf8', timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
 	if (result.error) throw result.error;
 	if (result.status !== 0) throw new Error(result.stderr || `Browser probe exited ${result.status}.`);
@@ -366,6 +366,62 @@ describe('worker diagnostic acceptance contracts', () => {
 });
 
 describe('browser instrumentation contracts', () => {
+	test('optional attempt observers do not block legacy cold, warm, or rejection file selection', () => {
+		const result = browserProbe(`
+			import { mkdtempSync, rmSync } from 'node:fs'; import os from 'node:os'; import path from 'node:path';
+			const selectedByCase = {};
+			const server = createServer((request, response) => {
+				const url = new URL(request.url, 'http://127.0.0.1');
+				if (url.pathname === '/selected') { const key = url.searchParams.get('case'); selectedByCase[key] = (selectedByCase[key] || 0) + 1; response.writeHead(204); response.end(); return; }
+				if (url.pathname !== '/') { response.writeHead(404); response.end(); return; }
+				response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+				response.end('<!doctype html><main data-app="editor"><button class="empty-open">Open</button><div class="editor-footer"><span class="footer-status">Waiting</span></div><div class="empty-error" role="alert"></div></main><script>const kind = new URL(location.href).searchParams.get("kind"); const key = new URL(location.href).searchParams.get("case"); document.querySelector("button.empty-open").addEventListener("click", () => { const input = document.createElement("input"); input.type = "file"; input.hidden = true; input.addEventListener("change", async () => { await fetch("/selected?case=" + encodeURIComponent(key)); document.querySelector("[role=alert]").textContent = kind === "rejection" ? "BOMC invalid: material section version." : "synthetic app-level failure"; }); document.body.append(input); input.click(); });</script>'); return;
+			});
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+			const browser = await launchBenchmarkBrowser(); const root = mkdtempSync(path.join(os.tmpdir(), 'bomc-attempt-observer-'));
+			const fixture = { id: 'S2-new', locator: 'synthetic/S2-new.bomc', bytes: 3, sha256: '00'.repeat(32), payloadBytes: Buffer.from('abc') };
+			const results = {}; const eventTypes = {};
+			async function run(key, kind, mode, observer) {
+				const events = []; const onAttemptEvent = observer === 'sync' ? event => { events.push(event); } : null;
+				const baseUrl = 'http://127.0.0.1:' + server.address().port + '/?case=' + encodeURIComponent(key) + '&kind=' + encodeURIComponent(kind);
+				const options = { app: APPS.find(app => app.id === 'editor'), fixture, baseUrl, outputDir: root, scenarioRowId: key, onAttemptEvent };
+				let row;
+				if (kind === 'rejection') row = await performExpectedRejection({ browser, ...options });
+				else if (mode === 'warm') { const { context } = await makeContext(browser, { cacheDisabled: false }); try { row = await performModelAttemptInContext({ ...options, context, browser, mode: 'warm', index: 1 }); } finally { await context.close(); } }
+				else row = await performModelAttempt({ ...options, browser, mode: 'cold', index: 1 });
+				results[key] = { status: row.status, outcomeText: row.outcomeText, observerError: row.observerError ?? null, cleanupStatus: row.cleanupStatus, rejectionMessageMatchesB0: row.rejectionMessageMatchesB0 ?? null };
+				eventTypes[key] = events.map(event => event.type);
+			}
+			try {
+				await run('cold-default', 'plain', 'cold', 'none'); await run('cold-sync', 'plain', 'cold', 'sync');
+				await run('warm-default', 'plain', 'warm', 'none'); await run('warm-sync', 'plain', 'warm', 'sync');
+				await run('rejection-default', 'rejection', 'cold', 'none'); await run('rejection-sync', 'rejection', 'cold', 'sync');
+				for (const [key, callback] of [['observer-throw', () => { throw new Error('observer enqueue failed'); }], ['observer-promise', () => Promise.resolve()]]) {
+					const row = await performModelAttempt({ browser, app: APPS.find(app => app.id === 'editor'), fixture, baseUrl: 'http://127.0.0.1:' + server.address().port + '/?case=' + key + '&kind=plain', outputDir: root, mode: 'cold', index: 1, scenarioRowId: key, onAttemptEvent: event => event.type === 'open' ? callback() : true });
+					results[key] = { status: row.status, observerError: row.observerError ?? null, cleanupStatus: row.cleanupStatus };
+				}
+				console.log(JSON.stringify({ results, eventTypes, selectedByCase }));
+			} finally { await browser.close(); await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); }
+		`);
+		for (const key of ['cold-default', 'cold-sync', 'warm-default', 'warm-sync']) {
+			expect(result.results[key].status).toBe('error');
+			expect(result.results[key].observerError).toBeNull();
+			expect(result.selectedByCase[key]).toBe(1);
+		}
+		for (const key of ['rejection-default', 'rejection-sync']) {
+			expect(result.results[key].status).toBe('expected-rejection');
+			expect(result.results[key].rejectionMessageMatchesB0).toBe(true);
+			expect(result.selectedByCase[key]).toBe(1);
+		}
+		for (const key of ['cold-sync', 'warm-sync', 'rejection-sync']) expect(result.eventTypes[key]).toContain('open');
+		for (const key of ['observer-throw', 'observer-promise']) {
+			expect(result.results[key].status).toBe('harness-error-observer');
+			expect(result.results[key].observerError).toBeTruthy();
+			expect(result.results[key].cleanupStatus).toBe('complete');
+			expect(result.selectedByCase[key] ?? 0).toBe(0);
+		}
+	});
+
 	test('buffers worker messages FIFO until its delayed dynamic module import is ready', () => {
 		const result = browserProbe(`
 			const server = createServer((req,res)=>{

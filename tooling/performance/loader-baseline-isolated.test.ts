@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { assertFreshOutputDirectory, buildModelScenarioMatrix, workerTraceAudit } from './loader-baseline.mjs';
@@ -122,6 +122,91 @@ function writeCustomChild(source: string) {
 	return file;
 }
 
+function writeReturnedCleanupChild() {
+	const playwrightUrl = JSON.stringify(import.meta.resolve('@playwright/test'));
+	const source = `
+import playwright from ${playwrightUrl};
+const { chromium } = playwright;
+let active = null; let seq = 0; const waiters = new Map();
+const send = (type, payload = {}, attemptId = null) => {
+	const message = { protocol: 'bomc-isolation-ipc-v1', runToken: active.runToken, jobToken: active.jobToken, attemptId, seq: ++seq, type, payload };
+	process.send(message);
+	return message.seq;
+};
+const sendWait = (type, payload = {}, attemptId = null) => {
+	const nextSeq = seq + 1;
+	const ack = new Promise((resolve) => waiters.set(nextSeq, resolve));
+	send(type, payload, attemptId);
+	return ack;
+};
+process.on('message', (message) => {
+	if (message?.type === 'ack' && message.protocol === 'bomc-isolation-ipc-v1' && message.runToken === active?.runToken && message.jobToken === active?.jobToken) {
+		const resolve = waiters.get(message.acknowledgedSeq);
+		if (resolve) { waiters.delete(message.acknowledgedSeq); resolve(message.decision); }
+		return;
+	}
+	if (message?.type === 'job' && !active) { active = message; void run(message).catch((error) => { try { send('fatal-error', { message: String(error) }); } catch {} }); }
+});
+setInterval(() => { if (active && process.connected) send('heartbeat', { epochMs: Date.now() }); }, 100).unref();
+async function run(message) {
+	const { wsEndpoint, job, run: config } = message.payload;
+	const browser = await chromium.connect(wsEndpoint, { timeout: 5000 });
+	const expected = config.expectedEnvironment;
+	const reported = job.kind === 'environment-recovery' && config.recoveryEnvironmentMismatch ? { ...expected, recoveryMismatch: true } : expected;
+	send('connected', { childPid: process.pid });
+	send('environment-before', { environment: reported });
+	if (job.kind === 'environment-recovery') {
+		send('environment-after', { environment: reported });
+		await sendWait('job-terminal', { status: 'ok', lastAttemptId: null, afterEnvironment: reported, afterEnvironmentStatus: 'available', recoveryOnly: true });
+		await browser.close();
+		if (process.connected) process.disconnect();
+		return;
+	}
+	const ids = job.kind === 'warm' ? [job.primeRowId, ...job.attemptRowIds] : [job.id];
+	let primeUsable = false;
+	for (const attemptId of ids) {
+		const prime = job.kind === 'warm' && attemptId === job.primeRowId;
+		const entered = await sendWait('attempt-entered', { attemptId, appId: job.appId, fixtureId: job.fixtureId, mode: prime ? 'warm-prime' : job.mode, prime }, attemptId);
+		if (entered !== 'continue') return;
+		const cleanupFailed = attemptId === config.cleanupAttemptId;
+		const outcome = cleanupFailed ? (config.cleanupOutcome || 'ready') : 'ready';
+		const frame = outcome === 'ready' && !(prime && config.noPrimeFrame);
+		const openEpochMs = Date.now();
+		send('open', { perfMs: 1, epochMs: openEpochMs, openAction: 'synthetic returned-cleanup outcome' }, attemptId);
+		const elapsedMs = 35;
+		send('app-outcome', { kind: outcome, text: outcome, elapsedMs, observedAtEpochMs: openEpochMs + elapsedMs }, attemptId);
+		const firstValidFrame = frame ? { method: 'connected-positive-webgl-draw' } : null;
+		const evidenceStatus = outcome === 'ready' && !frame ? 'failed-no-valid-frame' : outcome;
+		send('evidence', { status: evidenceStatus, openOccurred: true, startedAtEpochMs: openEpochMs, elapsedMs, firstValidFrame, cleanupErrors: cleanupFailed ? ['injected returned page-close failure'] : [] }, attemptId);
+		send('cleanup-start', {}, attemptId);
+		const row = {
+			id: attemptId, scenarioRowId: attemptId, app: job.appId, fixtureId: job.fixtureId, mode: prime ? 'warm' : job.mode, prime,
+			openOccurred: true, startedAtEpochMs: openEpochMs, elapsedMs, outcomeStatus: outcome,
+			status: cleanupFailed ? 'harness-error-cleanup' : outcome, firstValidFrame,
+			cleanupStatus: cleanupFailed ? 'failed' : 'complete', cleanupErrors: cleanupFailed ? ['injected returned page-close failure'] : []
+		};
+		const resultDecision = await sendWait('attempt-result', { row }, attemptId);
+		if (!cleanupFailed && prime) primeUsable = outcome === 'ready' && frame;
+		if (cleanupFailed) {
+			if (config.exitBeforeTerminal) { process.exit(23); return; }
+			const defaultStatus = prime && outcome === 'ready' && frame ? 'warm-context-lost' : job.kind === 'warm' && !prime && primeUsable ? 'warm-context-lost' : 'cleanup-failed';
+			const status = config.terminalStatus || defaultStatus;
+			const lastAttemptId = config.terminalAttemptId || attemptId;
+			await sendWait('job-terminal', { status, lastAttemptId, afterEnvironment: null, afterEnvironmentStatus: 'unavailable-quarantined' });
+			if (process.connected) process.disconnect();
+			return;
+		}
+		if (resultDecision !== 'continue') return;
+	}
+	send('environment-after', { environment: reported });
+	await sendWait('job-terminal', { status: 'ok', lastAttemptId: ids.at(-1), afterEnvironment: reported, afterEnvironmentStatus: 'available' });
+	await browser.close();
+	if (process.connected) process.disconnect();
+}
+`;
+	return writeCustomChild(source);
+}
+
 async function testPage() {
 	return 'data:text/html;charset=utf-8,' + encodeURIComponent('<!doctype html><title>owned-harness-test</title><main>ready</main>');
 }
@@ -204,7 +289,8 @@ function supervisorArgs(url: string, behavior: string, id = 'editor-S2-jcm-cold-
 function nodeProbe(source: string, timeoutMs = 120_000) {
 	const script = 'import { matchOwnedRootIdentity, superviseOwnedJob, normalizeChildMessage, makeActualRow } from ' + JSON.stringify(supervisorUrl) + ';\n' +
 		'import { summarizeIsolatedDiagnostics } from ' + JSON.stringify(supervisorUrl) + ';\n' +
-		'import { makeWorkerDiagnosticProbe, makeWorkerNativeControlProbe, installDiagnosticConsoleStream, BROWSER_LAUNCH_ARGS } from ' + JSON.stringify(runnerUrl) + ';\n' + source;
+		'import { readFileSync } from \'node:fs\';\n' +
+		'import { discoverBrowserEnvironment, launchBenchmarkBrowser, parseArgs, stableEnvironment, makeWorkerDiagnosticProbe, makeWorkerNativeControlProbe, installDiagnosticConsoleStream, BROWSER_LAUNCH_ARGS } from ' + JSON.stringify(runnerUrl) + ';\n' + source;
 	const result = spawnSync('node', ['--input-type=module', '-e', script], { cwd: path.resolve(import.meta.dir, '../..'), encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
 	if (result.error) throw result.error;
 	if (result.status !== 0) throw new Error(result.stderr || 'Supervisor probe exited ' + String(result.status) + '.');
@@ -218,6 +304,31 @@ afterEach(async () => {
 afterAll(() => rmSync(harnessDir, { recursive: true, force: true }));
 
 describe('isolated process ownership', () => {
+	test('production child journals current environment-after before recovery terminal without opening a model', async () => {
+		const result = nodeProbe(`
+			const probeBrowser = await launchBenchmarkBrowser();
+			const expectedEnvironment = stableEnvironment(await discoverBrowserEnvironment(probeBrowser));
+			await probeBrowser.close();
+			const records = [];
+			const result = await superviseOwnedJob({
+				job: { id: 'h1-production-environment-recovery', kind: 'environment-recovery', attemptIds: [] },
+				run: { cwd: process.cwd(), expectedEnvironment },
+				persist: async record => records.push(record)
+			});
+			console.log(JSON.stringify({ result, records }));
+		`);
+		const eventTypes = result.result.events.map((event: any) => event.type);
+		expect(eventTypes.indexOf('environment-before')).toBeGreaterThanOrEqual(0);
+		expect(eventTypes.indexOf('environment-after')).toBeGreaterThan(eventTypes.indexOf('environment-before'));
+		expect(eventTypes.indexOf('job-terminal')).toBeGreaterThan(eventTypes.indexOf('environment-after'));
+		expect(result.result.identityAudit.valid).toBe(true);
+		expect(result.result.ownershipReceipt.verified).toBe(true);
+		expect(result.result.ownershipReceipt.resourceDisposition).toBe('graceful');
+		expect(result.result.failure).toBeNull();
+		expect(result.result.rows).toHaveLength(0);
+		expect(result.result.events.filter((event: any) => event.type === 'open')).toHaveLength(0);
+	}, 120_000);
+
 	test('kills an owned stalled renderer before starting the next sandbox', async () => {
 		const url = await testPage();
 		const first = JSON.stringify(supervisorArgs(url, 'renderer-hang', 'editor-S2-jcm-cold-01').args);
@@ -347,6 +458,49 @@ describe('isolated process ownership', () => {
 });
 
 describe('isolated collection contracts', () => {
+	test('CLI completion callback reads parsed output and preserves model exit policy', () => {
+		const result = nodeProbe(`
+			import path from 'node:path';
+			const source = readFileSync('tooling/performance/loader-baseline-isolated.mjs', 'utf8');
+			const marker = 'runIsolatedBaseline().then((summary) => {';
+			const start = source.indexOf(marker);
+			const end = source.indexOf('}).catch((error) => {', start + marker.length);
+			if (start < 0 || end < 0) throw new Error('Actual CLI completion callback could not be isolated from source.');
+			const callbackBody = source.slice(start + marker.length, end);
+			const complete = new Function('summary', 'path', 'parseArgs', 'process', 'console', callbackBody);
+			const argv = ['node', 'loader-baseline-isolated.mjs', '--baseline', 'B0', '--workspace-root', 'D:/projects/sibambo', '--fixtures', 'tooling/performance/fixtures.json', '--suite', 'model', '--apps', 'editor,rooms,benchmark', '--editor-url', 'http://127.0.0.1:5175', '--rooms-url', 'http://127.0.0.1:5174', '--benchmark-url', 'http://127.0.0.1:5173', '--output', 'D:/evidence/B0-model'];
+			const run = summary => { const processStub = { argv, exitCode: undefined }; const lines = []; complete(summary, path, parseArgs, processStub, { log: value => lines.push(value) }); return { exitCode: processStub.exitCode, output: JSON.parse(lines[0]) }; };
+			console.log(JSON.stringify({ pass: run({ suite: 'model', baseline: 'B0', modelPass: true, collectionEvidencePass: true }), collectedFailure: run({ suite: 'model', baseline: 'B0', modelPass: false, collectionEvidencePass: true }), invalid: run({ suite: 'model', baseline: 'B0', modelPass: false, collectionEvidencePass: false }) }));
+		`);
+		expect(result.pass.exitCode).toBe(0);
+		expect(result.pass.output.summary).toBe(path.join('D:/evidence/B0-model', 'summary.json'));
+		expect(result.collectedFailure.exitCode).toBe(2);
+		expect(result.invalid.exitCode).toBe(1);
+	});
+
+	test('native control correlates its actual worker and integer main-receive ID without a wrapped input event', () => {
+		const spec = { id: 'diagnostic-editor-S2-jcm-native', appId: 'editor', fixtureId: 'S2-jcm', mode: 'native', kind: 'diagnostic' };
+		const token = 'native-control-test';
+		const row: any = {
+			id: spec.id, scenarioRowId: spec.id, app: 'editor', fixtureId: 'S2-jcm', fixtureLocator: 'fixtures/PROJECT SBOOST 2.jcm-best-deflate.diagnostic.bomc', fixtureBytes: 3_354_834,
+			mode: 'native', diagnosticStreamToken: token, diagnosticStreamErrors: [], diagnosticErrors: [],
+			openOccurred: true, startedAtEpochMs: 1_790_000_000_000, elapsedMs: 100, outcomeStatus: 'ready', firstValidFrame: { method: 'connected-positive-webgl-draw' },
+			ownershipReceipt: ownedReceipt(spec.id), identityAudit: { valid: true }, harnessStatus: 'ok'
+		};
+		const worker = { streamToken: token, workerId: 'worker-1', realm: 'main', seq: 1, phase: 'native-worker', url: 'http://127.0.0.1/e4-import.worker.js', epochMs: 1_790_000_000_010 };
+		const complete = { streamToken: token, workerId: 'worker-1', realm: 'main', seq: 2, phase: 'native-main-receive', type: 'complete', id: 42, epochMs: 1_790_000_000_100 };
+		const summarize = (events: any[]) => summarizeIsolatedDiagnostics([spec], [{ ...row, diagnosticStreamEvents: events }]).cases[0];
+		const good = summarize([worker, complete]);
+		expect(good.acceptance.pass).toBe(true);
+		expect(good.acceptance.completeWorkerLifecycle).toBe(true);
+		expect(good.inputIdentity).toBeNull();
+		expect(good.completeLifecycleObservations.mainReceiptEpochMs).toBe(complete.epochMs);
+		expect(summarize([worker]).acceptance.pass).toBe(false);
+		expect(summarize([worker, { ...complete, id: null }]).acceptance.pass).toBe(false);
+		expect(summarize([worker, { ...complete, workerId: 'worker-2' }]).acceptance.pass).toBe(false);
+		expect(summarize([worker, { ...worker, workerId: 'worker-2', seq: 2 }, complete]).acceptance.pass).toBe(false);
+	});
+
 	test('blocked prime is a disposition, never an attempt or timing sample', () => {
 		const matrix = buildModelScenarioMatrix('B0', APP_IDS, FIXTURE_IDS);
 		const scenario = matrix.scenarios.find((item: any) => item.id === 'editor-L-old-warm');
@@ -450,6 +604,138 @@ process.on('message', (message) => {
 		expect(entered.map((event: any) => event.payload.contextId)).toEqual(['one-warm-context', 'one-warm-context']);
 	}, 120_000);
 
+	test('recovers a returned measured warm cleanup loss and blocks only the unentered suffix', async () => {
+		const matrix = buildModelScenarioMatrix('B0', APP_IDS, FIXTURE_IDS);
+		const scenario = matrix.scenarios.find((item: any) => item.id === 'editor-L-old-warm');
+		const job = buildIsolationJobs(matrix).find((item: any) => item.id === scenario.id);
+		const measuredIds = scenario.attemptRowIds;
+		const child = writeReturnedCleanupChild();
+		const expectedEnvironment = { browser: 'test-chromium', nodeVersion: process.version, webglAdapter: { available: true, renderer: 'SwiftShader test' } };
+		const args = {
+			job,
+			run: { cwd: process.cwd(), expectedEnvironment, cleanupAttemptId: measuredIds[0], cleanupOutcome: 'ready' },
+			budgets: { ...shortBudgets, openOutcomeMs: 5_000 },
+			childEntry: child
+		};
+		const result = nodeProbe('const args = ' + JSON.stringify(args) + '; const records = []; args.persist = async record => records.push(record); const result = await superviseOwnedJob(args); console.log(JSON.stringify({ result, records }));', 120_000);
+		const owned = result.result;
+		if (owned.rows[1]?.harnessStatus !== 'cleanup-recovered') throw new Error(JSON.stringify({ rows: owned.rows, failure: owned.failure, receipt: owned.ownershipReceipt, dispositions: owned.dispositions, records: result.records, events: owned.events.map((event: any) => ({ type: event.type, attemptId: event.attemptId, payload: event.payload })) }));
+		expect(owned.failure).toBeNull();
+		expect(owned.rows).toHaveLength(2);
+		expect(owned.rows.map((row: any) => row.scenarioRowId)).toEqual([scenario.primeRowId, measuredIds[0]]);
+		expect(owned.rows[0].cleanupStatus).toBe('complete');
+		expect(owned.rows[1].outcomeStatus).toBe('ready');
+		expect(owned.rows[1].cleanupStatus).toBe('failed');
+		expect(owned.rows[1].cleanupErrors).toContain('injected returned page-close failure');
+		expect(owned.rows[1].harnessStatus).toBe('cleanup-recovered');
+		expect(owned.rows[1].identityAudit).toMatchObject({ valid: true, proofKind: 'recovery-sandbox' });
+		expect(owned.ownershipReceipt.resourceDisposition).toBe('forced-verified');
+		expect(owned.ownershipReceipt.verified).toBe(true);
+		expect(owned.ownershipReceipt.recoverySandbox.verified).toBe(true);
+		expect(owned.dispositions).toHaveLength(9);
+		expect(owned.dispositions.map((row: any) => row.scenarioRowId)).toEqual(measuredIds.slice(1));
+		expect(owned.dispositions.every((row: any) => row.reason === 'blocked-warm-context-lost' && row.blockedByRowId === measuredIds[0] && row.openOccurred === false && row.startedAtEpochMs === null && row.elapsedMs === null && row.firstValidFrame === null)).toBe(true);
+		expect(owned.events.filter((event: any) => event.type === 'attempt-entered').map((event: any) => event.attemptId)).toEqual([scenario.primeRowId, measuredIds[0]]);
+		expect(owned.collectionEligible).toBe(true);
+		expect(summarizeIsolatedModel(matrix, owned.rows, owned.dispositions).modelPass).toBe(false);
+	}, 120_000);
+
+	test('recovers bounded cold error and timeout cleanup loss after forced child exit without terminal', async () => {
+		const child = writeReturnedCleanupChild();
+		const expectedEnvironment = { browser: 'test-chromium', nodeVersion: process.version, webglAdapter: { available: true, renderer: 'SwiftShader test' } };
+		for (const outcome of ['error', 'timeout']) {
+			const id = 'editor-L-old-cold-' + outcome;
+			const args = {
+				job: { id, kind: 'cold', appId: 'editor', fixtureId: 'L-old', mode: 'cold', attemptIds: [id] },
+				run: { cwd: process.cwd(), expectedEnvironment, cleanupAttemptId: id, cleanupOutcome: outcome, exitBeforeTerminal: true },
+				budgets: { ...shortBudgets, openOutcomeMs: 5_000 },
+				childEntry: child
+			};
+			const probe = nodeProbe('const args = ' + JSON.stringify(args) + '; const records = []; args.persist = async record => records.push(record); const result = await superviseOwnedJob(args); console.log(JSON.stringify({ result, records }));', 120_000);
+			const actual = probe.result;
+			expect(actual.productDeadline).toBe(false);
+			expect(actual.failure).toBeNull();
+			expect(actual.rows).toHaveLength(1);
+			expect(actual.rows[0].outcomeStatus).toBe(outcome);
+			expect(actual.rows[0].cleanupStatus).toBe('failed');
+			expect(actual.rows[0].cleanupErrors).toContain('injected returned page-close failure');
+			expect(actual.rows[0].harnessStatus).toBe('cleanup-recovered');
+			expect(actual.ownershipReceipt.resourceDisposition).toBe('forced-verified');
+			expect(actual.ownershipReceipt.recoverySandbox.verified).toBe(true);
+			expect(actual.dispositions).toEqual([]);
+			expect(actual.collectionEligible).toBe(true);
+			expect(probe.records.some((record: any) => record.jobId === id && record.recordType === 'teardown-observation' && record.phase === 'child-exit')).toBe(true);
+			expect(summarizeIsolatedModel(buildModelScenarioMatrix('B0', APP_IDS, FIXTURE_IDS), actual.rows, actual.dispositions).modelPass).toBe(false);
+		}
+	}, 180_000);
+
+	test('recovers failed warm-prime cleanup into the two distinct frozen dispositions without entering measured pages', async () => {
+		const matrix = buildModelScenarioMatrix('B0', APP_IDS, FIXTURE_IDS);
+		const scenario = matrix.scenarios.find((item: any) => item.id === 'editor-L-old-warm');
+		const job = buildIsolationJobs(matrix).find((item: any) => item.id === scenario.id);
+		const child = writeReturnedCleanupChild();
+		const expectedEnvironment = { browser: 'test-chromium', nodeVersion: process.version, webglAdapter: { available: true, renderer: 'SwiftShader test' } };
+		for (const variant of [
+			{ outcome: 'timeout', noPrimeFrame: false, disposition: 'blocked-prime-failed' },
+			{ outcome: 'ready', noPrimeFrame: false, disposition: 'blocked-warm-context-lost' }
+		]) {
+			const args = {
+				job,
+				run: { cwd: process.cwd(), expectedEnvironment, cleanupAttemptId: scenario.primeRowId, cleanupOutcome: variant.outcome, noPrimeFrame: variant.noPrimeFrame },
+				budgets: { ...shortBudgets, openOutcomeMs: 5_000 },
+				childEntry: child
+			};
+			const probe = nodeProbe('const args = ' + JSON.stringify(args) + '; const records = []; args.persist = async record => records.push(record); const result = await superviseOwnedJob(args); console.log(JSON.stringify({ result, records }));', 120_000);
+			const actual = probe.result;
+			if (actual.rows[0]?.harnessStatus !== 'cleanup-recovered') throw new Error(JSON.stringify({ row: { scenarioRowId: actual.rows[0]?.scenarioRowId, outcomeStatus: actual.rows[0]?.outcomeStatus, cleanupStatus: actual.rows[0]?.cleanupStatus, harnessStatus: actual.rows[0]?.harnessStatus, identityAudit: actual.rows[0]?.identityAudit }, failure: actual.failure, receipt: { verified: actual.ownershipReceipt.verified, resourceDisposition: actual.ownershipReceipt.resourceDisposition, recoverySandbox: actual.ownershipReceipt.recoverySandbox }, dispositions: actual.dispositions, events: actual.events.map((event: any) => ({ type: event.type, attemptId: event.attemptId, payload: event.payload })) }));
+			expect(actual.failure).toBeNull();
+			expect(actual.rows).toHaveLength(1);
+			expect(actual.rows[0].scenarioRowId).toBe(scenario.primeRowId);
+			expect(actual.rows[0].cleanupStatus).toBe('failed');
+			expect(actual.rows[0].harnessStatus).toBe('cleanup-recovered');
+			expect(actual.rows[0].outcomeStatus).toBe(variant.outcome);
+			expect(actual.ownershipReceipt.recoverySandbox.verified).toBe(true);
+			expect(actual.dispositions).toHaveLength(10);
+			expect(actual.dispositions.map((row: any) => row.scenarioRowId)).toEqual(scenario.attemptRowIds);
+			expect(actual.dispositions.every((row: any) => row.reason === variant.disposition && row.blockedByRowId === scenario.primeRowId && row.openOccurred === false && row.startedAtEpochMs === null && row.elapsedMs === null)).toBe(true);
+			expect(actual.events.filter((event: any) => event.type === 'attempt-entered').map((event: any) => event.attemptId)).toEqual([scenario.primeRowId]);
+			expect(actual.collectionEligible).toBe(true);
+			expect(summarizeIsolatedModel(matrix, actual.rows, actual.dispositions).modelPass).toBe(false);
+		}
+	}, 180_000);
+
+	test('rejects wrong cleanup causality, unobserved prime context loss, and failed fresh recovery', async () => {
+		const matrix = buildModelScenarioMatrix('B0', APP_IDS, FIXTURE_IDS);
+		const scenario = matrix.scenarios.find((item: any) => item.id === 'editor-L-old-warm');
+		const job = buildIsolationJobs(matrix).find((item: any) => item.id === scenario.id);
+		const child = writeReturnedCleanupChild();
+		const expectedEnvironment = { browser: 'test-chromium', nodeVersion: process.version, webglAdapter: { available: true, renderer: 'SwiftShader test' } };
+		const cases = [
+			{ name: 'wrong-cause', run: { cleanupAttemptId: scenario.attemptRowIds[0], cleanupOutcome: 'ready', terminalAttemptId: 'not-the-active-cause' }, failurePhase: 'job-terminal' },
+			{ name: 'no-ready-frame', run: { cleanupAttemptId: scenario.primeRowId, cleanupOutcome: 'ready', noPrimeFrame: true, terminalStatus: 'warm-context-lost' }, failurePhase: 'job-terminal' },
+			{ name: 'recovery-mismatch', run: { cleanupAttemptId: scenario.attemptRowIds[0], cleanupOutcome: 'ready', recoveryEnvironmentMismatch: true }, failurePhase: 'environment-before' }
+		];
+		for (const item of cases) {
+			const args = {
+				job,
+				run: { cwd: process.cwd(), expectedEnvironment, ...item.run },
+				budgets: { ...shortBudgets, openOutcomeMs: 5_000 },
+				childEntry: child
+			};
+			const result = nodeProbe('const args = ' + JSON.stringify(args) + '; args.persist = async () => {}; const result = await superviseOwnedJob(args); console.log(JSON.stringify(result));', 120_000);
+			if (result.failure?.phase !== item.failurePhase) throw new Error(JSON.stringify({ name: item.name, failure: result.failure, rows: result.rows.map((row: any) => ({ scenarioRowId: row.scenarioRowId, outcomeStatus: row.outcomeStatus, cleanupStatus: row.cleanupStatus, harnessStatus: row.harnessStatus })), receipt: { verified: result.ownershipReceipt.verified, resourceDisposition: result.ownershipReceipt.resourceDisposition, recoverySandbox: result.ownershipReceipt.recoverySandbox }, dispositions: result.dispositions, events: result.events.map((event: any) => ({ type: event.type, attemptId: event.attemptId, payload: event.payload })) }));
+			expect(result.failure?.phase).toBe(item.failurePhase);
+			expect(result.collectionEligible).toBe(false);
+			expect(result.dispositions).toEqual([]);
+			if (item.name === 'recovery-mismatch') {
+				expect(result.ownershipReceipt.recoverySandbox.verified).toBe(false);
+				expect(result.identityAudit.valid).toBe(false);
+			} else {
+				expect(result.ownershipReceipt.recoverySandbox).toBeUndefined();
+			}
+		}
+	}, 240_000);
+
 	test('separates B0 coverage evidence from loader success and keeps B1/P1 strict', () => {
 		const b0 = makeB0CoverageFixture();
 		const good = evaluateCollectionCoverage(b0.matrix, b0.actualRows, b0.dispositions, b0.receipts);
@@ -534,6 +820,10 @@ process.on('message', (message) => {
 self.addEventListener('message', (event) => {
 	if (event.data?.type === 'load') {
 		event.ports[0]?.postMessage('port-ok');
+		setTimeout(() => {
+			const buffer = new ArrayBuffer(8);
+			self.postMessage({ type: 'progress', id: event.data.id, progress: { stage: 'textures', completed: 1, total: 2, unit: 'asset' }, text: 'private-text', buffer, result: { private: true } }, [buffer]);
+		}, 100);
 		self.postMessage({ type: 'complete', id: event.data.id, result: { faces: [{ id: 1 }], preparedRuntimeScene: { groups: [{ id: 1 }] }, counts: { faces: 1 } } });
 	}
 });`;
@@ -583,21 +873,27 @@ const streamState = installDiagnosticConsoleStream(page, token, (event) => { eve
 await page.addInitScript(makeWorkerDiagnosticProbe('diag'), { channel: 'diag', streamToken: token });
 try {
 	await page.goto(url, { waitUntil: 'domcontentloaded' });
-	const evaluation = page.evaluate(async () => {
+		const evaluation = page.evaluate(async () => {
 		const worker = new Worker('/e4-import.worker.js', { type: 'module' });
 		const channel = new MessageChannel();
+		const mainProgressReceipts = [];
+		worker.addEventListener('message', (event) => {
+			if (event.data?.type === 'progress') mainProgressReceipts.push({ type: event.data.type, id: event.data.id, progress: event.data.progress, text: event.data.text, bufferByteLength: event.data.buffer?.byteLength ?? null, result: event.data.result });
+		});
 		const portReply = new Promise((resolve) => {
 			channel.port2.addEventListener('message', (event) => resolve(event.data), { once: true });
 			channel.port2.start();
 		});
 		const buffer = new ArrayBuffer(32);
 		worker.postMessage({ type: 'load', id: 42, sourceName: 'diagnostic-input.bomc', buffer, port: channel.port1 }, [buffer, channel.port1]);
-		worker.postMessage({ type: 'progress', id: 42, progress: { stage: 'queued-after-load', completed: 2, total: 2, unit: 'stage' } });
 		const transferredByteLength = buffer.byteLength;
+		const portMessage = await Promise.race([portReply, new Promise((resolve) => setTimeout(() => resolve(null), 1500))]);
+		const stallStartedAtEpochMs = performance.timeOrigin + performance.now();
 		const until = performance.now() + 1600;
 		while (performance.now() < until) {}
-		const portMessage = await Promise.race([portReply, new Promise((resolve) => setTimeout(() => resolve(null), 1500))]);
-		return { transferredByteLength, portMessage };
+		const stallEndedAtEpochMs = performance.timeOrigin + performance.now();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		return { transferredByteLength, portMessage, mainProgressReceipts, stallStartedAtEpochMs, stallEndedAtEpochMs, stallDurationMs: stallEndedAtEpochMs - stallStartedAtEpochMs };
 	}).then((value) => { evaluationSettled = true; return value; });
 	const early = await new Promise((resolve) => {
 		const start = Date.now();
@@ -616,6 +912,7 @@ try {
 	const input = phases('worker-input')[0] || null;
 	const workerEvents = events.filter((event) => event.realm === 'worker');
 	const imported = events.find((event) => event.phase === 'worker-module-ready' && event.realm === 'worker') || null;
+	const workerProgress = events.filter((event) => event.phase === 'worker-progress');
 	const queued = events.filter((event) => event.phase === 'worker-ingress-queued');
 	const replayed = events.filter((event) => event.phase === 'worker-ingress-replayed');
 	console.log(JSON.stringify({
@@ -628,7 +925,7 @@ try {
 		tokenAndIdentityValid: events.every((event) => event.streamToken === token && event.workerId && ['main', 'worker'].includes(event.realm) && Number.isInteger(event.seq)),
 		input, imported, queued: queued.map((event) => event.queueLength), replayed: replayed.map((event) => ({ type: event.type, queueLength: event.queueLength })),
 		workerIdentityStable: Boolean(imported && workerEvents.every((event) => event.workerId === imported.workerId)),
-		progressStages: phases('worker-progress').map((event) => event.stage),
+		workerProgress,
 		completePrePostCount: completePrePost.length, completePostReturnCount: completePostReturn.length, completeMainReceiveCount: completeMainReceive.length,
 		completeIds: [...completePrePost, ...completePostReturn, ...completeMainReceive].map((event) => event.id),
 		completePhases: [...completePrePost, ...completePostReturn, ...completeMainReceive].map((event) => event.phase)
@@ -646,6 +943,9 @@ try {
 		expect(result.importErrorRejected).toBe(true);
 		expect(result.earlyWorkerModuleReady).toBe(true);
 		expect(result.installedStreamTiming).toContain(false);
+		expect(result.pageResult.stallDurationMs).toBeGreaterThanOrEqual(1500);
+		expect(result.workerProgress[0].epochMs).toBeGreaterThanOrEqual(result.pageResult.stallStartedAtEpochMs);
+		expect(result.workerProgress[0].epochMs).toBeLessThanOrEqual(result.pageResult.stallEndedAtEpochMs);
 		expect(result.streamInvalid).toBe(false);
 		expect(result.pageResult.transferredByteLength).toBe(0);
 		expect(result.pageResult.portMessage).toBe('port-ok');
@@ -653,9 +953,15 @@ try {
 		expect(result.input).toMatchObject({ phase: 'worker-input', id: 42, type: 'load', sourceName: 'diagnostic-input.bomc', byteLength: 32, realm: 'worker' });
 		expect(result.imported.url).toMatch(/e4-import\.worker\.js/);
 		expect(result.workerIdentityStable).toBe(true);
-		expect(result.queued).toEqual([1, 2]);
-		expect(result.replayed.map((event: any) => event.type)).toEqual(['load', 'progress']);
-		expect(result.progressStages).toContain('queued-after-load');
+		expect(result.queued).toEqual([1]);
+		expect(result.replayed.map((event: any) => event.type)).toEqual(['load']);
+		expect(result.workerProgress).toHaveLength(1);
+		expect(result.workerProgress[0]).toMatchObject({ phase: 'worker-progress', id: 42, stage: 'textures', completed: 1, total: 2, unit: 'asset', realm: 'worker' });
+		expect(Object.keys(result.workerProgress[0]).sort()).toEqual(['completed', 'epochMs', 'id', 'phase', 'realm', 'seq', 'stage', 'streamToken', 'total', 'unit', 'workerId'].sort());
+		expect(result.workerProgress[0]).not.toHaveProperty('text');
+		expect(result.workerProgress[0]).not.toHaveProperty('buffer');
+		expect(result.workerProgress[0]).not.toHaveProperty('result');
+		expect(result.pageResult.mainProgressReceipts).toEqual([{ type: 'progress', id: 42, progress: { stage: 'textures', completed: 1, total: 2, unit: 'asset' }, text: 'private-text', bufferByteLength: 8, result: { private: true } }]);
 		expect(result.completePrePostCount).toBe(1);
 		expect(result.completePostReturnCount).toBe(1);
 		expect(result.completeMainReceiveCount).toBe(1);

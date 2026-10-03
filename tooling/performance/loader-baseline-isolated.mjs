@@ -307,7 +307,7 @@ async function invokeOwnedTreeKill(identity, snapshot, processOps) {
 	return { command: taskkill, args: ['/PID', String(identity.pid), '/T', '/F'], exitCode: result.exitCode, error: result.error, stdout: result.stdout, stderr: result.stderr };
 }
 
-async function killVerifiedTree(identityRecord, handle, processOps, receipt) {
+async function killVerifiedTree(identityRecord, handle, processOps, receipt, exitWaitMs = 0) {
 	if (!processAlive(handle)) return { attempted: false, alreadyExited: true };
 	const fresh = await readProcessSnapshot({
 		pid: identityRecord.expected.pid,
@@ -315,7 +315,10 @@ async function killVerifiedTree(identityRecord, handle, processOps, receipt) {
 		profilePath: identityRecord.expected.profilePath,
 		parentPid: identityRecord.expected.parentPid
 	});
-	if (!matchOwnedRootIdentity(fresh, identityRecord.expected)) throw new Error('Refused taskkill because the live root no longer matches its exact owned identity.');
+	if (!matchOwnedRootIdentity(fresh, identityRecord.expected)) {
+		if (await waitHandleExit(handle, exitWaitMs)) return { attempted: false, alreadyExited: true, rootIdentityNoLongerLive: true };
+		throw new Error('Refused taskkill because the live root no longer matches its exact owned identity.');
+	}
 	identityRecord.knownProcesses = pushKnown(identityRecord.knownProcesses || [], fresh.descendants || []);
 	receipt.snapshots.push({ phase: 'pre-force-owned-tree', root: identityRecord.expected, snapshot: fresh });
 	const result = await invokeOwnedTreeKill(identityRecord.expected, fresh, processOps);
@@ -558,7 +561,11 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		primeFailedRowId: null,
 		primeFailureAdmissible: false,
 		primePassed: false,
+		primeContextLossAdmissible: false,
 		warmContextLostBy: null,
+		forcedReclamationStarted: false,
+		forcedReclamationStartedAtEpochMs: null,
+		teardownFatalAfterForce: false,
 		diagnosticEventKeys: new Map(),
 		diagnosticSequenceByRealm: new Map(),
 		diagnosticEventCount: 0,
@@ -597,6 +604,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 	let productDeadlineMonotonicMs = null;
 	let actualRow = null;
 	let childChain = Promise.resolve();
+	let teardownObservationWrite = Promise.resolve();
 	let childExit = false;
 	let serverCloseError = null;
 	const persistRecord = async (record) => {
@@ -617,6 +625,35 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		receipt.error = message;
 		forceRequired = true;
 		wake();
+	};
+	const beginForcedReclamation = async (cause) => {
+		if (state.forcedReclamationStarted) return;
+		state.forcedReclamationStarted = true;
+		state.forcedReclamationStartedAtEpochMs = epochNow();
+		try {
+			await persistRecord({ recordType: 'ownership-event', phase: 'forced-reclamation-started', cause, startedAtEpochMs: state.forcedReclamationStartedAtEpochMs });
+		} catch (error) {
+			fail('observer-error', 'Could not durably record the forced-reclamation boundary: ' + asError(error), 'ledger-write');
+		}
+	};
+	const hasValidProductOutcome = (current, row = current?.result?.row ?? null) => {
+		if (!current?.open || !current.appOutcome || current.appOutcome.observationError || current.observationIntegrity !== 'valid' || current.harnessStatus !== 'ok' || current.diagnosticStreamErrors?.length || state.diagnosticStreamInvalid) return false;
+		if (!Number.isFinite(current.elapsedMs) || current.elapsedMs < 0 || current.elapsedMs > PRODUCTION_BUDGETS.openOutcomeMs) return false;
+		if (['error', 'timeout'].includes(current.outcomeStatus)) return true;
+		if (current.outcomeStatus !== 'ready') return false;
+		if (row?.observerError) return false;
+		if (row) return Boolean(row.firstValidFrame) || (current.evidence?.status === 'failed-no-valid-frame' && !row.firstValidFrame);
+		return Boolean(current.evidence?.firstValidFrame) || current.evidence?.status === 'failed-no-valid-frame';
+	};
+	const cleanupTerminalAdmissible = (payload) => {
+		const current = state.current;
+		if (!current?.cleanupLossAdmissible || payload.lastAttemptId !== current.attemptId || state.failure || !hasValidProductOutcome(current, current.result?.row)) return false;
+		if (payload.afterEnvironment !== null || payload.afterEnvironmentStatus !== 'unavailable-quarantined' || state.environmentAfter !== null) return false;
+		if (payload.status === 'cleanup-failed') return job.kind !== 'warm' || (current.prime && state.primeFailureAdmissible && state.primeFailedRowId === current.attemptId);
+		if (payload.status !== 'warm-context-lost' || job.kind !== 'warm' || state.warmContextLostBy !== current.attemptId) return false;
+		return current.prime
+			? state.primeContextLossAdmissible === true && current.primeContextLossCause === true && state.primePassed === false && current.outcomeStatus === 'ready' && Boolean(current.result?.row?.firstValidFrame)
+			: state.primePassed === true && !current.prime;
 	};
 	const awaitChange = async (ms) => new Promise((resolve) => {
 		let settled = false;
@@ -784,26 +821,58 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 				state.completedAttempts.push(state.current);
 				if (message.payload.row.cleanupStatus !== 'complete') {
 					const row = message.payload.row;
-					const validLostWarmContext = !state.failure && job.kind === 'warm' && state.primePassed && !state.current.prime && state.current.open && state.current.appOutcome && state.current.observationIntegrity === 'valid' && !row.observerError && !state.diagnosticStreamInvalid;
-					if (validLostWarmContext) {
-						state.current.warmContextLost = true;
-						state.warmContextLostBy = state.current.attemptId;
-						forceRequired = true;
-					} else {
+					const cleanupLossAdmissible = !state.failure && !state.current.failure && state.current.harnessStatus === 'ok' && !row.observerError && !state.diagnosticStreamInvalid && !state.current.diagnosticStreamErrors?.length && hasValidProductOutcome(state.current, row);
+					forceRequired = true;
+					await beginForcedReclamation(cleanupLossAdmissible ? 'returned-attempt-cleanup-failure' : 'returned-attempt-cleanup-failure-not-admissible');
+					if (!cleanupLossAdmissible) {
 						state.current.harnessStatus = 'cleanup-failed';
-						forceRequired = true;
+						fail('observer-error', 'Returned cleanup failure has no admissible bounded product outcome, valid observation, and usable causal state.', 'attempt-cleanup');
+					} else {
+						state.current.cleanupLossAdmissible = true;
+						if (job.kind === 'warm' && state.current.prime) {
+							state.primePassed = false;
+							const observedReadyFrame = state.current.outcomeStatus === 'ready' && Boolean(row.firstValidFrame);
+							if (observedReadyFrame) {
+								state.current.primeContextLossCause = true;
+								state.current.warmContextLost = true;
+								state.primeContextLossAdmissible = true;
+								state.warmContextLostBy = state.current.attemptId;
+								state.primeFailedRowId = null;
+								state.primeFailureAdmissible = false;
+							} else {
+								const failedPrimeOutcome = ['error', 'timeout'].includes(state.current.outcomeStatus)
+									|| (state.current.outcomeStatus === 'ready' && !row.firstValidFrame && state.current.evidence?.status === 'failed-no-valid-frame');
+								if (failedPrimeOutcome) {
+									state.primeFailedRowId = state.current.attemptId;
+									state.primeFailureAdmissible = true;
+									state.current.primeFailureAdmissible = true;
+								} else {
+									state.current.cleanupLossAdmissible = false;
+									state.current.harnessStatus = 'cleanup-failed';
+									fail('observer-error', 'Warm prime cleanup failed without an admissible product failure or ready-frame context-loss cause.', 'attempt-cleanup');
+								}
+							}
+						} else if (job.kind === 'warm' && !state.current.prime && state.primePassed) {
+							state.current.warmContextLost = true;
+							state.warmContextLostBy = state.current.attemptId;
+						} else if (job.kind === 'warm') {
+							state.current.cleanupLossAdmissible = false;
+							state.current.harnessStatus = 'cleanup-failed';
+							fail('observer-error', 'Warm measured cleanup loss lacks a usable successful prime.', 'attempt-cleanup');
+						}
 					}
 				}
 				if (message.payload.row.observerError) {
 					state.current.harnessStatus = 'observer-error';
 					state.current.observationIntegrity = 'observer-unavailable';
+					if (!state.failure) fail('observer-error', 'Attempt result contains an observer error.', 'attempt-result');
 				}
 				await appendEvent(message);
 				const row = message.payload.row;
 				if (state.current.prime) {
 					const primePassed = state.current.outcomeStatus === 'ready' && Number.isFinite(state.current.elapsedMs) && state.current.elapsedMs <= PRODUCTION_BUDGETS.openOutcomeMs && Boolean(row.firstValidFrame) && row.cleanupStatus === 'complete' && !row.observerError && state.current.observationIntegrity === 'valid' && !state.diagnosticStreamInvalid;
 					state.primePassed = primePassed;
-					if (!primePassed) {
+					if (!primePassed && !state.current.cleanupLossAdmissible) {
 						const normalizedPrimeOutcome = state.current.outcomeStatus === 'ready' && !row.firstValidFrame ? 'failed-no-valid-frame' : state.current.outcomeStatus;
 						const admissibleProductFailure = ['error', 'timeout', 'failed-no-valid-frame'].includes(normalizedPrimeOutcome) && state.current.open && Number.isFinite(state.current.elapsedMs) && row.cleanupStatus === 'complete' && !row.observerError && state.current.observationIntegrity === 'valid' && !state.diagnosticStreamInvalid;
 						if (admissibleProductFailure) {
@@ -815,8 +884,8 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 					}
 					}
 				}
-				if (state.current.harnessStatus !== 'ok' || state.current.warmContextLost || state.primeFailedRowId) forceRequired = state.current.warmContextLost === true || !state.primeFailureAdmissible;
-				const decision = !state.failure && state.current.harnessStatus === 'ok' && !state.current.warmContextLost && !state.primeFailedRowId ? 'continue' : 'stop';
+				if (state.current.cleanupLossAdmissible || state.current.harnessStatus !== 'ok' || state.current.warmContextLost || (state.primeFailedRowId && !state.primeFailureAdmissible)) forceRequired = true;
+				const decision = !state.failure && state.current.harnessStatus === 'ok' && !state.current.cleanupLossAdmissible && !state.current.warmContextLost && !state.primeFailedRowId ? 'continue' : 'stop';
 				sendAck(message.seq, decision);
 				wake();
 				return;
@@ -854,13 +923,24 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			terminalSeen = true;
 			await appendEvent(message);
 			const allowedPrimeFailure = message.payload.status === 'prime-failed' && state.primeFailureAdmissible && message.payload.lastAttemptId === state.primeFailedRowId;
-			if (message.payload.status !== 'ok' && !allowedPrimeFailure && !state.failure) fail('observer-error', 'Child job terminal reported ' + String(message.payload.status) + '.', 'job-terminal');
-			sendAck(message.seq, 'continue');
+			const allowedCleanupFailure = ['cleanup-failed', 'warm-context-lost'].includes(message.payload.status) && cleanupTerminalAdmissible(message.payload);
+			if (message.payload.status !== 'ok' && !allowedPrimeFailure && !allowedCleanupFailure && !state.failure) fail('observer-error', 'Child job terminal reported ' + String(message.payload.status) + '.', 'job-terminal');
+			if (allowedCleanupFailure) {
+				forceRequired = true;
+				await beginForcedReclamation('returned-attempt-cleanup-terminal');
+			}
+			sendAck(message.seq, allowedCleanupFailure || (message.payload.status !== 'ok' && !allowedPrimeFailure) ? 'stop' : 'continue');
 			wake();
 			return;
 		}
 		if (message.type === 'fatal-error') {
 			await appendEvent(message, { lateAfterDeadline });
+			if (state.forcedReclamationStarted && hasValidProductOutcome(state.current)) {
+				state.teardownFatalAfterForce = true;
+				await persistRecord({ recordType: 'teardown-observation', phase: 'fatal-error', attemptId: state.current?.attemptId ?? null, payload: message.payload, forcedReclamationStartedAtEpochMs: state.forcedReclamationStartedAtEpochMs });
+				wake();
+				return;
+			}
 			if (lateAfterDeadline) {
 				wake();
 				return;
@@ -882,7 +962,11 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		child.on('error', (error) => fail('observer-error', asError(error), 'child-process'));
 		child.on('exit', (code, signal) => {
 			childExit = true;
-			if (!terminalSeen && !state.failure && !(productDeadline && forceRequired)) fail('observer-error', 'Child exited before durable job-terminal.', 'child-exit');
+			if (!terminalSeen && state.forcedReclamationStarted && hasValidProductOutcome(state.current)) {
+				teardownObservationWrite = teardownObservationWrite.then(() => persistRecord({ recordType: 'teardown-observation', phase: 'child-exit', code, signal, attemptId: state.current?.attemptId ?? null, forcedReclamationStartedAtEpochMs: state.forcedReclamationStartedAtEpochMs })).catch((error) => {
+					if (!state.failure) fail('observer-error', 'Could not persist child teardown exit observation: ' + asError(error), 'ledger-write');
+				});
+			} else if (!terminalSeen && !state.failure) fail('observer-error', 'Child exited before durable job-terminal.', 'child-exit');
 			wake();
 		});
 		child.stdout?.on('data', (chunk) => { receipt.stdoutTail = (receipt.stdoutTail + chunk.toString('utf8')).slice(-16_384); });
@@ -999,6 +1083,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 							state.warmContextLostBy = attemptId;
 						}
 						forceRequired = true;
+						await beginForcedReclamation('open-outcome-deadline');
 						await persistRecord({ recordType: 'parent-deadline', attemptId, phase: 'open-outcome', limitMs: selectedBudgets.openOutcomeMs, actualObservedElapsedMs: current.actualObservedElapsedMs, childResponsive: true });
 					} else {
 						fail('observer-error', 'Child stopped heartbeating before an app outcome; no synthetic application timeout is permitted.', 'heartbeat');
@@ -1029,20 +1114,27 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			actualRow = makeActualRow(job, current, null);
 		}
 
-		if (!forceRequired && !state.failure) {
-			const terminal = await waitUntil(() => Boolean(state.terminal), selectedBudgets.jobTerminalMs, 'job terminal', true);
-			if (!terminal) {
-				if (!state.failure) fail('observer-error', 'Child did not report job-terminal within the frozen bound.', 'job-terminal');
-				throw new Error(state.failure.message);
-			}
-			const allowedPrimeFailure = state.terminal.status === 'prime-failed' && state.primeFailureAdmissible && state.terminal.lastAttemptId === state.primeFailedRowId;
-			if (state.terminal.status !== 'ok' && !allowedPrimeFailure) {
-				forceRequired = true;
-				if (!state.failure) fail('observer-error', 'Child job terminal reported ' + String(state.terminal.status) + '.', 'job-terminal');
-			}
-			if ((state.terminal.status === 'ok' || allowedPrimeFailure) && run.expectedEnvironment && JSON.stringify(state.environmentAfter) !== JSON.stringify(stableEnvironment(run.expectedEnvironment))) {
-				fail('identity-error', 'Child after-environment differs from the run-accepted environment.', 'environment-after');
-				forceRequired = true;
+		const cleanupTerminalExpected = Boolean(state.current?.cleanupLossAdmissible);
+		if ((!forceRequired || cleanupTerminalExpected) && !state.failure) {
+			const terminal = await waitUntil(
+				() => Boolean(state.terminal) || (state.forcedReclamationStarted && childExit && hasValidProductOutcome(state.current)) || (state.forcedReclamationStarted && state.teardownFatalAfterForce && hasValidProductOutcome(state.current)),
+				selectedBudgets.jobTerminalMs,
+				'job terminal',
+				true
+			);
+			if (!terminal && !state.failure) fail('observer-error', 'Child did not report job-terminal within the frozen bound.', 'job-terminal');
+			if (state.terminal && !state.failure) {
+				const allowedPrimeFailure = state.terminal.status === 'prime-failed' && state.primeFailureAdmissible && state.terminal.lastAttemptId === state.primeFailedRowId;
+				const allowedCleanupFailure = ['cleanup-failed', 'warm-context-lost'].includes(state.terminal.status) && cleanupTerminalAdmissible(state.terminal);
+				if (state.terminal.status !== 'ok' && !allowedPrimeFailure && !allowedCleanupFailure) {
+					forceRequired = true;
+					fail('observer-error', 'Child job terminal reported ' + String(state.terminal.status) + '.', 'job-terminal');
+				}
+				if (allowedCleanupFailure) forceRequired = true;
+				if ((state.terminal.status === 'ok' || allowedPrimeFailure) && run.expectedEnvironment && JSON.stringify(state.environmentAfter) !== JSON.stringify(stableEnvironment(run.expectedEnvironment))) {
+					fail('identity-error', 'Child after-environment differs from the run-accepted environment.', 'environment-after');
+					forceRequired = true;
+				}
 			}
 		}
 	} catch (error) {
@@ -1050,6 +1142,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		forceRequired = true;
 	}
 
+	if (forceRequired || state.failure) await beginForcedReclamation(state.failure?.phase || 'forced-resource-cleanup');
 	if (child && child.connected && forceRequired) {
 		try { child.send({ type: 'stop', protocol: IPC_PROTOCOL, runToken, jobToken, decision: 'stop' }); } catch {}
 	}
@@ -1076,8 +1169,9 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			}
 		}
 		if (forceRequired || state.failure) {
+			await beginForcedReclamation(serverCloseError ? 'browser-server-close-fallback' : state.failure?.phase || 'forced-resource-cleanup');
 			for (const record of [browserRecord, childRecord].filter(Boolean)) {
-				try { await killVerifiedTree(record.identity, record.handle, processOps, receipt); }
+				try { await killVerifiedTree(record.identity, record.handle, processOps, receipt, record === childRecord ? selectedBudgets.childStopWaitMs : selectedBudgets.terminationMs); }
 				catch (error) {
 					const message = asError(error);
 					receipt.killFailures.push({ pid: record.identity.expected.pid, message });
@@ -1113,6 +1207,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		receipt.resourceDisposition = 'unverified';
 		receipt.error = receipt.error || 'No verifiable BrowserServer root handle was available.';
 	}
+	await teardownObservationWrite;
 
 	let identityAudit = {
 		before: state.environmentBefore,
@@ -1124,7 +1219,14 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 				: state.terminal?.status === 'ok' && JSON.stringify(state.environmentBefore) === JSON.stringify(state.environmentAfter)
 		))
 	};
-	const recoveryNeeded = receipt.verified && !state.failure && Boolean(run.expectedEnvironment) && (productDeadline || state.warmContextLostBy);
+	const serverCloseRecoveryEligible = Boolean(serverCloseError && state.completedAttempts.some((current) => hasValidProductOutcome(current, current.result?.row)));
+	const recoveryEvidenceEligible = Boolean(
+		state.current?.cleanupLossAdmissible
+		|| (productDeadline && hasValidProductOutcome(state.current))
+		|| state.warmContextLostBy
+		|| serverCloseRecoveryEligible
+	);
+	const recoveryNeeded = job.kind !== 'environment-recovery' && receipt.verified && receipt.resourceDisposition === 'forced-verified' && !state.failure && Boolean(run.expectedEnvironment) && recoveryEvidenceEligible;
 	if (recoveryNeeded) {
 		const recovery = await superviseOwnedJob({
 			job: { id: job.id + '-environment-recovery', kind: 'environment-recovery', attemptIds: [] },
@@ -1162,12 +1264,12 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		row.identityAudit = identityAudit;
 		row.resourceDisposition = receipt.resourceDisposition;
 		if (!receipt.verified) row.harnessStatus = 'cleanup-failed';
-		else if (current.censoredAtDeadline && identityAudit.valid && !state.failure) row.harnessStatus = 'cleanup-recovered';
-		else if (current.warmContextLost && identityAudit.valid && !state.failure) row.harnessStatus = 'cleanup-recovered';
+		else if ((current.cleanupLossAdmissible || current.censoredAtDeadline || current.warmContextLost) && identityAudit.valid && identityAudit.proofKind === 'recovery-sandbox' && !state.failure) row.harnessStatus = 'cleanup-recovered';
 		if (serverCloseError && current === attempts.at(-1)) {
 			row.cleanupStatus = 'failed';
 			row.cleanupErrors = [...(row.cleanupErrors || []), serverCloseError];
-			if (row.harnessStatus === 'ok' && receipt.verified) row.harnessStatus = 'cleanup-recovered';
+			if (row.harnessStatus === 'ok' && receipt.verified && identityAudit.proofKind === 'recovery-sandbox' && identityAudit.valid && !state.failure) row.harnessStatus = 'cleanup-recovered';
+			else if (row.harnessStatus === 'ok') row.harnessStatus = 'cleanup-failed';
 		}
 		return row;
 	});
@@ -1191,7 +1293,10 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		} else if (state.warmContextLostBy && receipt.resourceDisposition === 'forced-verified') {
 			const causeIndex = job.attemptRowIds.indexOf(state.warmContextLostBy);
 			const cause = rows.find((row) => row.scenarioRowId === state.warmContextLostBy);
-			if (causeIndex >= 0 && cause?.harnessStatus === 'cleanup-recovered' && cause.cleanupStatus !== 'complete') {
+			const primeContextLossCause = state.primeContextLossAdmissible === true && state.warmContextLostBy === job.primeRowId && cause?.prime === true && cause.outcomeStatus === 'ready' && Boolean(cause.firstValidFrame) && cause.cleanupStatus === 'failed' && cause.harnessStatus === 'cleanup-recovered' && cause.resourceDisposition === 'forced-verified' && cause.ownershipReceipt?.recoverySandbox?.verified;
+			if (primeContextLossCause) {
+				dispositions = buildBlockedWarmDispositions(job, 'blocked-warm-context-lost', cause.scenarioRowId, receipt, 0);
+			} else if (causeIndex >= 0 && cause?.harnessStatus === 'cleanup-recovered' && cause.cleanupStatus !== 'complete') {
 				dispositions = buildBlockedWarmDispositions(job, 'blocked-warm-context-lost', cause.scenarioRowId, receipt, causeIndex + 1);
 			}
 		}
@@ -1236,10 +1341,15 @@ function validateDisposition(disposition, matrix, actualById) {
 		if (!scenario || disposition.blockedByRowId !== scenario.primeRowId) errors.push('prime-failed disposition does not reference its scenario prime');
 		if (!cause || !['error', 'timeout', 'failed-no-valid-frame'].includes(cause.outcomeStatus) || !['ok', 'cleanup-recovered'].includes(cause.harnessStatus) || cause.observationIntegrity !== 'valid') errors.push('prime-failed cause is not a bounded admissible product outcome');
 	} else if (disposition?.reason === 'blocked-warm-context-lost') {
-		if (!scenario || !scenario.attemptRowIds.includes(disposition.blockedByRowId)) errors.push('context-lost cause is not an actual measured row in this warm scenario');
+		const primeIsContextLossCause = Boolean(scenario && disposition.blockedByRowId === scenario.primeRowId);
+		if (!scenario || (!scenario.attemptRowIds.includes(disposition.blockedByRowId) && !primeIsContextLossCause)) errors.push('context-lost cause is neither an actual measured row nor the explicitly admissible ready-frame prime cleanup-loss cause');
 		const prime = scenario ? actualById.get(scenario.primeRowId) : null;
-		if (!prime || prime.outcomeStatus !== 'ready' || !prime.firstValidFrame || prime.cleanupStatus !== 'complete') errors.push('context-lost disposition lacks its successful actual prime');
-		if (!cause || cause.harnessStatus !== 'cleanup-recovered' || cause.cleanupStatus === 'complete' || !cause.identityAudit?.valid || !cause.ownershipReceipt?.recoverySandbox?.verified) errors.push('context-lost cause lacks recovered page failure and fresh environment proof');
+		if (primeIsContextLossCause) {
+			if (!prime || prime !== cause || prime.prime !== true || prime.outcomeStatus !== 'ready' || !prime.firstValidFrame || prime.cleanupStatus !== 'failed' || prime.harnessStatus !== 'cleanup-recovered' || prime.resourceDisposition !== 'forced-verified' || !prime.identityAudit?.valid || !prime.ownershipReceipt?.recoverySandbox?.verified) errors.push('prime context-loss cause lacks actual ready/frame, failed cleanup, cleanup recovery, and verified forced/recovery proof');
+		} else {
+			if (!prime || prime.outcomeStatus !== 'ready' || !prime.firstValidFrame || prime.cleanupStatus !== 'complete') errors.push('context-lost disposition lacks its successful actual prime');
+			if (!cause || cause.harnessStatus !== 'cleanup-recovered' || cause.cleanupStatus === 'complete' || !cause.identityAudit?.valid || !cause.ownershipReceipt?.recoverySandbox?.verified) errors.push('context-lost cause lacks recovered page failure and fresh environment proof');
+		}
 		if (cause?.ownershipReceipt?.resourceDisposition !== 'forced-verified') errors.push('context-lost disposition lacks verified forced reclamation');
 	} else errors.push('disposition reason is not one of the two frozen warm blocks');
 	return errors;
@@ -1396,10 +1506,14 @@ function diagnosticCaseSummary(spec, row) {
 	const expectedFile = path.basename(row.fixtureLocator || row.fixture?.locator || '');
 	const replies = events.filter((event) => ['worker-pre-post', 'worker-post-return', 'main-receive', 'native-main-receive'].includes(event.phase) && event.type === 'complete' && event.workerId === workerId);
 	const inputId = input?.id;
-	const replyIdsMatch = Number.isInteger(inputId) && replies.every((event) => event.id === inputId);
+	const completeMainReceipt = diagnosticMode === 'native'
+		? events.find((event) => event.phase === 'native-main-receive' && event.type === 'complete' && event.workerId === workerId && Number.isInteger(event.id)) || null
+		: events.find((event) => event.phase === 'main-receive' && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
+	const replyIdsMatch = diagnosticMode === 'native'
+		? Boolean(completeMainReceipt && Number.isInteger(completeMainReceipt.id))
+		: Number.isInteger(inputId) && replies.every((event) => event.id === inputId);
 	const completePrePost = events.find((event) => event.phase === 'worker-pre-post' && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
 	const completeReturn = events.find((event) => event.phase === 'worker-post-return' && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
-	const completeMainReceipt = events.find((event) => ['main-receive', 'native-main-receive'].includes(event.phase) && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
 	const sourceNameCorrect = diagnosticMode !== 'wrapped' || (input && typeof input.sourceName === 'string' && input.sourceName.length > 0 && Number.isFinite(input.byteLength));
 	const inputIdentityValid = diagnosticMode !== 'wrapped' || Boolean(input && input.type === 'load' && Number.isInteger(input.id) && sourceNameCorrect && moduleReady);
 	const streamValid = !row.diagnosticStreamErrors?.length && events.every((event) => typeof event.phase === 'string' && Number.isFinite(event.epochMs));
@@ -1413,7 +1527,7 @@ function diagnosticCaseSummary(spec, row) {
 	const counts = workerAudit.runtimeCounts;
 	const sourceCountsMatchS2 = !isS2Wrapped || sameCountObject(counts?.sourceCounts, EXPECTED_S2_SOURCE_COUNTS);
 	const adaptedCountsPresent = diagnosticMode !== 'wrapped' || Boolean(Number.isInteger(counts?.resultFacesLength) && Number.isInteger(counts?.preparedRuntimeSceneGroupsLength) && counts.sourceCounts && typeof counts.sourceCounts === 'object');
-	const completeReplyPhases = diagnosticMode === 'native' ? Boolean(completeMainReceipt) : Boolean(completePrePost && completeReturn && completeMainReceipt && replyIdsMatch);
+	const completeReplyPhases = diagnosticMode === 'native' ? Boolean(completeMainReceipt && replyIdsMatch) : Boolean(completePrePost && completeReturn && completeMainReceipt && replyIdsMatch);
 	const workerLifecycle = diagnosticMode === 'native' ? Boolean(workerAudit.completeLifecycle && completeMainReceipt) : Boolean(workerAudit.completeLifecycle && completeReplyPhases);
 	let boundedLoldDiagnostic = null;
 	if (isLold) {
@@ -1908,7 +2022,7 @@ export async function runIsolatedBaseline(argv = process.argv.slice(2), { diagno
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	runIsolatedBaseline().then((summary) => {
-		const output = path.resolve(argValue(process.argv.slice(2), '--output', '.'));
+		const output = path.resolve(parseArgs(process.argv.slice(2)).output);
 		console.log(JSON.stringify({ summary: path.join(output, 'summary.json'), collectionEvidencePass: summary.collectionEvidencePass ?? summary.diagnostic?.acceptance?.pass ?? null, modelPass: summary.modelPass ?? null, controlPackAcceptance: summary.controlPackAcceptance ?? null }, null, 2));
 		if (summary.suite === 'model') process.exitCode = summary.modelPass ? 0 : summary.baseline === 'B0' && summary.collectionEvidencePass ? 2 : 1;
 		else process.exitCode = summary.diagnostic?.acceptance?.pass ? 0 : 1;

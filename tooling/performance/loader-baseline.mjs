@@ -515,9 +515,6 @@ export function makeWorkerDiagnosticProbe(channelName) {
 						__inputObserved = true;
 						if (data.buffer instanceof ArrayBuffer) __sourceBuffer = data.buffer;
 						__emit({ phase: 'worker-input', id: Number.isInteger(data.id) ? data.id : null, type: data.type, sourceName: typeof data.sourceName === 'string' ? data.sourceName : null, byteLength: data.buffer instanceof ArrayBuffer ? data.buffer.byteLength : null, epochMs: __epoch() });
-					} else if (data?.type === 'progress') {
-						const progress = data.progress && typeof data.progress === 'object' ? data.progress : {};
-						__emit({ phase: 'worker-progress', id: Number.isInteger(data.id) ? data.id : null, stage: typeof progress.stage === 'string' ? progress.stage : null, completed: Number.isFinite(progress.completed) ? progress.completed : null, total: Number.isFinite(progress.total) ? progress.total : null, unit: typeof progress.unit === 'string' ? progress.unit : null, epochMs: __epoch() });
 					}
 				}, true);
 				const __ingressGate = (event) => {
@@ -555,6 +552,10 @@ export function makeWorkerDiagnosticProbe(channelName) {
 					const kind = message?.type ?? 'unknown';
 					const replyId = Number.isInteger(message?.id) ? message.id : null;
 					const common = { type: kind, id: replyId, epochMs: __epoch(), transferCount: Array.isArray(transferList) ? transferList.length : 0, transferBytes: Array.isArray(transferList) ? transferList.filter((item) => item instanceof ArrayBuffer).reduce((total, item) => total + item.byteLength, 0) : 0 };
+					if (__streamToken && kind === 'progress') {
+						const progress = message?.progress && typeof message.progress === 'object' ? message.progress : {};
+						__emit({ phase: 'worker-progress', id: replyId, stage: typeof progress.stage === 'string' ? progress.stage : null, completed: Number.isFinite(progress.completed) ? progress.completed : null, total: Number.isFinite(progress.total) ? progress.total : null, unit: typeof progress.unit === 'string' ? progress.unit : null, epochMs: __epoch() });
+					}
 					__emit({ phase: 'worker-pre-post', ...common, graph });
 					const returned = __originalPostMessage(message, transferList);
 					__emit({ phase: 'worker-post-return', type: kind, id: replyId, epochMs: __epoch() });
@@ -875,7 +876,8 @@ export async function performModelAttempt({ browser, app, fixture, baseUrl, mode
 	let observerError = null;
 	let appOutcomeEmitted = false;
 	const emitAttemptEvent = (type, payload) => {
-		if (typeof onAttemptEvent !== 'function' || observerError) return false;
+		if (typeof onAttemptEvent !== 'function') return true;
+		if (observerError) return false;
 		try {
 			const result = onAttemptEvent({ type, attemptId, payload, emittedAtEpochMs: monotonicEpochNow() });
 			if (result && typeof result.then === 'function') throw new Error('onAttemptEvent must synchronously enqueue IPC observations.');
@@ -1408,7 +1410,8 @@ export async function performModelAttemptInContext({ context, browser, app, fixt
 	let observerError = null;
 	let appOutcomeEmitted = false;
 	const emitAttemptEvent = (type, payload) => {
-		if (typeof onAttemptEvent !== 'function' || observerError) return false;
+		if (typeof onAttemptEvent !== 'function') return true;
+		if (observerError) return false;
 		try {
 			const result = onAttemptEvent({ type, attemptId, payload, emittedAtEpochMs: monotonicEpochNow() });
 			if (result && typeof result.then === 'function') throw new Error('onAttemptEvent must synchronously enqueue IPC observations.');
