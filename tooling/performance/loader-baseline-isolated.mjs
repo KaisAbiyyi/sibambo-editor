@@ -181,7 +181,7 @@ export function buildIsolatedDiagnosticMatrix(appIds) {
 	};
 	add('editor', 'S2-jcm', 'native');
 	add('editor', 'S2-jcm', 'wrapped');
-	add('rooms', 'Y-old', 'wrapped');
+	add('rooms', 'S2-jcm', 'wrapped');
 	for (const appId of orderedApps) for (const fixtureId of SUPPORTED_IDS) add(appId, fixtureId, 'wrapped');
 	const expectedRowIds = specs.map((spec) => spec.id);
 	return { appIds: orderedApps, specs, expectedRowIds, expectedRowCount: expectedRowIds.length };
@@ -500,7 +500,7 @@ export function makeActualRow(job, current, receipt) {
 		observationIntegrity = row.observationIntegrity = 'observer-unavailable';
 	}
 	if (!current?.open) row.elapsedMs = null;
-	if (outcomeStatus === 'timeout' && current?.censoredAtDeadline) row.elapsedMs = current.deadlineBudgetMs;
+	if (outcomeStatus === 'timeout' && current?.censoredAtDeadline) row.elapsedMs = current.deadlineBudgetMs ?? current.elapsedMs;
 	if (!current?.result) {
 		row.status = outcomeStatus === 'timeout' ? 'harness-error-cleanup' : 'harness-error-observer';
 		row.cleanupStatus = 'aborted-by-supervisor';
@@ -1514,8 +1514,16 @@ function diagnosticCaseSummary(spec, row) {
 		: Number.isInteger(inputId) && replies.every((event) => event.id === inputId);
 	const completePrePost = events.find((event) => event.phase === 'worker-pre-post' && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
 	const completeReturn = events.find((event) => event.phase === 'worker-post-return' && event.type === 'complete' && event.workerId === workerId && event.id === inputId) || null;
-	const sourceNameCorrect = diagnosticMode !== 'wrapped' || (input && typeof input.sourceName === 'string' && input.sourceName.length > 0 && Number.isFinite(input.byteLength));
-	const inputIdentityValid = diagnosticMode !== 'wrapped' || Boolean(input && input.type === 'load' && Number.isInteger(input.id) && sourceNameCorrect && moduleReady);
+	const sourceNameCorrect = diagnosticMode !== 'wrapped' || Boolean(input && expectedFile && input.sourceName === expectedFile && input.byteLength === row.fixtureBytes);
+	let moduleIdentityValid = false;
+	try {
+		moduleIdentityValid = Boolean(moduleReady && matched.length === 1 && moduleReady.url === matched[0].url && /\/\_app\/immutable\/workers\/e4-import\.worker[^/]*\.js$/.test(new URL(moduleReady.url).pathname));
+	} catch {}
+	const inputIdentityValid = diagnosticMode !== 'wrapped' || Boolean(input && input.type === 'load' && Number.isInteger(input.id) && sourceNameCorrect && moduleIdentityValid);
+	const secondaryWorkersValid = workerAudit.secondaryWorkers.every((worker) => {
+		try { return spec.appId === 'rooms' && worker.workerKind === 'rooms-analysis' && new URL(worker.url).origin === new URL(matched[0]?.url).origin && /\/\_app\/immutable\/workers\/rooms-analysis\.worker[^/]*\.js$/.test(new URL(worker.url).pathname); }
+		catch { return false; }
+	});
 	const streamValid = !row.diagnosticStreamErrors?.length && events.every((event) => typeof event.phase === 'string' && Number.isFinite(event.epochMs));
 	const timelyOpen = row.openOccurred === true && Number.isFinite(row.startedAtEpochMs) && Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.elapsedMs <= PRODUCTION_BUDGETS.openOutcomeMs;
 	const appReadyAndFrame = row.outcomeStatus === 'ready' && Boolean(row.firstValidFrame);
@@ -1523,30 +1531,23 @@ function diagnosticCaseSummary(spec, row) {
 	const isS2Native = spec.appId === 'editor' && spec.fixtureId === 'S2-jcm' && diagnosticMode === 'native';
 	const isS2Wrapped = spec.appId === 'editor' && spec.fixtureId === 'S2-jcm' && diagnosticMode === 'wrapped';
 	const isRoomsYOld = spec.appId === 'rooms' && spec.fixtureId === 'Y-old' && diagnosticMode === 'wrapped';
+	const isRoomsS2 = spec.appId === 'rooms' && spec.fixtureId === 'S2-jcm' && diagnosticMode === 'wrapped';
 	const isLold = spec.appId === 'editor' && spec.fixtureId === 'L-old' && diagnosticMode === 'wrapped';
 	const counts = workerAudit.runtimeCounts;
-	const sourceCountsMatchS2 = !isS2Wrapped || sameCountObject(counts?.sourceCounts, EXPECTED_S2_SOURCE_COUNTS);
+	const sourceCountsMatchS2 = !(isS2Wrapped || isRoomsS2) || sameCountObject(counts?.sourceCounts, EXPECTED_S2_SOURCE_COUNTS) && counts?.resultFacesLength === 270 && counts?.preparedRuntimeSceneGroupsLength === 291;
 	const adaptedCountsPresent = diagnosticMode !== 'wrapped' || Boolean(Number.isInteger(counts?.resultFacesLength) && Number.isInteger(counts?.preparedRuntimeSceneGroupsLength) && counts.sourceCounts && typeof counts.sourceCounts === 'object');
 	const completeReplyPhases = diagnosticMode === 'native' ? Boolean(completeMainReceipt && replyIdsMatch) : Boolean(completePrePost && completeReturn && completeMainReceipt && replyIdsMatch);
 	const workerLifecycle = diagnosticMode === 'native' ? Boolean(workerAudit.completeLifecycle && completeMainReceipt) : Boolean(workerAudit.completeLifecycle && completeReplyPhases);
-	let boundedLoldDiagnostic = null;
-	if (isLold) {
-		const expectedBytes = row.fixtureBytes;
-		const expectedSourceName = row.fixtureLocator ? path.basename(row.fixtureLocator) : null;
-		let moduleReadyIsBuiltWorker = false;
-		try {
-			moduleReadyIsBuiltWorker = Boolean(moduleReady && /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(moduleReady.url).pathname + new URL(moduleReady.url).search));
-		} catch {}
-		const correctLoldInput = input?.type === 'load' && Number.isInteger(input.id) && input.byteLength === expectedBytes && (!expectedSourceName || input.sourceName === expectedSourceName) && moduleReadyIsBuiltWorker;
-		const postmortemCaptureUnavailable = row.outcomeStatus === 'timeout' && row.ownershipReceipt?.resourceDisposition === 'forced-verified' && !row.tracePath;
-		const postmortemCaptureErrorsAllowed = diagnosticErrors.length === 0 || (postmortemCaptureUnavailable && streamErrors.length === 0);
-		boundedLoldDiagnostic = timelyOpen && matched.length === 1 && unmatchedCount === 0 && workerAudit.importErrorCount === 0 && correctLoldInput && streamValid && postmortemCaptureErrorsAllowed && ownershipClean;
-	}
-	let pass;
-	if (isLold) pass = boundedLoldDiagnostic;
-	else if (isS2Native || isS2Wrapped) pass = appReadyAndFrame && matched.length === 1 && unmatchedCount === 0 && workerAudit.importErrorCount === 0 && workerLifecycle && streamValid && ownershipClean && sourceCountsMatchS2 && adaptedCountsPresent;
-	else if (isRoomsYOld) pass = appReadyAndFrame && matched.length === 1 && unmatchedCount === 0 && workerAudit.importErrorCount === 0 && streamValid && events.some((event) => event.phase === 'worker-module-ready') && ownershipClean;
-	else pass = ownershipClean && timelyOpen && streamValid && diagnosticErrors.length === 0 && workerAudit.importErrorCount === 0 && (row.outcomeStatus !== 'ready' || adaptedCountsPresent);
+	const captureErrors = (row.diagnosticErrors || []).filter((error) => /^(Diagnostic collection|Trace stop) exceeded the \d+ms Node watchdog\.$/.test(error));
+	const nonCaptureErrors = (row.diagnosticErrors || []).filter((error) => !captureErrors.includes(error));
+	const commonEvidenceValid = timelyOpen && matched.length === 1 && unmatchedCount === 0 && secondaryWorkersValid && workerAudit.importErrorCount === 0 && inputIdentityValid && replyIdsMatch && streamValid && diagnosticErrors.length === captureErrors.length && nonCaptureErrors.length === 0 && ownershipClean;
+	const boundedOutcomeValid = ['ready', 'error', 'timeout', 'failed-no-valid-frame'].includes(row.outcomeStatus);
+	const readyEvidenceValid = row.outcomeStatus !== 'ready' || appReadyAndFrame && workerLifecycle && adaptedCountsPresent;
+	const boundedDiagnostic = commonEvidenceValid && boundedOutcomeValid && readyEvidenceValid;
+	const boundedLoldDiagnostic = isLold ? boundedDiagnostic : null;
+	const pass = isS2Native || isS2Wrapped || isRoomsS2
+		? commonEvidenceValid && appReadyAndFrame && workerLifecycle && sourceCountsMatchS2 && adaptedCountsPresent
+		: boundedDiagnostic;
 	const phases = new Set(events.map((event) => event.phase));
 	const lastObserved = events.filter((event) => Number.isFinite(event.epochMs)).reduce((latest, event) => !latest || event.epochMs > latest.epochMs ? event : latest, null);
 	const runtimeCountFailureReason = row.outcomeStatus === 'ready' && !adaptedCountsPresent ? 'successful output did not expose plain adapted/source counts' : row.outcomeStatus !== 'ready' ? `successful output unavailable: ${row.outcomeStatus}` : null;
@@ -1556,7 +1557,7 @@ function diagnosticCaseSummary(spec, row) {
 		status: row.outcomeStatus,
 		elapsedMs: row.elapsedMs,
 		tracePath: row.tracePath || null,
-		postmortemCaptureUnavailable: isLold && row.outcomeStatus === 'timeout' && !row.tracePath ? { value: true, reason: row.diagnosticErrors?.join('; ') || 'renderer was reclaimed before final page/trace capture' } : { value: false, reason: null },
+		postmortemCaptureUnavailable: captureErrors.length || row.outcomeStatus === 'timeout' && !row.tracePath ? { value: true, reason: captureErrors.join('; ') || 'renderer was reclaimed before final page/trace capture' } : { value: false, reason: null },
 		workerTraceAudit: workerAudit,
 		diagnosticStreamEvents: events,
 		diagnosticStreamIdentity: { streamToken: row.diagnosticStreamToken || null, workerId, matchedWorkerCount: matched.length, unmatchedWorkerCount: unmatchedCount, eventCount: events.length, streamValid },
@@ -1585,9 +1586,12 @@ function diagnosticCaseSummary(spec, row) {
 			appReadyAndValidFrame: appReadyAndFrame,
 			workerMatchedExactlyOnce: matched.length === 1,
 			noUnmatchedWorker: unmatchedCount === 0,
+			secondaryWorkersValid,
+			inputIdentityValid,
 			noWorkerImportError: workerAudit.importErrorCount === 0,
 			completeWorkerLifecycle: workerLifecycle,
 			boundedLoldDiagnostic,
+			boundedRoomsYOldDiagnostic: isRoomsYOld ? boundedDiagnostic : null,
 			runtimeCountsCaptured: adaptedCountsPresent,
 			sourceCountsMatchPinnedS2: sourceCountsMatchS2,
 			identityStable: row.identityAudit?.valid === true,
@@ -1605,6 +1609,7 @@ export function summarizeIsolatedDiagnostics(expectedSpecs, rows) {
 	const s2Native = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'native');
 	const s2Wrapped = cases.find((item) => item.appId === 'editor' && item.fixtureId === 'S2-jcm' && item.mode === 'wrapped');
 	const roomsYOld = cases.find((item) => item.appId === 'rooms' && item.fixtureId === 'Y-old' && item.mode === 'wrapped');
+	const roomsS2 = cases.find((item) => item.appId === 'rooms' && item.fixtureId === 'S2-jcm' && item.mode === 'wrapped');
 	const runtimeCountAudit = cases.filter((item) => item.mode === 'wrapped' && SUPPORTED_IDS.includes(item.fixtureId)).map((item) => ({
 		appId: item.appId,
 		fixtureId: item.fixtureId,
@@ -1613,13 +1618,14 @@ export function summarizeIsolatedDiagnostics(expectedSpecs, rows) {
 		captured: item.acceptance.runtimeCountsCaptured,
 		reason: item.runtimeCountFailureReason
 	}));
-	const controlsPass = Boolean(s2Native?.acceptance.pass && s2Wrapped?.acceptance.pass && roomsYOld?.acceptance.pass);
+	const controlsPass = Boolean(s2Native?.acceptance.pass && s2Wrapped?.acceptance.pass && roomsS2?.acceptance.pass);
 	const fullScope = expectedSpecs.length === 13 && cases.length === 13 && cases.every((item) => item.actual);
 	const lOldBoundedAndMatched = Boolean(lOld?.acceptance.boundedLoldDiagnostic && lOld.acceptance.workerMatchedExactlyOnce && lOld.acceptance.noUnmatchedWorker);
 	const runtimeCountAuditComplete = runtimeCountAudit.length === expectedSpecs.filter((spec) => spec.mode === 'wrapped' && SUPPORTED_IDS.includes(spec.fixtureId)).length
 		&& runtimeCountAudit.every((item) => item.captured || item.status !== 'ready' && Boolean(item.reason));
 	const allDiagnosticResourcesClean = cases.length === expectedSpecs.length && cases.every((item) => item.actual && item.acceptance.cleanupComplete);
-	const pass = Boolean(fullScope && controlsPass && lOldBoundedAndMatched && runtimeCountAuditComplete && allDiagnosticResourcesClean);
+	const allDiagnosticCasesAccepted = cases.length === expectedSpecs.length && cases.every((item) => item.actual && item.acceptance.pass);
+	const pass = Boolean(fullScope && controlsPass && lOldBoundedAndMatched && runtimeCountAuditComplete && allDiagnosticResourcesClean && allDiagnosticCasesAccepted);
 	return {
 		caseCount: cases.filter((item) => item.actual).length,
 		expectedCaseCount: expectedSpecs.length,
@@ -1630,9 +1636,11 @@ export function summarizeIsolatedDiagnostics(expectedSpecs, rows) {
 			s2NativeComplete: s2Native?.acceptance.pass === true,
 			s2WrappedComplete: s2Wrapped?.acceptance.pass === true,
 			lOldBoundedAndMatched,
-			roomsYOldFrameTrace: roomsYOld?.acceptance.pass === true,
+			roomsS2FrameTrace: roomsS2?.acceptance.pass === true,
+			roomsYOldBoundedDiagnostic: roomsYOld?.acceptance.boundedRoomsYOldDiagnostic === true,
 			runtimeCountAuditComplete,
 			allDiagnosticResourcesClean,
+			allDiagnosticCasesAccepted,
 			controlsPass,
 			pass
 		}
@@ -1822,14 +1830,14 @@ export async function runIsolatedBaseline(argv = process.argv.slice(2), { diagno
 			: null;
 		diagnosticMatrix = options.suite === 'diagnostic' ? buildIsolatedDiagnosticMatrix(options.apps.map((app) => app.id)) : null;
 		expectedSpecs = diagnosticMatrix ? (diagnosticControlPack ? diagnosticMatrix.specs.slice(0, 3) : diagnosticMatrix.specs) : [];
-		if (diagnosticControlPack && (expectedSpecs.length !== 3 || expectedSpecs.map((item) => `${item.appId}/${item.fixtureId}/${item.mode}`).join('|') !== 'editor/S2-jcm/native|editor/S2-jcm/wrapped|rooms/Y-old/wrapped')) throw new Error('Frozen diagnostic control pack order/size drifted.');
+		if (diagnosticControlPack && (expectedSpecs.length !== 3 || expectedSpecs.map((item) => `${item.appId}/${item.fixtureId}/${item.mode}`).join('|') !== 'editor/S2-jcm/native|editor/S2-jcm/wrapped|rooms/S2-jcm/wrapped')) throw new Error('Frozen diagnostic control pack order/size drifted.');
 		const expectedIds = matrix?.expectedRowIds || expectedSpecs.map((spec) => spec.id);
 		metadata = {
 			schemaVersion: ISOLATED_SCHEMA,
 			method: ISOLATED_METHOD,
-			plan: 'BOMC-CP0-ISOLATION-001/v1.0',
+			plan: 'BOMC-CP0-ISOLATION-001/v1.1',
 			parentPlan: 'BOMC-LOADER-001/v1.0',
-			review: 'BOMC-LOADER-001/IMPLEMENTATION_REVIEW_2026-10-03_v1.2',
+			review: 'BOMC-LOADER-001/IMPLEMENTATION_REVIEW_2026-10-03_v1.3',
 			runId,
 			baseline: options.baseline,
 			suite: options.suite,
@@ -1936,8 +1944,8 @@ export async function runIsolatedBaseline(argv = process.argv.slice(2), { diagno
 			}
 			if (job.kind === 'diagnostic') {
 				const partialCases = summarizeIsolatedDiagnostics(expectedSpecs, actualRows);
-				if (expectedSpecs.length === 13 && ['editor/S2-jcm/native', 'editor/S2-jcm/wrapped', 'rooms/Y-old/wrapped'].includes(`${job.appId}/${job.fixtureId}/${job.mode}`) && job === jobs[2] && !partialCases.acceptance.controlsPass) {
-					throw new Error('Required fresh native/wrapped S2-jcm or Rooms/Y-old control failed; stop before dependent diagnostic cases and model collection.');
+				if (expectedSpecs.length === 13 && job === jobs[2] && !partialCases.acceptance.controlsPass) {
+					throw new Error('Required fresh native/wrapped S2-jcm or Rooms/S2-jcm control failed; stop before dependent diagnostic cases and model collection.');
 				}
 			}
 			writeProgress();

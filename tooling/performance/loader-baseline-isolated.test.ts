@@ -784,6 +784,94 @@ process.on('message', (message) => {
 		}
 	});
 
+	test('uses a successful Rooms S2 control and retains the bounded Y-old case exactly once', () => {
+		const matrix = buildIsolatedDiagnosticMatrix(APP_IDS);
+		expect(matrix.specs.slice(0,3).map((spec: any) => spec.id)).toEqual([
+			'diagnostic-editor-S2-jcm-native', 'diagnostic-editor-S2-jcm-wrapped', 'diagnostic-rooms-S2-jcm-wrapped'
+		]);
+		expect(matrix.expectedRowCount).toBe(13);
+		expect(matrix.specs.filter((spec: any) => spec.appId === 'rooms' && spec.fixtureId === 'Y-old')).toHaveLength(1);
+		expect(new Set(matrix.expectedRowIds).size).toBe(13);
+	});
+
+	test('accepts exact bounded Rooms input evidence without converting its timeout into frame success', () => {
+		const spec = { id:'diagnostic-rooms-Y-old-wrapped', appId:'rooms', fixtureId:'Y-old', mode:'wrapped', kind:'diagnostic' };
+		const token='bounded-rooms'; const name='RUMAH Y__SIBAMBO-BOMC-v1.2.0__VISUAL.bomc';
+		const events=[
+			{streamToken:token,workerId:'1',realm:'main',seq:1,phase:'wrapped-worker',url:'http://127.0.0.1:5174/_app/immutable/workers/e4-import.worker-test.js',epochMs:1010},
+			{streamToken:token,workerId:'1',realm:'worker',seq:1,phase:'worker-input',type:'load',id:7,sourceName:name,byteLength:17_957_535,epochMs:1020},
+			{streamToken:token,workerId:'1',realm:'worker',seq:2,phase:'worker-module-ready',url:'http://127.0.0.1:5174/_app/immutable/workers/e4-import.worker-test.js',epochMs:1030}
+		];
+		const row={id:spec.id,app:'rooms',fixtureId:'Y-old',fixtureLocator:'fixtures/'+name,fixtureBytes:17_957_535,
+			diagnosticStreamToken:token,diagnosticStreamEvents:events,diagnosticStreamErrors:[],diagnosticErrors:['Trace stop exceeded the 5000ms Node watchdog.'],
+			openOccurred:true,startedAtEpochMs:1000,elapsedMs:120_000,censoredAtDeadline:true,outcomeStatus:'timeout',firstValidFrame:null,
+			ownershipReceipt:ownedReceipt(spec.id,'forced-verified'),identityAudit:{valid:true},harnessStatus:'cleanup-recovered'};
+		const summarize=(updates: any={})=>summarizeIsolatedDiagnostics([spec],[{...row,...updates}]).cases[0];
+		const accepted=summarize();
+		expect(accepted.acceptance.pass).toBe(true);
+		expect(accepted.status).toBe('timeout');
+		expect(accepted.acceptance.appReadyAndValidFrame).toBe(false);
+		expect(accepted.postmortemCaptureUnavailable.value).toBe(true);
+		for(const badInput of [{sourceName:'wrong.bomc'},{byteLength:3},{id:null}]) {
+			expect(summarize({diagnosticStreamEvents:events.map(event=>event.phase==='worker-input'?{...event,...badInput}:event)}).acceptance.pass).toBe(false);
+		}
+		expect(summarize({diagnosticStreamEvents:events.filter(event=>event.phase!=='worker-module-ready')}).acceptance.pass).toBe(false);
+		expect(summarize({diagnosticStreamErrors:['stream corrupt']}).acceptance.pass).toBe(false);
+		expect(summarize({harnessStatus:'observer-error'}).acceptance.pass).toBe(false);
+		expect(summarize({diagnosticStreamEvents:[...events,{streamToken:token,workerId:'page',realm:'main',seq:2,phase:'unmatched-worker',url:'http://127.0.0.1/unknown.worker.js',epochMs:1040}]}).acceptance.pass).toBe(false);
+	});
+
+	test('requires every diagnostic evidence case even when controls and runtime counts pass', () => {
+		const matrix=buildIsolatedDiagnosticMatrix(APP_IDS);
+		const counts={resultFacesLength:270,preparedRuntimeSceneGroupsLength:291,sourceCounts:{materials:48,tags:19,meshes:80,faces:7078,definitions:106,instances:122,transforms:101,textures:14,edges:14354}};
+		const rows=matrix.specs.map((spec: any)=>{
+			const token='all-cases:'+spec.id; const url='http://127.0.0.1/_app/immutable/workers/e4-import.worker-test.js';
+			const shared={streamToken:token,workerId:'1'};
+			const events=spec.mode==='native' ? [
+				{...shared,realm:'main',seq:1,phase:'native-worker',url,epochMs:1001},
+				{...shared,realm:'main',seq:2,phase:'native-main-receive',type:'complete',id:7,epochMs:1008}
+			] : [
+				{...shared,realm:'main',seq:1,phase:'wrapped-worker',url,epochMs:1001},
+				{...shared,realm:'worker',seq:1,phase:'worker-input',type:'load',id:7,sourceName:spec.fixtureId+'.bomc',byteLength:3,epochMs:1002},
+				{...shared,realm:'worker',seq:2,phase:'worker-module-ready',url,epochMs:1003},
+				{...shared,realm:'worker',seq:3,phase:'worker-pre-post',type:'complete',id:7,graph:{runtimeCounts:counts},epochMs:1006},
+				{...shared,realm:'worker',seq:4,phase:'worker-post-return',type:'complete',id:7,epochMs:1007},
+				{...shared,realm:'main',seq:2,phase:'main-receive',type:'complete',id:7,epochMs:1008}
+			];
+			return {id:spec.id,app:spec.appId,fixtureId:spec.fixtureId,fixtureLocator:'fixtures/'+spec.fixtureId+'.bomc',fixtureBytes:3,
+				diagnosticStreamToken:token,diagnosticStreamEvents:events,diagnosticStreamErrors:[],diagnosticErrors:[],
+				openOccurred:true,startedAtEpochMs:1000,elapsedMs:10,outcomeStatus:'ready',firstValidFrame:{epochMs:1009},
+				ownershipReceipt:ownedReceipt(spec.id),identityAudit:{valid:true},harnessStatus:'ok'};
+		});
+		const valid=summarizeIsolatedDiagnostics(matrix.specs,rows);
+		expect(valid.acceptance.pass).toBe(true);
+		const invalid=summarizeIsolatedDiagnostics(matrix.specs,rows.map((row: any)=>row.app==='benchmark'&&row.fixtureId==='I-old'?{...row,diagnosticErrors:['worker graph inspection failed']}:row));
+		expect(invalid.acceptance.controlsPass).toBe(true);
+		expect(invalid.acceptance.runtimeCountAuditComplete).toBe(true);
+		expect(invalid.cases.find((item: any)=>item.appId==='benchmark'&&item.fixtureId==='I-old').acceptance.pass).toBe(false);
+		expect(invalid.acceptance.pass).toBe(false);
+	});
+
+	test('retains the child-observed censored timeout without a parent deadline event', () => {
+		const open = { perfMs: 10, epochMs: 1_000, openAction: 'Open' };
+		const appOutcome = { kind: 'timeout', elapsedMs: 120_000, observedAtEpochMs: 121_010 };
+		const classification = classifyAttemptOutcome(open, appOutcome);
+		const row = makeActualRow(
+			{ id: 'rooms-Y-old-cold-01', kind: 'cold', appId: 'rooms', fixtureId: 'Y-old', mode: 'cold' },
+			{
+				attemptId: 'rooms-Y-old-cold-01', open, appOutcome, ...classification,
+				result: { row: { status: 'timeout', cleanupStatus: 'complete', firstValidFrame: null } }
+			},
+			ownedReceipt('rooms-Y-old-cold-01')
+		);
+		expect(row.outcomeStatus).toBe('timeout');
+		expect(row.elapsedMs).toBe(120_000);
+		expect(row.censoredAtDeadline).toBe(true);
+		expect(row.actualObservedElapsedMs).toBe(120_010);
+		expect(row.firstValidFrame).toBeNull();
+		expect(JSON.parse(JSON.stringify(row)).elapsedMs).toBe(120_000);
+	});
+
 	test('classifies setup, late delivery, missing frame, cleanup failure, and foreign IPC correctly', () => {
 		expect(classifyAttemptOutcome(null, { kind: 'setup-error', text: 'chooser failed' })).toEqual({ outcomeStatus: 'setup-error', elapsedMs: null, actualObservedElapsedMs: null, censoredAtDeadline: false, lateOutcome: null, observationIntegrity: 'valid' });
 		const late = classifyAttemptOutcome({ perfMs: 10, epochMs: 1_000 }, { kind: 'ready', text: 'ready', observedAtEpochMs: 122_001 }, 120_000);

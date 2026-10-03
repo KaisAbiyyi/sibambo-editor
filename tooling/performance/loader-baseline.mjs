@@ -488,6 +488,12 @@ export function makeWorkerDiagnosticProbe(channelName) {
 			const absolute = new URL(url, document.baseURI).href;
 			const matched = /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search);
 			if (!matched) {
+				const workerUrl = new URL(absolute);
+				const knownSecondary = settings.appId === 'rooms' && workerUrl.origin === location.origin && /\/\_app\/immutable\/workers\/rooms-analysis\.worker[^/]*\.js$/.test(workerUrl.pathname);
+				if (knownSecondary) {
+					emit({ phase: 'known-secondary-worker', workerKind: 'rooms-analysis', workerId: 'secondary-' + nextWorkerId++, url: absolute, epochMs: performance.timeOrigin + performance.now() });
+					return options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
+				}
 				emit({ phase: 'unmatched-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
 				return options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
 			}
@@ -626,13 +632,17 @@ export function makeWorkerNativeControlProbe(channelName) {
 			if (!new.target) throw new TypeError("Failed to construct 'Worker': Please use the 'new' operator.");
 			const absolute = new URL(url, document.baseURI).href;
 			const matched = /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search);
+			if (!matched) {
+				const workerUrl = new URL(absolute);
+				const knownSecondary = settings.appId === 'rooms' && workerUrl.origin === location.origin && /\/\_app\/immutable\/workers\/rooms-analysis\.worker[^/]*\.js$/.test(workerUrl.pathname);
+				emit({ phase: knownSecondary ? 'known-secondary-worker' : 'native-unmatched-worker', ...(knownSecondary ? { workerKind: 'rooms-analysis', workerId: 'secondary-' + nextWorkerId++ } : {}), url: absolute, epochMs: performance.timeOrigin + performance.now() });
+				return options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
+			}
 			const worker = options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
-			if (matched) {
-				const workerId = String(nextWorkerId++);
-				emit({ phase: 'native-worker', url: absolute, workerId, epochMs: performance.timeOrigin + performance.now() });
-				worker.addEventListener('message', (event) => emit({ phase: 'native-main-receive', type: event.data?.type ?? null, id: Number.isInteger(event.data?.id) ? event.data.id : null, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
-				worker.addEventListener('error', (event) => emit({ phase: 'native-worker-error', message: event.message, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
-			} else emit({ phase: 'native-unmatched-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
+			const workerId = String(nextWorkerId++);
+			emit({ phase: 'native-worker', url: absolute, workerId, epochMs: performance.timeOrigin + performance.now() });
+			worker.addEventListener('message', (event) => emit({ phase: 'native-main-receive', type: event.data?.type ?? null, id: Number.isInteger(event.data?.id) ? event.data.id : null, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
+			worker.addEventListener('error', (event) => emit({ phase: 'native-worker-error', message: event.message, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
 			return worker;
 		};
 		window.Worker.prototype = NativeWorker.prototype;
@@ -744,14 +754,14 @@ export function installDiagnosticConsoleStream(page, streamToken, onDiagnosticEv
 	return { get eventCount() { return eventCount; }, get byteCount() { return byteCount; }, get invalid() { return invalid; }, dispose: remove };
 }
 
-async function newPage(context, { diagnostic = false, workerControl = false, channelName = null, diagnosticStreamToken = null, onDiagnosticEvent = null } = {}) {
+async function newPage(context, { appId = null, diagnostic = false, workerControl = false, channelName = null, diagnosticStreamToken = null, onDiagnosticEvent = null } = {}) {
 	const page = await context.newPage();
 	const streamState = diagnostic || workerControl
 		? installDiagnosticConsoleStream(page, diagnosticStreamToken, onDiagnosticEvent)
 		: null;
 	if (streamState) page.__loaderDiagnosticStreamState = streamState;
 	await page.addInitScript(makeFrameProbe());
-	const probeOptions = diagnosticStreamToken ? { channel: channelName, streamToken: diagnosticStreamToken } : channelName;
+	const probeOptions = { channel: channelName, streamToken: diagnosticStreamToken, appId };
 	if (diagnostic) await page.addInitScript(makeWorkerDiagnosticProbe(channelName), probeOptions);
 	else if (workerControl) await page.addInitScript(makeWorkerNativeControlProbe(channelName), probeOptions);
 	return page;
@@ -910,7 +920,7 @@ export async function performModelAttempt({ browser, app, fixture, baseUrl, mode
 		const made = await withNodeWatchdog(() => makeContext(browser, { cacheDisabled: mode === 'cold' }), 5_000, 'Browser context creation');
 		context = made.context;
 		configure = made.configure;
-		page = await withNodeWatchdog(() => newPage(context, { diagnostic, workerControl, channelName, diagnosticStreamToken, onDiagnosticEvent }), 5_000, 'Browser page creation');
+		page = await withNodeWatchdog(() => newPage(context, { appId: app.id, diagnostic, workerControl, channelName, diagnosticStreamToken, onDiagnosticEvent }), 5_000, 'Browser page creation');
 		Object.assign(errorCapture, installPageErrorCapture(page));
 		Object.assign(requestCapture, installRequestCapture(page));
 		if (diagnostic || workerControl) { await withNodeWatchdog(() => context.tracing.start({ screenshots: true, snapshots: true, sources: false }), 5_000, 'Trace start'); traceStarted = true; }
@@ -1595,6 +1605,7 @@ export function workerTraceAudit(row, mode) {
 	const unmatchedPhase = wrapped ? 'unmatched-worker' : 'native-unmatched-worker';
 	const matchedWorkerCount = events.filter((event) => event.phase === expectedWorkerPhase).length;
 	const unmatchedWorkers = events.filter((event) => event.phase === unmatchedPhase).map((event) => event.url);
+	const secondaryWorkers = events.filter((event) => event.phase === 'known-secondary-worker').map(({ url, workerKind, workerId }) => ({ url, workerKind, workerId }));
 	const importErrors = events.filter((event) => event.phase === 'worker-import-error');
 	const phases = wrapped ? ['worker-pre-post', 'worker-post-return', 'main-receive'] : ['native-main-receive'];
 	const completePositions = phases.map((phase) => events.findIndex((event) => event.phase === phase && event.type === 'complete'));
@@ -1610,7 +1621,7 @@ export function workerTraceAudit(row, mode) {
 	const completeLifecycle = hasAllCompletePhases && completeEpochsFinite && workerPostReturnedAfterPrePost;
 	const phaseCounts = Object.fromEntries([...new Set(events.map((event) => event.phase))].map((phase) => [phase, events.filter((event) => event.phase === phase).length]));
 	return {
-		mode, matchedWorkerCount, unmatchedWorkers, importErrorCount: importErrors.length,
+		mode, matchedWorkerCount, unmatchedWorkers, secondaryWorkers, importErrorCount: importErrors.length,
 		completePhaseNames: phases, completePhasePositions: completePositions, completePhaseEpochs,
 		workerPostReturnedAfterPrePost,
 		completeLifecycle, missingCompletePhases: phases.filter((phase) => !events.some((event) => event.phase === phase && event.type === 'complete')),

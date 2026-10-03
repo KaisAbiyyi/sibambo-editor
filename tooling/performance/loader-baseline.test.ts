@@ -19,7 +19,7 @@ function runnerProbe(source: string) {
 }
 
 function browserProbe(source: string) {
-	const script = `import assert from 'node:assert/strict'; import { createServer } from 'node:http'; import { APPS, launchBenchmarkBrowser, makeContext, makeFrameProbe, makeWorkerDiagnosticProbe, performExpectedRejection, performModelAttempt, performModelAttemptInContext } from ${JSON.stringify(runnerUrl)};\n${source}`;
+	const script = `import assert from 'node:assert/strict'; import { createServer } from 'node:http'; import { APPS, launchBenchmarkBrowser, makeContext, makeFrameProbe, makeWorkerDiagnosticProbe, makeWorkerNativeControlProbe, performExpectedRejection, performModelAttempt, performModelAttemptInContext } from ${JSON.stringify(runnerUrl)};\n${source}`;
 	const result = spawnSync('node', ['--input-type=module', '-e', script], { cwd: path.resolve(import.meta.dir, '../..'), encoding: 'utf8', timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
 	if (result.error) throw result.error;
 	if (result.status !== 0) throw new Error(result.stderr || `Browser probe exited ${result.status}.`);
@@ -421,6 +421,42 @@ describe('browser instrumentation contracts', () => {
 			expect(result.selectedByCase[key] ?? 0).toBe(0);
 		}
 	});
+
+	test('keeps the Rooms analysis worker native and rejects foreign, lookalike, and other-app exemptions', () => {
+		const result = browserProbe(`
+			const server=createServer((req,res)=>{
+				if(req.url.includes('.js')) {res.writeHead(200,{'content-type':'text/javascript'});res.end("self.addEventListener('message',event=>{const buffer=event.data.buffer; self.postMessage({type:'result',byte:new Uint8Array(buffer)[0],buffer,name:self.name,url:import.meta.url},[buffer]);});");return;}
+				res.writeHead(200,{'content-type':'text/html'});res.end('<!doctype html><title>native secondary worker</title>');
+			});
+			await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+			const url='http://127.0.0.1:'+server.address().port;
+			const browser=await launchBenchmarkBrowser(); const observations=[];
+			try {for(const mode of ['wrapped','native']) for(const appId of ['rooms','editor',null]) {
+				const context=await browser.newContext(); const page=await context.newPage(); const channel='secondary-'+mode+'-'+appId;
+				await page.addInitScript(mode==='wrapped'?makeWorkerDiagnosticProbe(channel):makeWorkerNativeControlProbe(channel),{channel,appId});await page.goto(url);
+				const observed=await page.evaluate(async({mode})=>{
+					const probe=mode==='wrapped'?window.__loaderWorkerProbe:window.__loaderWorkerControlProbe;
+					const secondaryUrl=location.origin+'/_app/immutable/workers/rooms-analysis.worker-test.js';
+					const worker=new Worker(secondaryUrl,{type:'module',name:'native-analysis'});const buffer=new ArrayBuffer(4);new Uint8Array(buffer)[0]=73;
+					const receipt=new Promise(resolve=>worker.addEventListener('message',event=>resolve(event.data),{once:true}));worker.postMessage({buffer},[buffer]);const detached=buffer.byteLength;const reply=await receipt;worker.terminate();
+					const lookalike=new Worker('/_app/immutable/workers/rooms-analysis-extra.worker-test.js',{type:'module'});lookalike.terminate();
+					try {new Worker('https://foreign.invalid/_app/immutable/workers/rooms-analysis.worker-test.js',{type:'module'});}catch{}
+					return {detached,byte:reply.byte,returnedBytes:reply.buffer.byteLength,name:reply.name,url:reply.url,secondaryUrl,events:probe.events};
+				},{mode});
+				assert.equal(observed.detached,0);assert.equal(observed.byte,73);assert.equal(observed.returnedBytes,4);assert.equal(observed.name,'native-analysis');assert.equal(observed.url,observed.secondaryUrl);
+				const known=observed.events.filter(event=>event.phase==='known-secondary-worker');const unknown=observed.events.filter(event=>event.phase===(mode==='wrapped'?'unmatched-worker':'native-unmatched-worker'));
+				assert.equal(known.length,appId==='rooms'?1:0);assert.equal(unknown.length,appId==='rooms'?2:3);
+				if(appId==='rooms'){assert.equal(known[0].workerKind,'rooms-analysis');assert.equal(known[0].url,observed.secondaryUrl);}
+				assert.equal(observed.events.filter(event=>event.phase==='wrapped-worker'||event.phase==='native-worker').length,0);
+				observations.push({mode,appId,known:known.length,unknown:unknown.length});await context.close();
+			}}finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
+			console.log(JSON.stringify(observations));
+		`);
+		expect(result).toEqual([
+			{mode:'wrapped',appId:'rooms',known:1,unknown:2}, {mode:'wrapped',appId:'editor',known:0,unknown:3}, {mode:'wrapped',appId:null,known:0,unknown:3},
+			{mode:'native',appId:'rooms',known:1,unknown:2}, {mode:'native',appId:'editor',known:0,unknown:3}, {mode:'native',appId:null,known:0,unknown:3}
+		]);
+	}, 60_000);
 
 	test('buffers worker messages FIFO until its delayed dynamic module import is ready', () => {
 		const result = browserProbe(`
