@@ -304,6 +304,30 @@ describe('baseline percentile contract', () => {
 });
 
 describe('worker diagnostic acceptance contracts', () => {
+	test('keeps diagnostic action/network trace without DOM snapshots or screencast frames', () => {
+		const directory=mkdtempSync(path.join(os.tmpdir(),'bomc-minimal-trace-'));
+		try {
+			const result=browserProbe(`
+				import {readFileSync} from 'node:fs';import {unzipSync,strFromU8} from 'fflate';
+				const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(${JSON.stringify(`<main data-app="editor"><button class="empty-open" onclick="document.querySelector('input').click()">Open</button><input type="file" hidden onchange="document.querySelector('.empty-error').textContent='BOMC invalid: material section version.'"><div class="empty-error"></div></main>`)});});
+				await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+				const browser=await launchBenchmarkBrowser();
+				try {
+					const row=await performModelAttempt({browser,app:APPS[0],fixture:{id:'trace-test',locator:'test.bomc',bytes:4,payloadBytes:Buffer.from([1,2,3,4])},baseUrl:'http://127.0.0.1:'+server.address().port,mode:'diagnostic-excluded',outputDir:${JSON.stringify(directory)},index:1,diagnostic:true,expectedOutcome:'error'});
+					const entries=unzipSync(readFileSync(${JSON.stringify(directory)}+'/'+row.tracePath));
+					const traceRows=Object.entries(entries).filter(([name])=>name.endsWith('.trace')).flatMap(([,bytes])=>strFromU8(bytes).trim().split('\\n').map(line=>JSON.parse(line)));
+					console.log(JSON.stringify({status:row.status,cleanup:row.cleanupStatus,captureProfile:row.captureProfile,actions:traceRows.filter(item=>item.type==='before'||item.type==='after').length,dom:traceRows.filter(item=>item.type==='frame-snapshot').length,screencast:traceRows.filter(item=>item.type==='screencast-frame').length,network:Object.keys(entries).some(name=>name.endsWith('.network'))}));
+				}finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
+			`);
+			expect(result.status).toBe('error');
+			expect(result.cleanup).toBe('complete');
+			expect(result.actions).toBeGreaterThan(0);
+			expect(result.network).toBe(true);
+			expect(result.dom).toBe(0);
+			expect(result.screencast).toBe(0);
+			expect(result.captureProfile).toBe('actions-network-no-dom');
+		}finally{rmSync(directory,{recursive:true,force:true});}
+	},60_000);
 	test('audits wrapped complete epochs without imposing cross-channel arrival order', () => {
 		const result = runnerProbe(`
 			const events=Array.from({length:71},(_,index)=>({phase:'other',type:'progress',epochMs:index}));

@@ -28,6 +28,34 @@ const runnerUrl = new URL('./loader-baseline.mjs', import.meta.url).href;
 const APP_IDS = ['editor', 'rooms', 'benchmark'];
 const FIXTURE_IDS = ['L-old', 'Y-old', 'I-old', 'S2-jcm', 'S1-new', 'S2-new', 'I-new', 'Y-new'];
 
+describe('batched Windows ownership inspection', () => {
+	test('resolves real, forged and missing roots from one read-only CIM inspection', () => {
+		const result = nodeProbe(`
+			const {readProcessSnapshots} = await import(${JSON.stringify(supervisorUrl)});
+			const requests = [
+				{pid:process.pid, parentPid:process.ppid},
+				{pid:process.pid, creationUtc:'1900-01-01T00:00:00.0000000Z', parentPid:process.ppid},
+				{pid:2147483647}
+			];
+			const batch = await readProcessSnapshots(requests);
+			let invalidRejected=false;try{await readProcessSnapshots([{pid:0}])}catch{invalidRejected=true}
+			console.log(JSON.stringify({batch,pid:process.pid,stillAlive:process.kill(process.pid,0),invalidRejected}));
+		`);
+		expect(result.batch.querySucceeded).toBe(true);
+		expect(result.batch.queryCount).toBe(1);
+		expect(result.batch.inspectionId.length).toBeGreaterThan(0);
+		expect(result.batch.snapshots).toHaveLength(3);
+		expect(result.batch.snapshots[0].root.pid).toBe(result.pid);
+		expect(result.batch.snapshots[0].rootIdentityMatches).toBe(true);
+		expect(result.batch.snapshots[1].rootIdentityMatches).toBe(false);
+		expect(result.batch.snapshots[1].descendants).toEqual([]);
+		expect(result.batch.snapshots[2].root).toBeNull();
+		expect(result.batch.snapshots[2].rootIdentityMatches).toBe(false);
+		expect(result.stillAlive).toBe(true);
+		expect(result.invalidRejected).toBe(true);
+	}, 45_000);
+});
+
 function ownedReceipt(jobId: string, resourceDisposition = 'graceful') {
 	return {
 		jobId,

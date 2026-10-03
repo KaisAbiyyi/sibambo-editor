@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync, appendFileSync, unlinkSync, rmdirSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,7 +40,8 @@ export const PRODUCTION_BUDGETS = Object.freeze({
 	gracefulChildExitMs: 5_000,
 	childStopWaitMs: 1_000,
 	terminationMs: 5_000,
-	resourceVerificationMs: 10_000
+	processSnapshotMs: 30_000,
+	resourceVerificationMs: 30_000
 });
 
 const WORKSPACE_PLAN = 'BOMC-LOADER-001/v1.0';
@@ -214,7 +215,7 @@ function execFileResult(file, args, options) {
 	});
 }
 
-async function readProcessSnapshot({ pid, creationUtc = '', profilePath = '', parentPid = 0, timeoutMs = 5_000 }) {
+async function readProcessSnapshot({ pid, creationUtc = '', profilePath = '', parentPid = 0, timeoutMs = PRODUCTION_BUDGETS.processSnapshotMs }) {
 	if (process.platform !== 'win32') throw new Error('Owned process verification requires the frozen Windows CIM snapshot helper.');
 	const result = await execFileResult('powershell.exe', [
 		'-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SNAPSHOT_SCRIPT,
@@ -228,6 +229,38 @@ async function readProcessSnapshot({ pid, creationUtc = '', profilePath = '', pa
 	if (!snapshot) return { querySucceeded: false, root: null, rootIdentityMatches: false, descendants: [], profileMatches: [], error: result.error || result.stderr || 'PowerShell returned no valid JSON snapshot.' };
 	if (result.error && snapshot.querySucceeded === true) return { ...snapshot, querySucceeded: false, error: result.error };
 	return snapshot;
+}
+
+export async function readProcessSnapshots(requests, { timeoutMs = PRODUCTION_BUDGETS.processSnapshotMs } = {}) {
+	if (process.platform !== 'win32') throw new Error('Owned process verification requires the frozen Windows CIM snapshot helper.');
+	if (!Array.isArray(requests) || requests.length < 1 || requests.length > 1024 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid process snapshot batch size or timeout.');
+	const normalized = requests.map((request, index) => {
+		const { pid, creationUtc = '', profilePath = '', parentPid = 0 } = request || {};
+		if (!Number.isInteger(pid) || pid <= 0 || pid > 2147483647 || !Number.isInteger(parentPid) || parentPid < 0 || parentPid > 2147483647 || typeof creationUtc !== 'string' || typeof profilePath !== 'string') throw new Error('Invalid process snapshot request identity.');
+		return { id: 'root-' + index, pid, creationUtc, profilePath, parentPid };
+	});
+	const schemaVersion = 'bomc-process-snapshot-batch-v1';
+	const directory = mkdtempSync(path.join(os.tmpdir(), 'bomc-process-snapshot-'));
+	const requestFile = path.join(directory, 'requests.json');
+	try {
+		writeFileSync(requestFile, JSON.stringify({ schemaVersion, requests: normalized }), { encoding: 'utf8', flag: 'wx' });
+		const result = await execFileResult('powershell.exe', [
+			'-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SNAPSHOT_SCRIPT, '-RequestsFile', requestFile
+		], { windowsHide: true, timeout: Math.max(1, Math.floor(timeoutMs)), maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' });
+		let batch = null;
+		try { batch = JSON.parse(result.stdout.trim()); } catch {}
+		const processEntryValid = (entry) => entry && Number.isInteger(entry.pid) && entry.pid > 0 && Number.isInteger(entry.ppid) && typeof entry.creationUtc === 'string' && entry.creationUtc.length > 0 && typeof entry.executable === 'string' && typeof entry.commandLine === 'string';
+		const snapshotValid = (snapshot) => snapshot && snapshot.querySucceeded === true && typeof snapshot.rootIdentityMatches === 'boolean' && (snapshot.root === null || processEntryValid(snapshot.root)) && Array.isArray(snapshot.descendants) && snapshot.descendants.every(processEntryValid) && Array.isArray(snapshot.profileMatches) && snapshot.profileMatches.every(processEntryValid);
+		const valid = !result.error && batch?.schemaVersion === schemaVersion && batch.querySucceeded === true && batch.queryCount === 1 && typeof batch.inspectionId === 'string' && batch.inspectionId.length > 0 && Array.isArray(batch.snapshots) && batch.snapshots.length === normalized.length && batch.snapshots.every((entry, index) => entry.id === normalized[index].id && snapshotValid(entry.snapshot));
+		if (!valid) {
+			const error = result.error || batch?.error || result.stderr || 'PowerShell returned an invalid or incomplete process snapshot batch.';
+			return { querySucceeded: false, queryCount: batch?.queryCount ?? 0, inspectionId: batch?.inspectionId ?? null, snapshots: normalized.map(() => ({ querySucceeded: false, root: null, rootIdentityMatches: false, descendants: [], profileMatches: [], error })) };
+		}
+		return { querySucceeded: true, queryCount: 1, inspectionId: batch.inspectionId, snapshots: batch.snapshots.map((entry) => entry.snapshot) };
+	} finally {
+		if (existsSync(requestFile)) unlinkSync(requestFile);
+		rmdirSync(directory);
+	}
 }
 
 function handleIdentity(handle, profilePath = '') {
@@ -245,9 +278,9 @@ function handleIdentity(handle, profilePath = '') {
 	return { pid, executable: spawnfile, spawnargs: [...spawnargs], parentPid: process.pid, profilePath: profile };
 }
 
-async function establishOwnedIdentity(handle, profilePath = '') {
+async function establishOwnedIdentity(handle, profilePath = '', timeoutMs = PRODUCTION_BUDGETS.processSnapshotMs) {
 	const spawned = handleIdentity(handle, profilePath);
-	const initial = await readProcessSnapshot({ pid: spawned.pid, profilePath: spawned.profilePath, parentPid: spawned.parentPid });
+	const initial = await readProcessSnapshot({ pid: spawned.pid, profilePath: spawned.profilePath, parentPid: spawned.parentPid, timeoutMs });
 	if (initial.querySucceeded !== true || !initial.root || initial.root.pid !== spawned.pid || initial.root.ppid !== spawned.parentPid) {
 		throw new Error('New process root CIM snapshot is unavailable or has an unexpected parent.');
 	}
@@ -260,7 +293,7 @@ async function establishOwnedIdentity(handle, profilePath = '') {
 		parentPid: spawned.parentPid,
 		profilePath: spawned.profilePath
 	};
-	const verified = await readProcessSnapshot({ pid: expected.pid, creationUtc: expected.creationUtc, profilePath: expected.profilePath, parentPid: expected.parentPid });
+	const verified = await readProcessSnapshot({ pid: expected.pid, creationUtc: expected.creationUtc, profilePath: expected.profilePath, parentPid: expected.parentPid, timeoutMs });
 	if (!matchOwnedRootIdentity(verified, expected)) throw new Error('New process exact PID/birth/executable/parent/profile identity failed verification.');
 	return { expected, initialSnapshot: verified, knownProcesses: [verified.root, ...(verified.descendants || [])].filter(Boolean) };
 }
@@ -307,20 +340,21 @@ async function invokeOwnedTreeKill(identity, snapshot, processOps) {
 	return { command: taskkill, args: ['/PID', String(identity.pid), '/T', '/F'], exitCode: result.exitCode, error: result.error, stdout: result.stdout, stderr: result.stderr };
 }
 
-async function killVerifiedTree(identityRecord, handle, processOps, receipt, exitWaitMs = 0) {
+async function killVerifiedTree(identityRecord, handle, processOps, receipt, exitWaitMs = 0, snapshotTimeoutMs = PRODUCTION_BUDGETS.processSnapshotMs) {
 	if (!processAlive(handle)) return { attempted: false, alreadyExited: true };
 	const fresh = await readProcessSnapshot({
 		pid: identityRecord.expected.pid,
 		creationUtc: identityRecord.expected.creationUtc,
 		profilePath: identityRecord.expected.profilePath,
-		parentPid: identityRecord.expected.parentPid
+		parentPid: identityRecord.expected.parentPid,
+		timeoutMs: snapshotTimeoutMs
 	});
+	receipt.snapshots.push({ phase: 'pre-force-owned-tree', root: identityRecord.expected, snapshot: fresh });
 	if (!matchOwnedRootIdentity(fresh, identityRecord.expected)) {
 		if (await waitHandleExit(handle, exitWaitMs)) return { attempted: false, alreadyExited: true, rootIdentityNoLongerLive: true };
-		throw new Error('Refused taskkill because the live root no longer matches its exact owned identity.');
+		throw new Error('Refused taskkill because the live root no longer matches its exact owned identity.' + (fresh.querySucceeded !== true ? ' CIM inspection failed: ' + fresh.error : ''));
 	}
 	identityRecord.knownProcesses = pushKnown(identityRecord.knownProcesses || [], fresh.descendants || []);
-	receipt.snapshots.push({ phase: 'pre-force-owned-tree', root: identityRecord.expected, snapshot: fresh });
 	const result = await invokeOwnedTreeKill(identityRecord.expected, fresh, processOps);
 	receipt.killCommands.push({ identity: identityRecord.expected, result });
 	if (result?.exitCode !== 0) throw new Error(result?.error || 'Owned taskkill.exe returned a nonzero exit code.');
@@ -328,45 +362,34 @@ async function killVerifiedTree(identityRecord, handle, processOps, receipt, exi
 	return { attempted: true, result };
 }
 
-async function verifyOwnedGone(records, receipt, timeoutMs) {
+async function verifyOwnedGone(records, receipt, timeoutMs, snapshotTimeoutMs = PRODUCTION_BUDGETS.processSnapshotMs) {
 	const deadline = monotonicNow() + timeoutMs;
 	let latest = [];
+	const audits = records.flatMap((record) => [
+		...(record.identity.knownProcesses || []).map((entry) => ({ kind: 'process', record, expected: entry, request: { pid: entry.pid, creationUtc: entry.creationUtc } })),
+		...(record.identity.expected.profilePath ? [{ kind: 'profile', record, expected: record.identity.expected, request: { pid: record.identity.expected.pid, profilePath: record.identity.expected.profilePath } }] : [])
+	]);
+	if (!audits.length) throw new Error('No established owned process identities to verify.');
 	while (monotonicNow() <= deadline) {
 		latest = [];
 		for (const record of records) {
 			if (record.handle && processAlive(record.handle)) {
 				latest.push({ pid: record.identity.expected.pid, creationUtc: record.identity.expected.creationUtc, reason: 'owned process handle remains live' });
-				continue;
 			}
-			const expectedProcesses = record.identity.knownProcesses || [];
-			const snapshots = await Promise.all(expectedProcesses.map((entry) => readProcessSnapshot({
-				pid: entry.pid,
-				creationUtc: entry.creationUtc,
-				profilePath: '',
-				parentPid: 0
-			}).catch((error) => ({ querySucceeded: false, root: null, error: asError(error) }))));
-			receipt.snapshots.push({ phase: 'post-exit-known-process-audit', root: record.identity.expected, processes: expectedProcesses.map((entry, index) => ({ expected: entry, snapshot: snapshots[index] })) });
-			for (let index = 0; index < expectedProcesses.length; index += 1) {
-				const expectedProcess = expectedProcesses[index];
-				const snapshot = snapshots[index];
-				if (snapshot.querySucceeded !== true) {
-					latest.push({ pid: expectedProcess.pid, creationUtc: expectedProcess.creationUtc, reason: snapshot.error || 'CIM query failed' });
-				} else if (snapshot.root?.pid === expectedProcess.pid && snapshot.root.creationUtc === expectedProcess.creationUtc) {
-					latest.push({ pid: expectedProcess.pid, creationUtc: expectedProcess.creationUtc, reason: 'owned PID/birth identity remains present' });
-				}
-			}
-			if (record.identity.expected.profilePath) {
-				const profileSnapshot = await readProcessSnapshot({
-					pid: record.identity.expected.pid,
-					creationUtc: '',
-					profilePath: record.identity.expected.profilePath,
-					parentPid: 0
-				}).catch((error) => ({ querySucceeded: false, profileMatches: [], error: asError(error) }));
-				receipt.snapshots.push({ phase: 'post-exit-profile-audit', root: record.identity.expected, snapshot: profileSnapshot });
-				if (profileSnapshot.querySucceeded !== true) latest.push({ pid: record.identity.expected.pid, reason: profileSnapshot.error || 'profile query failed' });
-				else if (profileSnapshot.profileMatches?.length) {
-					for (const match of profileSnapshot.profileMatches) latest.push({ pid: match.pid, creationUtc: match.creationUtc, reason: 'exact browser profile token remains present' });
-				}
+		}
+		const remainingMs = Math.floor(deadline - monotonicNow());
+		if (remainingMs <= 0) { latest.push({ reason: 'process verification budget exhausted before inspection' }); break; }
+		const batch = await readProcessSnapshots(audits.map((audit) => audit.request), { timeoutMs: Math.min(snapshotTimeoutMs, remainingMs) });
+		receipt.snapshots.push({ phase: 'post-exit-batch-audit', inspectionId: batch.inspectionId, queryCount: batch.queryCount, querySucceeded: batch.querySucceeded, processes: audits.map((audit, index) => ({ kind: audit.kind, expected: audit.expected, snapshot: batch.snapshots[index] })) });
+		for (let index = 0; index < audits.length; index += 1) {
+			const { kind, expected } = audits[index];
+			const snapshot = batch.snapshots[index];
+			if (snapshot.querySucceeded !== true) {
+				latest.push({ pid: expected.pid, creationUtc: expected.creationUtc, reason: snapshot.error || 'CIM query failed' });
+			} else if (kind === 'process' && snapshot.root?.pid === expected.pid && snapshot.root.creationUtc === expected.creationUtc) {
+				latest.push({ pid: expected.pid, creationUtc: expected.creationUtc, reason: 'owned PID/birth identity remains present' });
+			} else if (kind === 'profile') {
+				for (const match of snapshot.profileMatches) latest.push({ pid: match.pid, creationUtc: match.creationUtc, reason: 'exact browser profile token remains present' });
 			}
 		}
 		if (!latest.length) {
@@ -992,7 +1015,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		const profileArgs = browserHandle.spawnargs.filter((arg) => /^--user-data-dir=/i.test(arg));
 		if (profileArgs.length !== 1) throw new Error('Playwright BrowserServer process handle does not expose one generated profile argument.');
 		const profilePath = profileArgs[0].slice(profileArgs[0].indexOf('=') + 1).replace(/^"|"$/g, '');
-		const browserOwned = await establishOwnedIdentity(browserHandle, profilePath);
+		const browserOwned = await establishOwnedIdentity(browserHandle, profilePath, selectedBudgets.processSnapshotMs);
 		browserIdentity = browserOwned;
 		receipt.snapshots.push({ phase: 'browser-root-established', snapshot: browserOwned.initialSnapshot });
 		receipt.launch = { pid: browserOwned.expected.pid, identity: browserOwned.expected, spawnargs: browserOwned.expected.spawnargs, descendants: browserOwned.knownProcesses };
@@ -1005,7 +1028,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			child.once('spawn', () => { childSpawned = true; resolve(); });
 			child.once('error', reject);
 		});
-		const childOwned = await establishOwnedIdentity(child);
+		const childOwned = await establishOwnedIdentity(child, '', selectedBudgets.processSnapshotMs);
 		childIdentity = childOwned;
 		receipt.snapshots.push({ phase: 'child-root-established', snapshot: childOwned.initialSnapshot });
 		receipt.child = { pid: childOwned.expected.pid, identity: childOwned.expected, descendants: childOwned.knownProcesses };
@@ -1013,7 +1036,8 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			pid: browserOwned.expected.pid,
 			creationUtc: browserOwned.expected.creationUtc,
 			profilePath: browserOwned.expected.profilePath,
-			parentPid: browserOwned.expected.parentPid
+			parentPid: browserOwned.expected.parentPid,
+			timeoutMs: selectedBudgets.processSnapshotMs
 		});
 		if (!matchOwnedRootIdentity(browserAfterChild, browserOwned.expected)) throw new Error('Browser root ownership changed before the child was started.');
 		receipt.snapshots.push({ phase: 'browser-tree-after-child-start', snapshot: browserAfterChild });
@@ -1171,7 +1195,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 		if (forceRequired || state.failure) {
 			await beginForcedReclamation(serverCloseError ? 'browser-server-close-fallback' : state.failure?.phase || 'forced-resource-cleanup');
 			for (const record of [browserRecord, childRecord].filter(Boolean)) {
-				try { await killVerifiedTree(record.identity, record.handle, processOps, receipt, record === childRecord ? selectedBudgets.childStopWaitMs : selectedBudgets.terminationMs); }
+				try { await killVerifiedTree(record.identity, record.handle, processOps, receipt, record === childRecord ? selectedBudgets.childStopWaitMs : selectedBudgets.terminationMs, selectedBudgets.processSnapshotMs); }
 				catch (error) {
 					const message = asError(error);
 					receipt.killFailures.push({ pid: record.identity.expected.pid, message });
@@ -1180,7 +1204,7 @@ export async function superviseOwnedJob({ job, run, persist, budgets = null, chi
 			}
 		}
 		const allRecords = [browserRecord, childRecord].filter(Boolean);
-		const verified = await verifyOwnedGone(allRecords, receipt, selectedBudgets.resourceVerificationMs).catch((error) => {
+		const verified = await verifyOwnedGone(allRecords, receipt, selectedBudgets.resourceVerificationMs, selectedBudgets.processSnapshotMs).catch((error) => {
 			receipt.error = receipt.error || asError(error);
 			return false;
 		});
@@ -1835,12 +1859,13 @@ export async function runIsolatedBaseline(argv = process.argv.slice(2), { diagno
 		metadata = {
 			schemaVersion: ISOLATED_SCHEMA,
 			method: ISOLATED_METHOD,
-			plan: 'BOMC-CP0-ISOLATION-001/v1.1',
+			plan: 'BOMC-CP0-ISOLATION-001/v1.2',
 			parentPlan: 'BOMC-LOADER-001/v1.0',
 			review: 'BOMC-LOADER-001/IMPLEMENTATION_REVIEW_2026-10-03_v1.3',
 			runId,
 			baseline: options.baseline,
 			suite: options.suite,
+			captureProfile: options.suite === 'diagnostic' ? 'actions-network-no-dom' : null,
 			scope: runState.scope,
 			capturedAt: new Date().toISOString(),
 			toolingCheckout: checkout,

@@ -923,7 +923,7 @@ export async function performModelAttempt({ browser, app, fixture, baseUrl, mode
 		page = await withNodeWatchdog(() => newPage(context, { appId: app.id, diagnostic, workerControl, channelName, diagnosticStreamToken, onDiagnosticEvent }), 5_000, 'Browser page creation');
 		Object.assign(errorCapture, installPageErrorCapture(page));
 		Object.assign(requestCapture, installRequestCapture(page));
-		if (diagnostic || workerControl) { await withNodeWatchdog(() => context.tracing.start({ screenshots: true, snapshots: true, sources: false }), 5_000, 'Trace start'); traceStarted = true; }
+		if (diagnostic || workerControl) { await withNodeWatchdog(() => context.tracing.start({ screenshots: false, snapshots: false, sources: false }), 5_000, 'Trace start'); traceStarted = true; }
 		await withNodeWatchdog(() => configure(page), 5_000, 'Browser context configuration');
 		await gotoApplication(page, app, baseUrl);
 		const selected = await selectFixture(page, app, fixture, (clock) => {
@@ -983,6 +983,7 @@ export async function performModelAttempt({ browser, app, fixture, baseUrl, mode
 			requestGraph: requestCapture.rows,
 			screenshotPath,
 			tracePath,
+			captureProfile: diagnostic || workerControl ? 'actions-network-no-dom' : null,
 			diagnostic: diagnosticData,
 			diagnosticErrors
 		});
@@ -1002,6 +1003,7 @@ export async function performModelAttempt({ browser, app, fixture, baseUrl, mode
 		outcomeText: outcome.text, lateOutcome: outcome.lateOutcome ?? null, postDeadlineObservation: outcome.postDeadlineObservation ?? null,
 		consoleErrors: errorCapture.console, pageErrors: errorCapture.page,
 		requestGraph: requestCapture.rows, screenshotPath, tracePath, diagnostic: diagnosticData,
+		captureProfile: diagnostic || workerControl ? 'actions-network-no-dom' : null,
 		diagnosticErrors, cleanupStatus: cleanupErrors.length ? 'failed' : 'complete', cleanupErrors
 	};
 	if (observerError) {
