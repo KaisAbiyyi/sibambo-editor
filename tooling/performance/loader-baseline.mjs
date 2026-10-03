@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 const PLAN = 'BOMC-LOADER-001/v1.0';
 const DEADLINE_MS = 120_000;
 const POLL_MS = 50;
-const APPS = [
+export const APPS = [
 	{ id: 'editor', selector: '[data-app="editor"]', basePort: 5175, path: '/', readySelector: '.editor-footer .footer-status', readyText: /^Ready$/i, errorSelectors: '[role="alert"], .empty-error' },
 	{ id: 'rooms', selector: '[data-app="rooms"]', basePort: 5174, path: '/', readySelector: '.footer-status', readyText: /^Viewport ready\b/i, errorSelectors: '[role="alert"], .import-dialog .error' },
 	{ id: 'benchmark', selector: '[data-app="benchmark-capture"]', basePort: 5173, path: '/capture', readySelector: '.run-bar .run-state', readyText: /^Renderer ready\b/i, errorSelectors: '[role="alert"], .error' }
@@ -24,7 +24,7 @@ const SUPPORTED_IDS = ['L-old', 'Y-old', 'I-old', 'S2-jcm'];
 const SUPPORTED_ID_SET = new Set(SUPPORTED_IDS);
 const V2_IDS = ['S1-new', 'S2-new', 'I-new', 'Y-new'];
 const V2_ID_SET = new Set(V2_IDS);
-const BROWSER_LAUNCH_ARGS = ['--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader'];
+export const BROWSER_LAUNCH_ARGS = ['--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader'];
 
 function monotonicEpochNow() { return performance.timeOrigin + performance.now(); }
 
@@ -76,7 +76,7 @@ export function parseArgs(args) {
 	return parsed;
 }
 
-function assertWithinRoot(root, locator) {
+export function assertWithinRoot(root, locator) {
 	if (path.isAbsolute(locator)) throw new Error(`Fixture locator must be relative to --workspace-root: ${locator}`);
 	const target = path.resolve(root, locator);
 	const relative = path.relative(path.resolve(root), target);
@@ -302,7 +302,7 @@ function readManifest(workspaceRoot, fixturePath) {
 	return { manifest, fixtures };
 }
 
-function appUrl(baseUrl, app) {
+export function appUrl(baseUrl, app) {
 	const url = new URL(baseUrl);
 	if (app.path !== '/') url.pathname = `${url.pathname.replace(/\/$/, '')}${app.path}`;
 	url.searchParams.set('renderer', 'webgl2');
@@ -310,7 +310,7 @@ function appUrl(baseUrl, app) {
 	return url.href;
 }
 
-async function readBuild(url, app, baseline) {
+export async function readBuild(url, app, baseline) {
 	const endpoint = new URL('/__build.json', url);
 	const response = await withNodeWatchdog(() => fetch(endpoint, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(5_000) }), 5_000, `${app.id} build identity request`);
 	if (!response.ok) throw new Error(`${app.id}: GET ${endpoint} returned HTTP ${response.status}.`);
@@ -465,85 +465,114 @@ export function makeFrameProbe() {
 }
 
 export function makeWorkerDiagnosticProbe(channelName) {
-	return (channel) => {
+	return (configuration) => {
+		const settings = typeof configuration === 'string' ? { channel: configuration, streamToken: null } : configuration || {};
+		const channel = settings.channel || channelName;
+		const streamToken = typeof settings.streamToken === 'string' ? settings.streamToken : null;
 		const NativeWorker = window.Worker;
 		const bus = new BroadcastChannel(channel);
 		const objectUrls = new Set();
 		const workers = new Set();
 		const events = [];
-		const emit = (event) => { events.push(event); bus.postMessage(event); };
+		let mainSequence = 0;
+		let nextWorkerId = 1;
+		const emit = (event) => {
+			const tagged = streamToken ? { ...event, streamToken, workerId: event.workerId ?? 'page', realm: 'main', seq: ++mainSequence } : event;
+			events.push(tagged);
+			bus.postMessage(tagged);
+			if (streamToken) console.debug('__BOMC_DIAG_V3__' + JSON.stringify(tagged));
+		};
 		bus.onmessage = (event) => events.push(event.data);
 		window.Worker = function Worker(url, options) {
 			if (!new.target) throw new TypeError("Failed to construct 'Worker': Please use the 'new' operator.");
 			const absolute = new URL(url, document.baseURI).href;
-			if (!/\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search)) {
+			const matched = /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search);
+			if (!matched) {
 				emit({ phase: 'unmatched-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
 				return options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
 			}
+			const workerId = String(nextWorkerId++);
 			const sourceUrl = absolute;
 			const moduleSource = `
 				const __channel = new BroadcastChannel(${JSON.stringify(channel)});
+				const __streamToken = ${JSON.stringify(streamToken)};
+				const __workerId = ${JSON.stringify(workerId)};
+				const __prefix = '__BOMC_DIAG_V3__';
 				const __epoch = () => performance.timeOrigin + performance.now();
+				let __seq = 0;
+				const __emit = (event) => {
+					const tagged = __streamToken ? { ...event, streamToken: __streamToken, workerId: __workerId, realm: 'worker', seq: ++__seq } : event;
+					__channel.postMessage(tagged);
+					if (__streamToken) console.debug(__prefix + JSON.stringify(tagged));
+				};
 				let __sourceBuffer = null;
-			let __moduleReady = false;
-			const __ingressQueue = [];
+				let __inputObserved = false;
+				let __moduleReady = false;
+				const __ingressQueue = [];
 				self.addEventListener('message', (event) => {
-					if (!__sourceBuffer && event.data && event.data.buffer instanceof ArrayBuffer) {
-						__sourceBuffer = event.data.buffer;
-						__channel.postMessage({ phase: 'worker-input-buffer', byteLength: __sourceBuffer.byteLength, epochMs: __epoch() });
+					const data = event.data;
+					if (data?.type === 'load' && !__inputObserved) {
+						__inputObserved = true;
+						if (data.buffer instanceof ArrayBuffer) __sourceBuffer = data.buffer;
+						__emit({ phase: 'worker-input', id: Number.isInteger(data.id) ? data.id : null, type: data.type, sourceName: typeof data.sourceName === 'string' ? data.sourceName : null, byteLength: data.buffer instanceof ArrayBuffer ? data.buffer.byteLength : null, epochMs: __epoch() });
+					} else if (data?.type === 'progress') {
+						const progress = data.progress && typeof data.progress === 'object' ? data.progress : {};
+						__emit({ phase: 'worker-progress', id: Number.isInteger(data.id) ? data.id : null, stage: typeof progress.stage === 'string' ? progress.stage : null, completed: Number.isFinite(progress.completed) ? progress.completed : null, total: Number.isFinite(progress.total) ? progress.total : null, unit: typeof progress.unit === 'string' ? progress.unit : null, epochMs: __epoch() });
 					}
 				}, true);
 				const __ingressGate = (event) => {
 					if (__moduleReady) return;
 					__ingressQueue.push({ data: event.data, origin: event.origin, lastEventId: event.lastEventId, source: event.source, ports: [...event.ports] });
-					__channel.postMessage({ phase: 'worker-ingress-queued', queueLength: __ingressQueue.length, epochMs: __epoch() });
+					__emit({ phase: 'worker-ingress-queued', queueLength: __ingressQueue.length, epochMs: __epoch() });
 					event.stopImmediatePropagation();
 				};
 				self.addEventListener('message', __ingressGate, true);
 				try {
 					const __originalDigest = crypto.subtle.digest.bind(crypto.subtle);
 					crypto.subtle.digest = function(algorithm, data) {
-						__channel.postMessage({ phase: 'worker-digest', algorithm: String(algorithm), byteLength: data?.byteLength ?? null, epochMs: __epoch() });
+						__emit({ phase: 'worker-digest', algorithm: String(algorithm), byteLength: data?.byteLength ?? null, epochMs: __epoch() });
 						return __originalDigest(algorithm, data);
 					};
-				} catch { __channel.postMessage({ phase: 'worker-digest-probe-unavailable', epochMs: __epoch() }); }
+				} catch { __emit({ phase: 'worker-digest-probe-unavailable', epochMs: __epoch() }); }
 				const __originalPostMessage = self.postMessage.bind(self);
 				self.postMessage = function(message, transferList) {
 					let graph = null;
 					if (message?.type === 'complete' && message.result) {
 						try {
 							const seen = new WeakSet(); const buffers = new Map(); const transfers = new Set(Array.isArray(transferList) ? transferList.filter((item) => item instanceof ArrayBuffer) : []);
-						let objects = 0, arrays = 0, views = 0, viewBytes = 0, bufferBytes = 0, nakedBuffers = 0, sharedBuffers = 0, classes = [];
+							let objects = 0, arrays = 0, views = 0, viewBytes = 0, bufferBytes = 0, nakedBuffers = 0, sharedBuffers = 0, classes = [];
 							const visit = (value, property) => {
 								if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return;
 								if (value instanceof ArrayBuffer) { if (!buffers.has(value)) { buffers.set(value, true); bufferBytes += value.byteLength; } if (property) nakedBuffers += 1; return; }
 								if (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer) { sharedBuffers += 1; return; }
 								if (ArrayBuffer.isView(value)) { views += 1; viewBytes += value.byteLength; if (!buffers.has(value.buffer)) { buffers.set(value.buffer, true); bufferBytes += value.buffer.byteLength; } return; }
 								if (seen.has(value)) return; seen.add(value); objects += 1; if (Array.isArray(value)) arrays += 1; else { const proto = Object.getPrototypeOf(value); if (proto !== Object.prototype && proto !== null) classes.push(value.constructor?.name || 'unknown'); } for (const key of Object.keys(value)) visit(value[key], !Array.isArray(value));
-								};
+							};
 							visit(message.result, false);
 							graph = { objects, arrays, views, viewBytes, uniqueBuffers: buffers.size, graphBufferBytes: bufferBytes, transferBufferCount: transfers.size, transferBytes: [...transfers].reduce((total, buffer) => total + buffer.byteLength, 0), viewBuffersMissingFromTransferList: [...buffers.keys()].filter((buffer) => !transfers.has(buffer)).length, sourceBufferRetainedBytes: __sourceBuffer?.byteLength ?? null, sourceBufferInTransferList: Boolean(__sourceBuffer && transfers.has(__sourceBuffer)), graphIncludesSourceBuffer: Boolean(__sourceBuffer && buffers.has(__sourceBuffer)), nakedArrayBufferProperties: nakedBuffers, sharedArrayBufferCount: sharedBuffers, nonPlainClasses: classes, runtimeCounts: { resultFacesLength: Number.isInteger(message.result?.faces?.length) ? message.result.faces.length : null, preparedRuntimeSceneGroupsLength: Number.isInteger(message.result?.preparedRuntimeScene?.groups?.length) ? message.result.preparedRuntimeScene.groups.length : null, sourceCounts: message.result?.counts ?? null } };
 						} catch (error) { graph = { error: String(error) }; }
 					}
 					const kind = message?.type ?? 'unknown';
-					const common = { type: kind, epochMs: __epoch(), transferCount: Array.isArray(transferList) ? transferList.length : 0, transferBytes: Array.isArray(transferList) ? transferList.filter((item) => item instanceof ArrayBuffer).reduce((total, item) => total + item.byteLength, 0) : 0 };
-					__channel.postMessage({ phase: 'worker-pre-post', ...common, graph });
+					const replyId = Number.isInteger(message?.id) ? message.id : null;
+					const common = { type: kind, id: replyId, epochMs: __epoch(), transferCount: Array.isArray(transferList) ? transferList.length : 0, transferBytes: Array.isArray(transferList) ? transferList.filter((item) => item instanceof ArrayBuffer).reduce((total, item) => total + item.byteLength, 0) : 0 };
+					__emit({ phase: 'worker-pre-post', ...common, graph });
 					const returned = __originalPostMessage(message, transferList);
-					__channel.postMessage({ phase: 'worker-post-return', type: kind, epochMs: __epoch() });
+					__emit({ phase: 'worker-post-return', type: kind, id: replyId, epochMs: __epoch() });
 					return returned;
 				};
 				(async () => {
 					try {
 						await import(${JSON.stringify(sourceUrl)});
 						__moduleReady = true;
+						__emit({ phase: 'worker-module-ready', url: ${JSON.stringify(sourceUrl)}, epochMs: __epoch() });
 						self.removeEventListener('message', __ingressGate, true);
 						for (const queued of __ingressQueue) {
 							self.dispatchEvent(new MessageEvent('message', { data: queued.data, origin: queued.origin, lastEventId: queued.lastEventId, source: queued.source, ports: queued.ports }));
-							__channel.postMessage({ phase: 'worker-ingress-replayed', queueLength: __ingressQueue.length, type: queued.data?.type ?? null, epochMs: __epoch() });
+							__emit({ phase: 'worker-ingress-replayed', queueLength: __ingressQueue.length, type: queued.data?.type ?? null, epochMs: __epoch() });
 						}
 						__ingressQueue.length = 0;
 					} catch (error) {
-						__channel.postMessage({ phase: 'worker-import-error', error: String(error), epochMs: __epoch() });
+						__emit({ phase: 'worker-import-error', error: String(error), epochMs: __epoch() });
 					}
 				})();
 			`;
@@ -552,17 +581,17 @@ export function makeWorkerDiagnosticProbe(channelName) {
 			const worker = options === undefined ? new NativeWorker(objectUrl, { type: 'module' }) : new NativeWorker(objectUrl, options);
 			workers.add(worker);
 			worker.addEventListener('message', (event) => {
-				if (event.data?.type === 'complete' || event.data?.type === 'error' || event.data?.type === 'cancelled') emit({ phase: 'main-receive', type: event.data.type, epochMs: performance.timeOrigin + performance.now() });
+				if (event.data?.type === 'complete' || event.data?.type === 'error' || event.data?.type === 'cancelled') emit({ phase: 'main-receive', type: event.data.type, id: Number.isInteger(event.data?.id) ? event.data.id : null, workerId, epochMs: performance.timeOrigin + performance.now() });
 			}, true);
 			const terminate = worker.terminate.bind(worker);
 			worker.terminate = () => { terminate(); URL.revokeObjectURL(objectUrl); objectUrls.delete(objectUrl); workers.delete(worker); };
-			emit({ phase: 'wrapped-worker', url: sourceUrl, epochMs: performance.timeOrigin + performance.now() });
+			emit({ phase: 'wrapped-worker', url: sourceUrl, workerId, epochMs: performance.timeOrigin + performance.now() });
 			return worker;
 		};
-	window.Worker.prototype = NativeWorker.prototype;
+		window.Worker.prototype = NativeWorker.prototype;
 		Object.setPrototypeOf(window.Worker, NativeWorker);
 		window.__loaderWorkerProbe = {
-			channel, events, workers, objectUrls,
+			channel, streamToken, events, workers, objectUrls,
 			cleanup() { for (const worker of [...workers]) worker.terminate(); for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl); objectUrls.clear(); bus.close(); }
 		};
 		try {
@@ -576,11 +605,21 @@ export function makeWorkerDiagnosticProbe(channelName) {
 }
 
 export function makeWorkerNativeControlProbe(channelName) {
-	return (channel) => {
+	return (configuration) => {
+		const settings = typeof configuration === 'string' ? { channel: configuration, streamToken: null } : configuration || {};
+		const channel = settings.channel || channelName;
+		const streamToken = typeof settings.streamToken === 'string' ? settings.streamToken : null;
 		const NativeWorker = window.Worker;
 		const bus = new BroadcastChannel(channel);
 		const events = [];
-		const emit = (event) => { events.push(event); bus.postMessage(event); };
+		let sequence = 0;
+		let nextWorkerId = 1;
+		const emit = (event) => {
+			const tagged = streamToken ? { ...event, streamToken, workerId: event.workerId ?? 'page', realm: 'main', seq: ++sequence } : event;
+			events.push(tagged);
+			bus.postMessage(tagged);
+			if (streamToken) console.debug('__BOMC_DIAG_V3__' + JSON.stringify(tagged));
+		};
 		bus.onmessage = (event) => events.push(event.data);
 		window.Worker = function Worker(url, options) {
 			if (!new.target) throw new TypeError("Failed to construct 'Worker': Please use the 'new' operator.");
@@ -588,15 +627,16 @@ export function makeWorkerNativeControlProbe(channelName) {
 			const matched = /\/e4-import\.worker[^/]*\.js(?:\?.*)?$/.test(new URL(absolute).pathname + new URL(absolute).search);
 			const worker = options === undefined ? new NativeWorker(url) : new NativeWorker(url, options);
 			if (matched) {
-				emit({ phase: 'native-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
-				worker.addEventListener('message', (event) => emit({ phase: 'native-main-receive', type: event.data?.type ?? null, id: event.data?.id ?? null, epochMs: performance.timeOrigin + performance.now() }), true);
-				worker.addEventListener('error', (event) => emit({ phase: 'native-worker-error', message: event.message, epochMs: performance.timeOrigin + performance.now() }), true);
+				const workerId = String(nextWorkerId++);
+				emit({ phase: 'native-worker', url: absolute, workerId, epochMs: performance.timeOrigin + performance.now() });
+				worker.addEventListener('message', (event) => emit({ phase: 'native-main-receive', type: event.data?.type ?? null, id: Number.isInteger(event.data?.id) ? event.data.id : null, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
+				worker.addEventListener('error', (event) => emit({ phase: 'native-worker-error', message: event.message, workerId, epochMs: performance.timeOrigin + performance.now() }), true);
 			} else emit({ phase: 'native-unmatched-worker', url: absolute, epochMs: performance.timeOrigin + performance.now() });
 			return worker;
 		};
 		window.Worker.prototype = NativeWorker.prototype;
 		Object.setPrototypeOf(window.Worker, NativeWorker);
-		window.__loaderWorkerControlProbe = { channel, events, cleanup() { bus.close(); } };
+		window.__loaderWorkerControlProbe = { channel, streamToken, events, cleanup() { bus.close(); } };
 	};
 }
 
@@ -639,11 +679,80 @@ function installPageErrorCapture(page) {
 	return errors;
 }
 
-async function newPage(context, { diagnostic = false, workerControl = false, channelName = null } = {}) {
+const DIAGNOSTIC_CONSOLE_PREFIX = '__BOMC_DIAG_V3__';
+const DIAGNOSTIC_MAX_EVENT_BYTES = 64 * 1024;
+const DIAGNOSTIC_MAX_EVENTS = 10_000;
+const DIAGNOSTIC_MAX_BYTES = 5 * 1024 * 1024;
+
+export function installDiagnosticConsoleStream(page, streamToken, onDiagnosticEvent) {
+	let eventCount = 0;
+	let byteCount = 0;
+	let invalid = false;
+	const eventIdentities = new Map();
+	const observedWorkers = new Map();
+	const markInvalid = (reason) => {
+		if (invalid) return;
+		invalid = true;
+		try { onDiagnosticEvent?.({ invalidDiagnostic: true, streamToken, reason, epochMs: monotonicEpochNow() }); } catch {}
+	};
+	const onConsole = (message) => {
+		const text = message.text();
+		if (!text.startsWith(DIAGNOSTIC_CONSOLE_PREFIX)) return;
+		const size = Buffer.byteLength(text, 'utf8');
+		if (size > DIAGNOSTIC_MAX_EVENT_BYTES) { markInvalid('event-size-limit'); return; }
+		if (eventCount + 1 > DIAGNOSTIC_MAX_EVENTS) { markInvalid('event-count-limit'); return; }
+		if (byteCount + size > DIAGNOSTIC_MAX_BYTES) { markInvalid('case-byte-limit'); return; }
+		let event;
+		try { event = JSON.parse(text.slice(DIAGNOSTIC_CONSOLE_PREFIX.length)); }
+		catch { markInvalid('malformed-json'); return; }
+		if (!event || typeof event !== 'object' || event.streamToken !== streamToken || typeof event.workerId !== 'string' || !event.workerId || !['main', 'worker'].includes(event.realm) || !Number.isInteger(event.seq) || event.seq < 1 || typeof event.phase !== 'string' || !Number.isFinite(event.epochMs)) {
+			markInvalid('invalid-token-or-event-shape');
+			return;
+		}
+		const identity = [event.streamToken, event.workerId, event.realm, event.seq].join('|');
+		const serialized = JSON.stringify(event);
+		if (eventIdentities.has(identity)) {
+			if (eventIdentities.get(identity) !== serialized) markInvalid('duplicate-identity-conflict');
+			return;
+		}
+		eventCount += 1;
+		byteCount += size;
+		eventIdentities.set(identity, serialized);
+		try { onDiagnosticEvent?.(event); }
+		catch (error) { markInvalid('forward-error:' + (error instanceof Error ? error.message : String(error))); }
+	};
+	const onWorker = (worker) => {
+		if (!worker || observedWorkers.has(worker)) return;
+		const detach = () => {
+			worker.removeListener('console', onConsole);
+			worker.removeListener('close', detach);
+			observedWorkers.delete(worker);
+		};
+		observedWorkers.set(worker, detach);
+		worker.on('console', onConsole);
+		worker.once('close', detach);
+	};
+	const remove = () => {
+		page.removeListener('console', onConsole);
+		page.removeListener('worker', onWorker);
+		for (const detach of [...observedWorkers.values()]) detach();
+	};
+	page.on('console', onConsole);
+	page.on('worker', onWorker);
+	page.once('close', remove);
+	return { get eventCount() { return eventCount; }, get byteCount() { return byteCount; }, get invalid() { return invalid; }, dispose: remove };
+}
+
+async function newPage(context, { diagnostic = false, workerControl = false, channelName = null, diagnosticStreamToken = null, onDiagnosticEvent = null } = {}) {
 	const page = await context.newPage();
+	const streamState = diagnostic || workerControl
+		? installDiagnosticConsoleStream(page, diagnosticStreamToken, onDiagnosticEvent)
+		: null;
+	if (streamState) page.__loaderDiagnosticStreamState = streamState;
 	await page.addInitScript(makeFrameProbe());
-	if (diagnostic) await page.addInitScript(makeWorkerDiagnosticProbe(channelName), channelName);
-	else if (workerControl) await page.addInitScript(makeWorkerNativeControlProbe(channelName), channelName);
+	const probeOptions = diagnosticStreamToken ? { channel: channelName, streamToken: diagnosticStreamToken } : channelName;
+	if (diagnostic) await page.addInitScript(makeWorkerDiagnosticProbe(channelName), probeOptions);
+	else if (workerControl) await page.addInitScript(makeWorkerNativeControlProbe(channelName), probeOptions);
 	return page;
 }
 
@@ -655,9 +764,9 @@ async function gotoApplication(page, app, baseUrl) {
 }
 
 async function selectFixture(page, app, fixture, onOpenClock = () => {}) {
-	const captureOpenClock = async () => {
+	const captureOpenClock = async (openAction) => {
 		const start = await page.evaluate(() => ({ perfMs: performance.now(), epochMs: performance.timeOrigin + performance.now() }));
-		onOpenClock(start);
+		onOpenClock({ ...start, openAction });
 		return start;
 	};
 	const payload = { name: path.basename(fixture.locator), mimeType: 'application/octet-stream', buffer: fixture.payloadBytes };
@@ -665,7 +774,7 @@ async function selectFixture(page, app, fixture, onOpenClock = () => {}) {
 		const chooserPromise = page.waitForEvent('filechooser', { timeout: 10_000 });
 		await page.locator('button.empty-open').click();
 		const chooser = await chooserPromise;
-		const start = await captureOpenClock();
+		const start = await captureOpenClock('native file selection accepted; Editor auto-opens on selection');
 		await chooser.setFiles(payload);
 		return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'native file selection accepted; Editor auto-opens on selection' };
 	}
@@ -674,13 +783,13 @@ async function selectFixture(page, app, fixture, onOpenClock = () => {}) {
 		await page.locator('dialog.import-dialog').waitFor({ state: 'visible', timeout: 10_000 });
 		await page.getByLabel('BOMC 1.2 file').setInputFiles(payload);
 		await page.getByRole('button', { name: 'Open and review' }).waitFor({ state: 'visible', timeout: 15_000 });
-		const start = await captureOpenClock();
+		const start = await captureOpenClock('Open and review submit');
 		await page.getByRole('button', { name: 'Open and review' }).click();
 		return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'Open and review submit' };
 	}
 	await page.getByLabel('BOMC 1.2 file').setInputFiles(payload);
 	await page.getByRole('button', { name: 'Open model file' }).last().waitFor({ state: 'visible', timeout: 15_000 });
-	const start = await captureOpenClock();
+	const start = await captureOpenClock('Open model file submit');
 	await page.getByRole('button', { name: 'Open model file' }).last().click();
 	return { startPerfMs: start.perfMs, startEpochMs: start.epochMs, openAction: 'Open model file submit' };
 }
@@ -734,7 +843,7 @@ async function readFrame(page, startPerfMs, readyPerfElapsedMs) {
 	}
 }
 
-async function makeContext(browser, { viewport = { width: 1440, height: 900 }, cacheDisabled = false, throttled = false } = {}) {
+export async function makeContext(browser, { viewport = { width: 1440, height: 900 }, cacheDisabled = false, throttled = false } = {}) {
 	const context = await browser.newContext({ viewport, deviceScaleFactor: 1, isMobile: false, hasTouch: false });
 	return { context, configure: async (page) => {
 		const cdp = await context.newCDPSession(page);
@@ -759,9 +868,28 @@ async function addFailureCapture(page, outputDir, id, timeoutMs = 10_000) {
 	catch { return null; }
 }
 
-async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outputDir, index, diagnostic = false, workerControl = false, expectedOutcome = 'ready', scenarioRowId = null, prime = false }) {
+export async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outputDir, index, diagnostic = false, workerControl = false, expectedOutcome = 'ready', scenarioRowId = null, prime = false, onAttemptEvent = null, diagnosticStreamToken = null, onDiagnosticEvent = null }) {
 	const id = `${app.id}-${fixture.id}-${mode}-${String(index).padStart(2, '0')}${diagnostic ? '-diagnostic' : ''}`;
 	const setupStart = performance.now();
+	const attemptId = scenarioRowId ?? id;
+	let observerError = null;
+	let appOutcomeEmitted = false;
+	const emitAttemptEvent = (type, payload) => {
+		if (typeof onAttemptEvent !== 'function' || observerError) return false;
+		try {
+			const result = onAttemptEvent({ type, attemptId, payload, emittedAtEpochMs: monotonicEpochNow() });
+			if (result && typeof result.then === 'function') throw new Error('onAttemptEvent must synchronously enqueue IPC observations.');
+			return true;
+		} catch (error) {
+			observerError = error instanceof Error ? error.message : String(error);
+			return false;
+		}
+	};
+	const emitOutcome = (value) => {
+		if (appOutcomeEmitted || typeof onAttemptEvent !== 'function') return;
+		appOutcomeEmitted = true;
+		emitAttemptEvent('app-outcome', { ...value, observedAtEpochMs: monotonicEpochNow() });
+	};
 	let context = null;
 	let page = null;
 	let configure = null;
@@ -780,17 +908,23 @@ async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outpu
 		const made = await withNodeWatchdog(() => makeContext(browser, { cacheDisabled: mode === 'cold' }), 5_000, 'Browser context creation');
 		context = made.context;
 		configure = made.configure;
-		page = await withNodeWatchdog(() => newPage(context, { diagnostic, workerControl, channelName }), 5_000, 'Browser page creation');
+		page = await withNodeWatchdog(() => newPage(context, { diagnostic, workerControl, channelName, diagnosticStreamToken, onDiagnosticEvent }), 5_000, 'Browser page creation');
 		Object.assign(errorCapture, installPageErrorCapture(page));
 		Object.assign(requestCapture, installRequestCapture(page));
 		if (diagnostic || workerControl) { await withNodeWatchdog(() => context.tracing.start({ screenshots: true, snapshots: true, sources: false }), 5_000, 'Trace start'); traceStarted = true; }
 		await withNodeWatchdog(() => configure(page), 5_000, 'Browser context configuration');
 		await gotoApplication(page, app, baseUrl);
-		const selected = await selectFixture(page, app, fixture, (clock) => { startPerfMs = clock.perfMs; startEpochMs = clock.epochMs; });
+		const selected = await selectFixture(page, app, fixture, (clock) => {
+			startPerfMs = clock.perfMs;
+			startEpochMs = clock.epochMs;
+			openAction = clock.openAction;
+			if (!emitAttemptEvent('open', { perfMs: clock.perfMs, epochMs: clock.epochMs, openAction })) throw new Error('Open observation could not be enqueued.');
+		});
 		startPerfMs ??= selected.startPerfMs;
 		startEpochMs ??= selected.startEpochMs;
 		openAction = selected.openAction;
 		outcome = await waitForOutcome(page, app, startPerfMs, startEpochMs);
+		emitOutcome(outcome);
 		const readySignal = outcome.kind === 'ready' ? outcome : outcome.lateOutcome?.kind === 'ready' ? outcome.lateOutcome : outcome.postDeadlineObservation?.outcome?.kind === 'ready' ? outcome.postDeadlineObservation : null;
 		if (readySignal) frame = await readFrame(page, startPerfMs, readySignal.observedElapsedMs ?? readySignal.elapsedMs ?? DEADLINE_MS);
 		if (outcome.kind === 'ready' && !frame) outcome = { ...outcome, kind: 'failed-no-valid-frame', text: 'App reported ready without observable connected positive-size WebGL draw frame.' };
@@ -799,6 +933,7 @@ async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outpu
 		outcome = startEpochMs === null
 			? { kind: 'setup-error', text: errorText, elapsedMs: null }
 			: { kind: 'failed-after-open', text: errorText, elapsedMs: Math.max(0, Date.now() - startEpochMs) };
+		if (!appOutcomeEmitted && !observerError) emitOutcome({ ...outcome, observationError: true });
 	}
 	const diagnosticErrors = [];
 	if ((diagnostic || workerControl) && page) {
@@ -822,11 +957,30 @@ async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outpu
 	}
 	let screenshotPath = null;
 	if (page && !['ready', 'expected-rejection'].includes(outcome.kind)) screenshotPath = await addFailureCapture(page, outputDir, id, outcome.kind === 'timeout' ? 1_000 : 4_500);
+	if (typeof onAttemptEvent === 'function') {
+		emitAttemptEvent('evidence', {
+			status: outcome.kind,
+			startedAtEpochMs: startEpochMs,
+			elapsedMs: outcome.elapsedMs,
+			firstValidFrame: frame,
+			outcomeText: outcome.text,
+			lateOutcome: outcome.lateOutcome ?? null,
+			postDeadlineObservation: outcome.postDeadlineObservation ?? null,
+			consoleErrors: errorCapture.console,
+			pageErrors: errorCapture.page,
+			requestGraph: requestCapture.rows,
+			screenshotPath,
+			tracePath,
+			diagnostic: diagnosticData,
+			diagnosticErrors
+		});
+		emitAttemptEvent('cleanup-start', {});
+	}
 	const cleanupErrors = [];
 	if (page) try { await withNodeWatchdog(() => page.close(), 5_000, 'Page cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
 	if (context) try { await withNodeWatchdog(() => context.close(), 5_000, 'Context cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
 	const row = {
-		id: scenarioRowId ?? id, scenarioRowId, kind: prime ? 'prime' : diagnostic ? 'diagnostic' : 'model', baseline: null,
+		id: attemptId, scenarioRowId: attemptId, kind: prime ? 'prime' : diagnostic ? 'diagnostic' : 'model', baseline: null,
 		app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
 		mode, attempt: index, prime, openAction,
 		status: cleanupErrors.length ? 'harness-error-cleanup' : prime && outcome.kind === 'ready' ? 'prime-excluded' : outcome.kind,
@@ -838,16 +992,27 @@ async function performModelAttempt({ browser, app, fixture, baseUrl, mode, outpu
 		requestGraph: requestCapture.rows, screenshotPath, tracePath, diagnostic: diagnosticData,
 		diagnosticErrors, cleanupStatus: cleanupErrors.length ? 'failed' : 'complete', cleanupErrors
 	};
+	if (observerError) {
+		row.observerError = observerError;
+		row.status = 'harness-error-observer';
+	}
 	if (startEpochMs !== null) row.startedAt = new Date(startEpochMs).toISOString();
+	if (typeof onAttemptEvent === 'function') emitAttemptEvent('attempt-result', { row });
 	return row;
 }
 
-async function performExpectedRejection({ browser, app, fixture, baseUrl, outputDir, scenarioRowId }) {
-	const row = await performModelAttempt({ browser, app, fixture, baseUrl, mode: 'cold', outputDir, index: 1, expectedOutcome: 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview', scenarioRowId });
+export async function performExpectedRejection({ browser, app, fixture, baseUrl, outputDir, scenarioRowId, onAttemptEvent = null }) {
+	let pendingResultEvent = null;
+	const relayEvent = onAttemptEvent ? (event) => {
+		if (event.type === 'attempt-result') { pendingResultEvent = event; return; }
+		return onAttemptEvent(event);
+	} : null;
+	const row = await performModelAttempt({ browser, app, fixture, baseUrl, mode: 'cold', outputDir, index: 1, expectedOutcome: 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview', scenarioRowId, onAttemptEvent: relayEvent });
 	const expected = /^BOMC invalid: material section version\.$/i.test((row.outcomeText ?? '').trim());
 	row.status = row.status === 'error' && expected && row.firstValidFrame === null && row.openOccurred ? 'expected-rejection' : row.status === 'timeout' ? 'timeout' : 'failed';
 	row.expectedOutcome = 'BOMC 1.2 MATERIALS v2 rejected before geometry/preview';
 	row.rejectionMessageMatchesB0 = expected && row.firstValidFrame === null;
+	if (pendingResultEvent) onAttemptEvent(pendingResultEvent);
 	return row;
 }
 
@@ -1009,7 +1174,7 @@ async function performBootAttempt({ browser, context: reusedContext = null, app,
 	return row;
 }
 
-async function discoverBrowserEnvironment(browser) {
+export async function discoverBrowserEnvironment(browser) {
 	let context = null;
 	let page = null;
 	let webgl = null;
@@ -1041,7 +1206,7 @@ async function discoverBrowserEnvironment(browser) {
 	};
 }
 
-function stableEnvironment(environment) {
+export function stableEnvironment(environment) {
 	const { capturedAt, ...stable } = environment;
 	return stable;
 }
@@ -1236,9 +1401,28 @@ async function runModelSuite({ browser, apps, fixtures, urls, outputDir, baselin
 	return { summaries, rowCount: rows.length, outputFile: file, matrix, ...acceptance, allPrimeRowsPass: acceptance.allPrimeRowsPass, rejectionRows: rejectionRows.map(({ id, app, fixtureId, status, outcomeText, firstValidFrame, rejectionMessageMatchesB0 }) => ({ id, app, fixtureId, status, outcomeText, firstValidFrame, rejectionMessageMatchesB0 })), seriesAudits };
 }
 
-async function performModelAttemptInContext({ context, browser, app, fixture, baseUrl, mode, outputDir, index, prime = false, expectedOutcome = 'ready', scenarioRowId = null }) {
+export async function performModelAttemptInContext({ context, browser, app, fixture, baseUrl, mode, outputDir, index, prime = false, expectedOutcome = 'ready', scenarioRowId = null, onAttemptEvent = null }) {
 	const id = scenarioRowId ?? modelRowId(app.id, fixture.id, mode, index, prime);
 	const setupStart = performance.now();
+	const attemptId = id;
+	let observerError = null;
+	let appOutcomeEmitted = false;
+	const emitAttemptEvent = (type, payload) => {
+		if (typeof onAttemptEvent !== 'function' || observerError) return false;
+		try {
+			const result = onAttemptEvent({ type, attemptId, payload, emittedAtEpochMs: monotonicEpochNow() });
+			if (result && typeof result.then === 'function') throw new Error('onAttemptEvent must synchronously enqueue IPC observations.');
+			return true;
+		} catch (error) {
+			observerError = error instanceof Error ? error.message : String(error);
+			return false;
+		}
+	};
+	const emitOutcome = (value) => {
+		if (appOutcomeEmitted || typeof onAttemptEvent !== 'function') return;
+		appOutcomeEmitted = true;
+		emitAttemptEvent('app-outcome', { ...value, observedAtEpochMs: monotonicEpochNow() });
+	};
 	let page = null;
 	const errorCapture = { console: [], page: [] };
 	const requestCapture = { rows: [], responses: new Map() };
@@ -1252,11 +1436,17 @@ async function performModelAttemptInContext({ context, browser, app, fixture, ba
 		Object.assign(errorCapture, installPageErrorCapture(page));
 		Object.assign(requestCapture, installRequestCapture(page));
 		await gotoApplication(page, app, baseUrl);
-		const selected = await selectFixture(page, app, fixture, (clock) => { startPerfMs = clock.perfMs; startEpochMs = clock.epochMs; });
+		const selected = await selectFixture(page, app, fixture, (clock) => {
+			startPerfMs = clock.perfMs;
+			startEpochMs = clock.epochMs;
+			openAction = clock.openAction;
+			if (!emitAttemptEvent('open', { perfMs: clock.perfMs, epochMs: clock.epochMs, openAction })) throw new Error('Open observation could not be enqueued.');
+		});
 		startPerfMs ??= selected.startPerfMs;
 		startEpochMs ??= selected.startEpochMs;
 		openAction = selected.openAction;
 		outcome = await waitForOutcome(page, app, startPerfMs, startEpochMs);
+		emitOutcome(outcome);
 		const readySignal = outcome.kind === 'ready' ? outcome : outcome.lateOutcome?.kind === 'ready' ? outcome.lateOutcome : outcome.postDeadlineObservation?.outcome?.kind === 'ready' ? outcome.postDeadlineObservation : null;
 		if (readySignal) frame = await readFrame(page, startPerfMs, readySignal.observedElapsedMs ?? readySignal.elapsedMs ?? DEADLINE_MS);
 		if (outcome.kind === 'ready' && !frame) outcome = { ...outcome, kind: 'failed-no-valid-frame', text: 'App reported ready without observable connected positive-size WebGL draw frame.' };
@@ -1265,18 +1455,42 @@ async function performModelAttemptInContext({ context, browser, app, fixture, ba
 		outcome = startEpochMs === null
 			? { kind: 'setup-error', text: errorText, elapsedMs: null }
 			: { kind: 'failed-after-open', text: errorText, elapsedMs: Math.max(0, Date.now() - startEpochMs) };
+		if (!appOutcomeEmitted && !observerError) emitOutcome({ ...outcome, observationError: true });
 	}
 	const screenshotPath = page && !['ready', 'expected-rejection', 'error'].includes(outcome.kind) ? await addFailureCapture(page, outputDir, id) : null;
+	if (typeof onAttemptEvent === 'function') {
+		emitAttemptEvent('evidence', {
+			status: outcome.kind,
+			startedAtEpochMs: startEpochMs,
+			elapsedMs: outcome.elapsedMs,
+			firstValidFrame: frame,
+			outcomeText: outcome.text,
+			lateOutcome: outcome.lateOutcome ?? null,
+			postDeadlineObservation: outcome.postDeadlineObservation ?? null,
+			consoleErrors: errorCapture.console,
+			pageErrors: errorCapture.page,
+			requestGraph: requestCapture.rows,
+			diagnostic: null,
+			diagnosticErrors: []
+		});
+		emitAttemptEvent('cleanup-start', {});
+	}
 	const cleanupErrors = [];
 	if (page) try { await withNodeWatchdog(() => page.close(), 5_000, 'Warm page cleanup'); } catch (error) { cleanupErrors.push(error instanceof Error ? error.message : String(error)); }
 	const row = {
-		id, scenarioRowId: id, kind: prime ? 'prime' : 'model', app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
+		id: attemptId, scenarioRowId: attemptId, kind: prime ? 'prime' : 'model', app: app.id, fixtureId: fixture.id, fixtureSha256: fixture.sha256, fixtureBytes: fixture.bytes,
 		mode, attempt: index, prime, openAction, status: cleanupErrors.length ? 'harness-error-cleanup' : prime && outcome.kind === 'ready' ? 'prime-excluded' : outcome.kind,
 		expectedOutcome, openOccurred: startEpochMs !== null, setupDurationMs: performance.now() - setupStart, startedAtEpochMs: startEpochMs, elapsedMs: outcome.elapsedMs, firstValidFrame: frame,
 		outcomeText: outcome.text, lateOutcome: outcome.lateOutcome ?? null, postDeadlineObservation: outcome.postDeadlineObservation ?? null,
 		consoleErrors: errorCapture.console, pageErrors: errorCapture.page,
 		requestGraph: requestCapture.rows, screenshotPath, cleanupStatus: cleanupErrors.length ? 'failed' : 'complete', cleanupErrors
 	};
+	if (observerError) {
+		row.observerError = observerError;
+		row.status = 'harness-error-observer';
+	}
+	if (startEpochMs !== null) row.startedAt = new Date(startEpochMs).toISOString();
+	if (typeof onAttemptEvent === 'function') emitAttemptEvent('attempt-result', { row });
 	return row;
 }
 
