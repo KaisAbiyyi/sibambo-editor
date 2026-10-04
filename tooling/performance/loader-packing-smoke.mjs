@@ -69,6 +69,10 @@ export function parsePackingSmokeArgs(argv) {
 	return { workspaceRoot, output };
 }
 
+export function adapterNodeBuildEntry(editorRoot) {
+	return path.join(editorRoot, 'apps', 'editor', 'build', 'index.js');
+}
+
 function stableJson(value) {
 	if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
 	if (value && typeof value === 'object') {
@@ -480,7 +484,7 @@ export async function runPackingSmoke({ workspaceRoot, output }) {
 		if (localIdentity.commit !== gitIdentity.head || localIdentity.dirty !== false || !gitIdentity.clean) fail('Local build helper did not identify a clean current candidate commit.');
 		const listenersBefore = await readPortListeners(SERVER_PORT);
 		if (listenersBefore.length !== 0) fail(`Refusing to attach to an existing listener on port ${SERVER_PORT}.`);
-		const serverEntry = path.join(editorRoot, 'build', 'index.js');
+		const serverEntry = adapterNodeBuildEntry(editorRoot);
 		if (!existsSync(serverEntry)) fail('Checked adapter-node build is missing apps/editor/build/index.js.');
 		stdoutLog = openSync(path.join(outputRoot, 'server.stdout.log'), 'a');
 		stderrLog = openSync(path.join(outputRoot, 'server.stderr.log'), 'a');

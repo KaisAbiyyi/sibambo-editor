@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmdirSync } from 'node:fs';
 import path from 'node:path';
-import { evaluatePackingSmokeCase, parsePackingSmokeArgs } from './loader-packing-smoke.mjs';
+import { adapterNodeBuildEntry, evaluatePackingSmokeCase, parsePackingSmokeArgs } from './loader-packing-smoke.mjs';
 
 const WORKSPACE_ROOT = path.resolve(process.cwd(), '..');
 const WORKLOG_ROOT = path.join(WORKSPACE_ROOT, 'docs', 'worklogs', 'BOMC-LOADER-001');
@@ -10,6 +10,13 @@ const PINNED_FIXTURE = {
 	bytes: 3_354_834,
 	sha256: '39851b73848aa42cb742e1be6230965327a41c31ec6b1051848304ac09faf637'
 };
+
+describe('BOMC packing smoke build path', () => {
+	test('uses the Editor app adapter-node output beneath the repository root', () => {
+		const editorRoot = path.resolve('candidate-editor');
+		expect(adapterNodeBuildEntry(editorRoot)).toBe(path.join(editorRoot, 'apps', 'editor', 'build', 'index.js'));
+	});
+});
 
 function buildIdentity() {
 	return {
