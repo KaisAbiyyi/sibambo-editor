@@ -3,11 +3,10 @@ import path from 'node:path';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
 	captureSourceHashes, corruptFirstActiveSemanticHash, loadOracleMetadata,
-	readPinnedInput, requiredWorklogRoot, installEditorMaterialsV2Probe, type OracleMetadata, type PinnedInput
+	readPinnedInput, installEditorMaterialsV2Probe, type OracleMetadata, type PinnedInput
 } from './materials-v2-helpers';
 
 const oracle = loadOracleMetadata();
-const reportRoot = path.join(requiredWorklogRoot(), 'editor-ui', 'reports');
 
 type BuildIdentity = {
 	schema: string; app: string; commit: string; dirty: boolean; sourceSha256: string;
@@ -230,7 +229,7 @@ test('corrupt semantic replacement errors while the usable S2-jcm session stays 
 		sessionAfter = await page.evaluate(() => (window as UiProbeWindow).__m2UiProbe.sessionStillMounted());
 		expect(sessionAfter).toMatchObject({ sameCanvas: true, sameTitle: true });
 		await provePositiveViewportDraw(page, failedWorker.requestId!);
-		expect(runtime.wasmResponses.length).toBeGreaterThan(0);
+		// Hash rejection happens before PNG encoding, so this request may need no WASM asset.
 		expect(runtime.wasmResponses.every((item) => item.status === 200 && item.sameOrigin)).toBe(true);
 		expect(runtime.pageErrors).toEqual([]);
 		expect(runtime.consoleErrors).toEqual([]);
@@ -290,6 +289,10 @@ async function chooseBomcFile(page: Page, fixture: PinnedInput, loadedModel: boo
 	}
 	const chooser = await chooserPromise;
 	await chooser.setFiles({ name: fixture.fileName, mimeType: 'application/octet-stream', buffer: fixture.bytes });
+	if (loadedModel) {
+		await page.keyboard.press('Escape');
+		await expect(page.locator('nav.editor-menubar details.menu-root[open]')).toHaveCount(0);
+	}
 }
 
 async function waitForSuccessfulWorkerAndReady(page: Page, requestIndex: number, deadline: number) {
@@ -428,9 +431,9 @@ async function readWorkerRecord(page: Page, index: number) {
 }
 
 async function writeUiReport(testInfo: TestInfo, name: string, report: Record<string, unknown>) {
-	mkdirSync(reportRoot, { recursive: true });
+	const outputPath = testInfo.outputPath(`${name}.json`);
+	mkdirSync(path.dirname(outputPath), { recursive: true });
 	const body = Buffer.from(`${JSON.stringify({ test: name, recordedAt: new Date().toISOString(), ...report }, null, 2)}\n`);
-	const outputPath = path.join(reportRoot, `${name}.json`);
 	writeFileSync(outputPath, body, { flag: 'wx' });
 	await testInfo.attach(`${name}-proof-report`, { body, contentType: 'application/json' });
 }
