@@ -109,6 +109,24 @@ export type BomcWorkerTransferDiagnostics = {
 	totalPackingMs: number;
 };
 
+export type BomcSemanticMaterialDiagnostics = {
+	sectionVersion: 1 | 2 | null;
+	activeCount: number;
+	verifiedCount: number;
+	generatedAssetCount: number;
+	generatedPngBytes: number;
+	baseDecodeCount: number;
+	maxLiveBaseFrames: number;
+	maxLiveOutputFrames: number;
+	maxMemoEntries: number;
+	totalMs: number;
+	baseDecodes: Array<{ textureIndex: number; sourceMedia: number; width: number; height: number; decodeMs: number }>;
+	materialProofs: Array<{
+		materialIndex: number; textureIndex: number; mode: 1 | 2; expectedRgbaSha256: string; actualRgbaSha256: string;
+		assetPath: string; colorizeMs: number; hashMs: number; encodeMs: number; reusedAsset: boolean;
+	}>;
+};
+
 export type BomcDiagnostics = {
 	version: string;
 	profile: 'production' | 'debug';
@@ -220,6 +238,7 @@ export type BomcDiagnostics = {
 	provenance?: BomcProvenance;
 	encodingContract?: BomcEncodingContract;
 	workerTransfer?: BomcWorkerTransferDiagnostics;
+	semanticMaterials?: BomcSemanticMaterialDiagnostics;
 };
 
 export type ProgressiveBomcCallbacks = {

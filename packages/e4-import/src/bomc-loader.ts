@@ -6,7 +6,9 @@ import { assertBomcArrayBytes, assertBomcCount, assertExpectedBomcCount, BomcBin
 import { BomcContainer } from './container';
 import { decodeNormalSection, decodePositionBlock, decodeTopologyBlock, decodeTransformSection, decodeUvBlock } from './codecs';
 import { decodeBomcJcmToPng, digestSha256 } from './jpeg-color-map';
-import { BOMC_SECTION, type AdaptedBomcResult, type BomcCoverage, type BomcEncodingContract, type BomcTextureMetric, type ProgressiveBomcCallbacks } from './types';
+import { colorizeRgba } from './semantic-colorize';
+import { defaultImagePixelCodec, type ImagePixelCodec, type PixelFrame, type SemanticImageMedia } from './image-pixel-codec';
+import { BOMC_SECTION, type AdaptedBomcResult, type BomcCoverage, type BomcEncodingContract, type BomcSemanticMaterialDiagnostics, type BomcTextureMetric, type ProgressiveBomcCallbacks } from './types';
 
 const REQUIRED_SECTIONS = [
 	BOMC_SECTION.MODEL, BOMC_SECTION.STRINGS, BOMC_SECTION.DEFINITIONS,
@@ -23,6 +25,8 @@ type ModelRecord = {
 type MaterialRecord = {
 	name?: string; displayName?: string; rgba: [number, number, number, number]; opacity: number;
 	texture: number; textureWidthM: number; textureHeightM: number;
+	semantic?: { materialType: 0 | 1 | 2; colorizeMode: 0 | 1 | 2; deltas: [number, number, number]; outputRgbaSha256: string };
+	renderTextureAsset?: string;
 };
 type TagRecord = { name?: string; visible: boolean };
 type MeshRow = {
@@ -41,7 +45,7 @@ type InstanceRecord = {
 	name?: string; kind: number; owner: number; definition: number; transform: number; material: number; tag: number;
 	visible: boolean; fallback: boolean; roleCode: number; label?: string;
 };
-type TextureRecord = { media: number; width: number; height: number; hash: string; bytes: Uint8Array; assetPath: string; payloadByteLength: number };
+type TextureRecord = { media: number; sourceMedia: number; encodedHashVerified: boolean; width: number; height: number; hash: string; bytes: Uint8Array; assetPath: string; payloadByteLength: number };
 type FallbackRecord = { instance: number; kind: number; position: [number, number, number]; width: number; height: number; texture: number; text?: string };
 type Occurrence = {
 	matrix: Matrix4;
@@ -69,6 +73,10 @@ type SceneVisibilityIndex = {
 	bySignature: Map<string, SceneProfile>;
 	hasFaceOverrides: boolean;
 };
+
+function isActiveSemanticMaterial(material: MaterialRecord) {
+	return material.semantic?.materialType === 2 && (material.semantic.colorizeMode === 1 || material.semantic.colorizeMode === 2);
+}
 
 export function bomcRenderVertexKey(
 	sourceIndex: number,
@@ -114,7 +122,11 @@ export class BomcLoader {
 		const strings = await decodeReleased(container, BOMC_SECTION.STRINGS, decodeStrings);
 		const model = await decodeReleased(container, BOMC_SECTION.MODEL, (bytes) => decodeModel(bytes, strings));
 		validateCountedSections(container, model.counts);
-		const materials = container.has(BOMC_SECTION.MATERIALS) ? await decodeReleased(container, BOMC_SECTION.MATERIALS, (bytes) => decodeMaterials(bytes, strings, model.counts.materials)) : [];
+		let materialSectionVersion: 1 | 2 | null = null;
+		const materials = container.has(BOMC_SECTION.MATERIALS) ? await decodeReleased(container, BOMC_SECTION.MATERIALS, (bytes) => {
+			if (bytes[0] === 1 || bytes[0] === 2) materialSectionVersion = bytes[0];
+			return decodeMaterials(bytes, strings, model.counts.materials);
+		}) : [];
 		const tags = container.has(BOMC_SECTION.TAGS) ? await decodeReleased(container, BOMC_SECTION.TAGS, (bytes) => decodeTags(bytes, strings, model.counts.tags)) : [];
 		const definitions = await decodeReleased(container, BOMC_SECTION.DEFINITIONS, (bytes) => decodeDefinitions(bytes, strings, model.counts.definitions));
 		const instances = await decodeReleased(container, BOMC_SECTION.INSTANCES, (bytes) => decodeInstances(bytes, strings, model.counts.instances));
@@ -169,22 +181,26 @@ export class BomcLoader {
 			const blobs = await container.load(BOMC_SECTION.TEXTURE_BLOBS) as Uint8Array;
 			try {
 				textures = await decodeTextures(table, blobs, { isCancelled: callbacks?.isCancelled, expectedCount: model.counts.textures });
-				for (let i = 0; i < textures.length; i += 1) {
-					if (firstTextureReadyMs === undefined) firstTextureReadyMs = performance.now() - totalStarted;
-					callbacks?.onTextureReady?.({ path: textures[i].assetPath, bytes: textures[i].bytes }, { loaded: i + 1, total: textures.length });
-				}
 			} finally {
 				container.release(BOMC_SECTION.TEXTURE_TABLE);
 				container.release(BOMC_SECTION.TEXTURE_BLOBS);
 			}
 		}
-		const allTexturesReadyMs = performance.now() - totalStarted;
 		const textureTableMs = performance.now() - textureStarted;
 		const fallback = container.has(BOMC_SECTION.FALLBACK)
 			? await decodeReleased(container, BOMC_SECTION.FALLBACK, (bytes) => decodeFallback(bytes, strings))
 			: [];
 
 		validateReferences(model, materials, tags, meshes, definitions, instances, transforms, textures, coverage, fallback);
+		const semanticResult = await hydrateSemanticMaterials(materials, textures, { isCancelled: callbacks?.isCancelled });
+		const textureAssets = [...textures.map((texture) => ({ path: texture.assetPath, bytes: texture.bytes })), ...semanticResult.assets];
+		for (let index = 0; index < textureAssets.length; index += 1) {
+			if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
+			if (firstTextureReadyMs === undefined) firstTextureReadyMs = performance.now() - totalStarted;
+			callbacks?.onTextureReady?.(textureAssets[index], { loaded: index + 1, total: textureAssets.length });
+			if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
+		}
+		const allTexturesReadyMs = performance.now() - totalStarted;
 		const instanceStarted = performance.now();
 		const collectOccurrencesStarted = performance.now();
 		const occurrences = collectOccurrences(model.rootNode, definitions, instances, transforms, tags, container.has(BOMC_SECTION.SCENES));
@@ -225,7 +241,9 @@ export class BomcLoader {
 		const instanceConstructionMs = performance.now() - instanceStarted;
 		const firstRenderableMs = performance.now() - totalStarted;
 
+		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
 		callbacks?.onGeometryReady?.(scene, faces);
+		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
 
 		const appearance = {
 			materials: runtimeMaterials.map((material, index) => ({
@@ -235,11 +253,11 @@ export class BomcLoader {
 				baseColorRgba: material.rgba.map((value) => value / 255) as [number, number, number, number],
 				opacity: material.opacity,
 				colorSpace: 'srgb',
-				textureAsset: material.texture === MISSING ? undefined : textures[material.texture]?.assetPath,
+				textureAsset: materialTexturePath(material, textures),
 				textureWidthM: material.textureWidthM,
 				textureHeightM: material.textureHeightM
 			})),
-			assets: textures.map((texture) => ({ path: texture.assetPath, bytes: texture.bytes }))
+			assets: textureAssets
 		};
 		const totalReadyMs = performance.now() - totalStarted;
 		const frontTriangleCount = scene.groups
@@ -308,6 +326,7 @@ export class BomcLoader {
 			},
 			provenance,
 			encodingContract,
+			semanticMaterials: { ...semanticResult.diagnostics, sectionVersion: materialSectionVersion },
 			sectionMetrics: container.metrics.map((metric) => ({ ...metric })),
 			timings: {
 				coreMetadataReadyMs,
@@ -397,8 +416,15 @@ export class BomcLoader {
 			diagnostics
 		};
 
+		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
 		callbacks?.onFirstRenderable?.(adaptedResult);
-		if (appearance.assets.length > 0) callbacks?.onAllTexturesReady?.(appearance.assets);
+		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
+		if (appearance.assets.length > 0) {
+			if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
+			callbacks?.onAllTexturesReady?.(appearance.assets);
+			if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
+		}
+		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
 		callbacks?.onComplete?.(adaptedResult);
 
 		return adaptedResult;
@@ -431,7 +457,7 @@ function validateCountedSections(container: BomcContainer, counts: AdaptedBomcRe
 	}
 }
 
-function decodeStrings(bytes: Uint8Array) {
+export function decodeStrings(bytes: Uint8Array) {
 	const reader = new BomcBinaryReader(bytes);
 	if (reader.readUint8() !== 1 || reader.readUint8() !== 0 || reader.readUint8() !== 0 || reader.readUint8() !== 0) throw new Error('BOMC invalid: string section header.');
 	const count = reader.readCount('string');
@@ -449,7 +475,7 @@ function decodeStrings(bytes: Uint8Array) {
 	return Array.from({ length: count }, (_, index) => decoder.decode(data.subarray(offsets[index], offsets[index + 1])));
 }
 
-function decodeModel(bytes: Uint8Array, strings: string[]): ModelRecord {
+export function decodeModel(bytes: Uint8Array, strings: string[]): ModelRecord {
 	const reader = new BomcBinaryReader(bytes);
 	if (reader.readUint8() !== 1) throw new Error('BOMC invalid: model section version.');
 	const profileCode = reader.readUint8();
@@ -474,16 +500,19 @@ function decodeModel(bytes: Uint8Array, strings: string[]): ModelRecord {
 	};
 }
 
-function decodeMaterials(bytes: Uint8Array, strings: string[], expectedCount?: number) {
+export function decodeMaterials(bytes: Uint8Array, strings: string[], expectedCount?: number) {
 	const reader = new BomcBinaryReader(bytes);
-	if (reader.readUint8() !== 1) throw new Error('BOMC invalid: material section version.');
+	const version = reader.readUint8();
+	if (version !== 1 && version !== 2) throw new Error('BOMC invalid: material section version.');
 	const stringWidth = reader.readUint8();
 	const textureWidth = reader.readUint8();
 	if (reader.readUint8() !== 0) throw new Error('BOMC invalid: material section reserved field.');
 	const count = reader.readCount('material');
 	assertExpectedBomcCount(count, expectedCount, 'material');
 	if (![1, 2, 4].includes(stringWidth) || ![1, 2, 4].includes(textureWidth)) throw new Error('BOMC invalid: adaptive-width code.');
-	reader.assertRemainingCount(count, stringWidth * 2 + 4 + 2 + textureWidth + 8, 'material');
+	const rowBytes = stringWidth * 2 + 4 + 2 + textureWidth + 8 + (version === 2 ? 58 : 0);
+	assertBomcArrayBytes(count, 1, rowBytes, 'material');
+	if (reader.remaining !== count * rowBytes) throw new Error('BOMC invalid: material section byte count.');
 	const names = reader.readIndices(stringWidth, count);
 	const displayNames = reader.readIndices(stringWidth, count);
 	const colors = reader.readBytes(count * 4);
@@ -491,14 +520,40 @@ function decodeMaterials(bytes: Uint8Array, strings: string[], expectedCount?: n
 	const textures = reader.readIndices(textureWidth, count);
 	const widths = Array.from({ length: count }, () => reader.readFloat32());
 	const heights = Array.from({ length: count }, () => reader.readFloat32());
+	const materialTypes = version === 2 ? Array.from({ length: count }, () => reader.readUint8()) : [];
+	const colorizeModes = version === 2 ? Array.from({ length: count }, () => reader.readUint8()) : [];
+	const deltas = version === 2
+		? Array.from({ length: count }, () => [reader.readFloat64(), reader.readFloat64(), reader.readFloat64()] as [number, number, number])
+		: [];
+	const outputHashes = version === 2 ? Array.from({ length: count }, () => bytesToHex(reader.readBytes(32))) : [];
 	reader.finish('material section');
-	return Array.from({ length: count }, (_, index): MaterialRecord => ({
-		name: names.values[index] === MISSING ? undefined : stringAt(strings, names.values[index]),
-		displayName: displayNames.values[index] === MISSING ? undefined : stringAt(strings, displayNames.values[index]),
-		rgba: [colors[index * 4], colors[index * 4 + 1], colors[index * 4 + 2], colors[index * 4 + 3]],
-		opacity: opacities[index] / 65535,
-		texture: textures.values[index], textureWidthM: widths[index], textureHeightM: heights[index]
-	}));
+	return Array.from({ length: count }, (_, index): MaterialRecord => {
+		const record: MaterialRecord = {
+			name: names.values[index] === MISSING ? undefined : stringAt(strings, names.values[index]),
+			displayName: displayNames.values[index] === MISSING ? undefined : stringAt(strings, displayNames.values[index]),
+			rgba: [colors[index * 4], colors[index * 4 + 1], colors[index * 4 + 2], colors[index * 4 + 3]],
+			opacity: opacities[index] / 65535,
+			texture: textures.values[index], textureWidthM: widths[index], textureHeightM: heights[index]
+		};
+		if (version === 2) {
+			const materialType = materialTypes[index];
+			const colorizeMode = colorizeModes[index];
+			if (materialType !== 0 && materialType !== 1 && materialType !== 2) throw new Error(`BOMC invalid: material ${index} type code.`);
+			if (colorizeMode !== 0 && colorizeMode !== 1 && colorizeMode !== 2) throw new Error(`BOMC invalid: material ${index} colorize mode code.`);
+			const [h, l, s] = deltas[index];
+			const outputRgbaSha256 = outputHashes[index];
+			const active = materialType === 2 && (colorizeMode === 1 || colorizeMode === 2);
+			if (active) {
+				if (record.texture === MISSING) throw new Error(`BOMC invalid: semantic material ${index} texture reference is missing.`);
+				if (/^0+$/.test(outputRgbaSha256)) throw new Error(`BOMC invalid: semantic material ${index} output RGBA hash is zero.`);
+				if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(s) || h < -360 || h > 360 || l < -1 || l > 1 || s < -1 || s > 1) {
+					throw new Error(`BOMC invalid: semantic material ${index} HLS deltas.`);
+				}
+			}
+			record.semantic = { materialType, colorizeMode, deltas: [h, l, s], outputRgbaSha256 };
+		}
+		return record;
+	});
 }
 
 function decodeTags(bytes: Uint8Array, strings: string[], expectedCount?: number) {
@@ -759,22 +814,194 @@ export async function decodeTextures(tableBytes: Uint8Array, blobBytes: Uint8Arr
 		if (!Number.isSafeInteger(end) || end > blobBytes.byteLength) throw new Error(`BOMC invalid: texture ${index} outside blob section.`);
 		const payloadByteLength = lengths[index];
 		const encodedBytes = blobBytes.subarray(offsets[index], end);
+		let encodedHashVerified = false;
 		if (typeof crypto !== 'undefined' && crypto.subtle) {
 			const actual = bytesToHex(await digestSha256(encodedBytes));
+			if (options.isCancelled?.()) throw new Error('BOMC load cancelled');
 			if (actual !== hashes[index]) throw new Error(`BOMC invalid: texture ${index} hash mismatch.`);
+			encodedHashVerified = true;
 		}
 		if (media[index] === 6) {
 			const png = await decodeBomcJcmToPng(encodedBytes, widths[index], heights[index], options);
 			const hash = bytesToHex(png.sha256);
-			records.push({ media: 1, width: widths[index], height: heights[index], hash, bytes: png.bytes,
+			records.push({ media: 1, sourceMedia: media[index], encodedHashVerified, width: widths[index], height: heights[index], hash, bytes: png.bytes,
 				assetPath: `bomc/textures/${hash}.png`, payloadByteLength });
 		} else {
 			const extension = ['bin', 'png', 'jpg', 'webp', 'avif', 'ktx2'][media[index]];
-			records.push({ media: media[index], width: widths[index], height: heights[index], hash: hashes[index], bytes: encodedBytes,
+			records.push({ media: media[index], sourceMedia: media[index], encodedHashVerified, width: widths[index], height: heights[index], hash: hashes[index], bytes: encodedBytes,
 				assetPath: `bomc/textures/${hashes[index]}.${extension}`, payloadByteLength });
 		}
 	}
 	return records;
+}
+
+export async function hydrateSemanticMaterials(
+	materials: MaterialRecord[],
+	textures: TextureRecord[],
+	options: { isCancelled?: () => boolean; codec?: ImagePixelCodec; onMaterialVerified?: (proof: Readonly<BomcSemanticMaterialDiagnostics['materialProofs'][number]>) => void } = {}
+): Promise<{ assets: Array<{ path: string; bytes: Uint8Array }>; diagnostics: BomcSemanticMaterialDiagnostics }> {
+	const started = performance.now();
+	const activeIndices = materials.flatMap((material, index) => isActiveSemanticMaterial(material) ? [index] : []);
+	const diagnostics: BomcSemanticMaterialDiagnostics = {
+		sectionVersion: materials.some((material) => material.semantic) ? 2 : materials.length ? 1 : null,
+		activeCount: activeIndices.length,
+		verifiedCount: 0,
+		generatedAssetCount: 0,
+		generatedPngBytes: 0,
+		baseDecodeCount: 0,
+		maxLiveBaseFrames: 0,
+		maxLiveOutputFrames: 0,
+		maxMemoEntries: 0,
+		totalMs: 0,
+		baseDecodes: [],
+		materialProofs: []
+	};
+	if (!activeIndices.length) {
+		diagnostics.totalMs = performance.now() - started;
+		return { assets: [], diagnostics };
+	}
+	if (typeof crypto === 'undefined' || !crypto.subtle) {
+		throw new Error('BOMC semantic material SHA-256 is unavailable.');
+	}
+
+	const jobsByTexture = new Map<number, number[]>();
+	for (const materialIndex of activeIndices) {
+		const material = materials[materialIndex];
+		const semantic = material.semantic!;
+		const textureIndex = material.texture;
+		if (textureIndex === MISSING) throw new Error(`BOMC invalid: semantic material ${materialIndex} texture reference is missing.`);
+		if (!Number.isSafeInteger(textureIndex) || textureIndex < 0 || textureIndex >= textures.length) {
+			throw new Error(`BOMC invalid: semantic material ${materialIndex} texture ${textureIndex} is outside the source texture table.`);
+		}
+		const texture = textures[textureIndex];
+		if (texture.sourceMedia !== 1 && texture.sourceMedia !== 2 && texture.sourceMedia !== 3) {
+			throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: source media ${texture.sourceMedia} is unsupported.`);
+		}
+		if (!texture.encodedHashVerified) throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: encoded source hash was not verified.`);
+		const pixels = texture.width * texture.height;
+		const rgbaBytes = pixels * 4;
+		if (!Number.isSafeInteger(texture.width) || texture.width <= 0 || !Number.isSafeInteger(texture.height) || texture.height <= 0 ||
+			!Number.isSafeInteger(pixels) || !Number.isSafeInteger(rgbaBytes)) {
+			throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: dimensions or RGBA byte length are invalid.`);
+		}
+		if ((semantic.colorizeMode !== 1 && semantic.colorizeMode !== 2) || semantic.materialType !== 2 ||
+			!/^([0-9a-f]{64})$/.test(semantic.outputRgbaSha256) || /^0+$/.test(semantic.outputRgbaSha256) ||
+			semantic.deltas.some((value) => !Number.isFinite(value))) {
+			throw new Error(`BOMC invalid: semantic material ${materialIndex} metadata is malformed.`);
+		}
+		const rows = jobsByTexture.get(textureIndex) || [];
+		rows.push(materialIndex);
+		jobsByTexture.set(textureIndex, rows);
+	}
+
+	const codec = options.codec || defaultImagePixelCodec;
+	const generatedAssets: Array<{ path: string; bytes: Uint8Array }> = [];
+	const assetByPath = new Map<string, { path: string; bytes: Uint8Array }>();
+	const pendingPaths = new Map<number, string>();
+	const checkCancelled = () => { if (options.isCancelled?.()) throw new Error('BOMC load cancelled'); };
+	const sortedTextureIndices = [...jobsByTexture.keys()].sort((a, b) => a - b);
+
+	for (const textureIndex of sortedTextureIndices) {
+		checkCancelled();
+		const texture = textures[textureIndex];
+		const materialIndices = jobsByTexture.get(textureIndex)!.sort((a, b) => a - b);
+		const firstMaterialIndex = materialIndices[0];
+		let baseFrame: PixelFrame | undefined;
+		const decodeStarted = performance.now();
+		try {
+			baseFrame = await codec.decode({
+				media: texture.sourceMedia as SemanticImageMedia,
+				bytes: texture.bytes,
+				width: texture.width,
+				height: texture.height
+			}, options.isCancelled);
+			checkCancelled();
+			validatePixelFrame(baseFrame, texture.width, texture.height, firstMaterialIndex, textureIndex);
+			diagnostics.baseDecodeCount += 1;
+			diagnostics.maxLiveBaseFrames = Math.max(diagnostics.maxLiveBaseFrames, 1);
+			diagnostics.baseDecodes.push({ textureIndex, sourceMedia: texture.sourceMedia, width: texture.width, height: texture.height, decodeMs: Math.max(0, performance.now() - decodeStarted) });
+
+			for (const materialIndex of materialIndices) {
+				checkCancelled();
+				const material = materials[materialIndex];
+				const semantic = material.semantic!;
+				const colorizeStarted = performance.now();
+				const transformed = await colorizeRgba(baseFrame.data, texture.width, texture.height, semantic.colorizeMode as 1 | 2, semantic.deltas, { isCancelled: options.isCancelled });
+				checkCancelled();
+				diagnostics.maxLiveOutputFrames = Math.max(diagnostics.maxLiveOutputFrames, 1);
+				diagnostics.maxMemoEntries = Math.max(diagnostics.maxMemoEntries, transformed.maxMemoEntries);
+				const colorizeMs = Math.max(0, performance.now() - colorizeStarted);
+				const hashStarted = performance.now();
+				let actualRgbaSha256: string;
+				try {
+					actualRgbaSha256 = bytesToHex(await digestSha256(new Uint8Array(transformed.data.buffer, transformed.data.byteOffset, transformed.data.byteLength)));
+				} catch (error) {
+					checkCancelled();
+					throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: RGBA hash failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				checkCancelled();
+				const hashMs = Math.max(0, performance.now() - hashStarted);
+				if (actualRgbaSha256 !== semantic.outputRgbaSha256) {
+					throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: RGBA hash mismatch; expected ${semantic.outputRgbaSha256}, actual ${actualRgbaSha256}.`);
+				}
+				const assetPath = `bomc/textures/semantic-${actualRgbaSha256}-${texture.width}x${texture.height}.png`;
+				let encodeMs = 0;
+				let reusedAsset = true;
+				if (!assetByPath.has(assetPath)) {
+					reusedAsset = false;
+					const encodeStarted = performance.now();
+					let bytes: Uint8Array;
+					try {
+						bytes = await codec.encodePng({ width: texture.width, height: texture.height, data: transformed.data }, options.isCancelled);
+					} catch (error) {
+						checkCancelled();
+						throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: PNG encode failed: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					checkCancelled();
+					if (!bytes.byteLength) throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: PNG encoder returned an empty asset.`);
+					encodeMs = Math.max(0, performance.now() - encodeStarted);
+					const asset = { path: assetPath, bytes };
+					assetByPath.set(assetPath, asset);
+					generatedAssets.push(asset);
+					diagnostics.generatedPngBytes += bytes.byteLength;
+				}
+				pendingPaths.set(materialIndex, assetPath);
+				const proof = {
+					materialIndex, textureIndex, mode: semantic.colorizeMode as 1 | 2,
+					expectedRgbaSha256: semantic.outputRgbaSha256, actualRgbaSha256,
+					assetPath, colorizeMs, hashMs, encodeMs, reusedAsset
+				};
+				diagnostics.materialProofs.push(proof);
+				diagnostics.verifiedCount += 1;
+				try {
+					options.onMaterialVerified?.({ ...proof });
+				} catch (error) {
+					throw new Error(`BOMC semantic material proof observer failed for material ${materialIndex}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		} catch (error) {
+			checkCancelled();
+			if (error instanceof Error && error.message.startsWith('BOMC semantic material')) throw error;
+			throw new Error(`BOMC semantic material ${firstMaterialIndex} texture ${textureIndex}: image decode failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			baseFrame = undefined;
+		}
+	}
+
+	checkCancelled();
+	for (const [materialIndex, assetPath] of pendingPaths) materials[materialIndex].renderTextureAsset = assetPath;
+	diagnostics.generatedAssetCount = generatedAssets.length;
+	diagnostics.totalMs = Math.max(0, performance.now() - started);
+	return { assets: generatedAssets, diagnostics };
+}
+
+function validatePixelFrame(frame: PixelFrame, width: number, height: number, materialIndex: number, textureIndex: number) {
+	const pixels = width * height;
+	const expectedByteLength = pixels * 4;
+	if (!Number.isSafeInteger(pixels) || !Number.isSafeInteger(expectedByteLength) || frame.width !== width || frame.height !== height ||
+		frame.data.byteLength !== expectedByteLength) {
+		throw new Error(`BOMC semantic material ${materialIndex} texture ${textureIndex}: decoded dimensions or RGBA byte length mismatch.`);
+	}
 }
 
 function decodeCoverage(bytes: Uint8Array): BomcCoverage {
@@ -849,7 +1076,13 @@ function validateReferences(
 		if (instance.material !== MISSING) assertIndex(instance.material, materials.length, `instance ${index} material`);
 		if (instance.tag !== MISSING) assertIndex(instance.tag, tags.length, `instance ${index} tag`);
 	}
-	for (let index = 0; index < materials.length; index += 1) if (materials[index].texture !== MISSING) assertIndex(materials[index].texture, textures.length, `material ${index} texture`);
+	for (let index = 0; index < materials.length; index += 1) {
+		if (materials[index].texture === MISSING) continue;
+		if (isActiveSemanticMaterial(materials[index]) && materials[index].texture >= textures.length) {
+			throw new Error(`BOMC invalid: semantic material ${index} texture ${materials[index].texture} is outside the source texture table.`);
+		}
+		assertIndex(materials[index].texture, textures.length, `material ${index} texture`);
+	}
 	for (let index = 0; index < fallback.length; index += 1) {
 		assertIndex(fallback[index].instance, instances.length, `fallback ${index} instance`);
 		if (fallback[index].texture !== MISSING) assertIndex(fallback[index].texture, textures.length, `fallback ${index} texture`);
@@ -1258,12 +1491,11 @@ function buildRuntime(
 				const material = materialIndex !== MISSING ? materials[materialIndex] : undefined;
 				if (material && material.texture !== MISSING) {
 					const occurrenceCount = materialOccurrences.length;
-					const texture = textures[material.texture];
 					const metric = textureMetricByMaterial.get(materialIndex) || {
 						materialIndex,
 						materialId: `bomc-material-${materialIndex}`,
 						materialName: material.displayName || material.name,
-						textureAsset: texture?.assetPath || `missing-texture-${material.texture}`,
+						textureAsset: materialTexturePath(material, textures) || `missing-texture-${material.texture}`,
 						textureWidthM: material.textureWidthM,
 						textureHeightM: material.textureHeightM,
 						minU: null, maxU: null, minV: null, maxV: null,
@@ -1300,7 +1532,7 @@ function buildRuntime(
 					materialName: material?.displayName || material?.name,
 					baseColorRgba: material ? material.rgba.map((value) => value / 255) as [number, number, number, number] : undefined,
 					opacity: material?.opacity, colorSpace: 'srgb',
-					textureAsset: material?.texture !== MISSING ? textures[material?.texture ?? MISSING]?.assetPath : undefined,
+					textureAsset: materialTexturePath(material, textures),
 					textureWidthM: material?.textureWidthM,
 					textureHeightM: material?.textureHeightM,
 					renderSide: partition.side, isBackFace: partition.side === 'back',
@@ -1361,6 +1593,11 @@ function triangleAreaSum(indices: ArrayLike<number>, positions: ArrayLike<number
 		area += b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
 	}
 	return area;
+}
+
+function materialTexturePath(material: MaterialRecord | undefined, textures: readonly TextureRecord[]) {
+	if (!material || material.texture === MISSING) return undefined;
+	return material.renderTextureAsset ?? textures[material.texture]?.assetPath;
 }
 
 function collectBomcVisibilityMetrics(meshes: MeshRecord[], tags: TagRecord[], occurrences: Map<number, Occurrence[]>) {
