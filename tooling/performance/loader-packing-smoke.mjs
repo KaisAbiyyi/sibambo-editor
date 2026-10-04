@@ -282,7 +282,7 @@ function compareServedBuild(served, local, gitIdentity) {
 }
 
 async function readPortListeners(port) {
-	const script = `$ErrorActionPreference = 'Stop'; $items = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop | Select-Object LocalAddress,LocalPort,OwningProcess); ConvertTo-Json -InputObject $items -Depth 4 -Compress`;
+	const script = `$ErrorActionPreference = 'Stop'; $items = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${port} } | Select-Object LocalAddress,LocalPort,OwningProcess); ConvertTo-Json -InputObject $items -Depth 4 -Compress`;
 	const { stdout } = await execFileCaptured('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
 		windowsHide: true,
 		timeout: 5_000,
