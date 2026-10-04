@@ -1,4 +1,5 @@
 import { BomcLoader, type E4WorkerProgress } from '@sibambo/e4-import';
+import { prepareBomcWorkerTransfer } from '@sibambo/e4-import/worker-transfer';
 import { prepareApplicationRenderScene } from '@sibambo/scene-runtime';
 
 type LoadMessage = { type: 'load'; id: number; buffer: ArrayBuffer; sourceName: string };
@@ -6,16 +7,6 @@ type CancelMessage = { type: 'cancel'; id: number };
 const cancelled = new Set<number>();
 const transferMessage = (message: unknown, transfer: Transferable[]) =>
 	(self as unknown as { postMessage(value: unknown, transferList?: Transferable[]): void }).postMessage(message, transfer);
-
-function collectTransferables(value: unknown, buffers = new Set<ArrayBuffer>(), seen = new WeakSet<object>()) {
-	if (!value || typeof value !== 'object') return buffers;
-	if (value instanceof ArrayBuffer) { buffers.add(value); return buffers; }
-	if (ArrayBuffer.isView(value)) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return buffers; }
-	if (seen.has(value)) return buffers;
-	seen.add(value);
-	for (const child of Object.values(value)) collectTransferables(child, buffers, seen);
-	return buffers;
-}
 
 self.onmessage = async (event: MessageEvent<LoadMessage | CancelMessage>) => {
 	const message = event.data;
@@ -65,7 +56,8 @@ self.onmessage = async (event: MessageEvent<LoadMessage | CancelMessage>) => {
 			self.postMessage({ type: 'cancelled', id: message.id });
 			return;
 		}
-		transferMessage({ type: 'complete', id: message.id, result }, [...collectTransferables(result)]);
+		const packed = prepareBomcWorkerTransfer(result, message.buffer);
+		transferMessage({ type: 'complete', id: message.id, result: packed.result }, packed.transferList);
 	} catch (cause) {
 		transferMessage({ type: cancelled.has(message.id) ? 'cancelled' : 'error', id: message.id, error: cause instanceof Error ? cause.message : 'BOMC import failed.' }, []);
 	} finally {

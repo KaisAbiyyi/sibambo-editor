@@ -585,6 +585,7 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 		status: 'running',
 		metadata: {
 			recordedAt: new Date().toISOString(),
+			governingPlan: 'BOMC-LOADER-001/v1.2',
 			workspaceRoot,
 			repository: identity,
 			fixtureManifest: { path: path.relative(workspaceRoot, manifestState.manifestPath).replaceAll(path.sep, '/'), sha256: manifestState.manifestSha256 },
@@ -598,14 +599,76 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 	writeJson(proofPath, proof);
 	appendEvent(output, { type: 'proof-start', status: 'running' });
 
+	type MutableCaseRecord = Record<string, unknown> & {
+		phase: string;
+		lastCompletedPhase: string | null;
+		phaseDurationsMs: Record<string, number>;
+	};
+	const cases = proof.cases as Record<string, MutableCaseRecord | Record<string, unknown>>;
+	const createCaseRecord = (): MutableCaseRecord => ({
+		status: 'running',
+		phase: 'starting',
+		lastCompletedPhase: null,
+		phaseDurationsMs: {}
+	});
+	const persist = () => writeJson(proofPath, proof);
+	const beginPhase = (fixtureId: string, record: MutableCaseRecord, phase: string): number => {
+		record.phase = phase;
+		appendEvent(output, { type: 'phase-start', fixtureId, phase });
+		persist();
+		return performance.now();
+	};
+	const finishPhase = (fixtureId: string, record: MutableCaseRecord, phase: string, startedAt: number): number => {
+		const durationMs = performance.now() - startedAt;
+		record.phaseDurationsMs[phase] = durationMs;
+		record.lastCompletedPhase = phase;
+		appendEvent(output, { type: 'phase-finish', fixtureId, phase, durationMs });
+		persist();
+		return durationMs;
+	};
+	const failCase = (fixtureId: string, record: MutableCaseRecord, cause: unknown): void => {
+		const isError = cause instanceof Error;
+		const message = isError ? cause.message : String(cause);
+		record.status = 'fail';
+		record.errorName = isError ? cause.name : 'NonError';
+		record.errorMessage = message;
+		record.errorStack = isError ? (cause.stack ?? cause.message).slice(0, 16 * 1024) : null;
+		// Keep the historical field while adding a structured, bounded error record.
+		record.error = message;
+		persist();
+		appendEvent(output, { type: 'case-finish', fixtureId, status: 'fail', phase: record.phase, lastCompletedPhase: record.lastCompletedPhase, errorName: record.errorName, error: message });
+	};
+	const fixtureRecord = (input: ReturnType<typeof readVerifiedFixture>) => ({
+		id: input.fixture.id,
+		locator: input.fixture.locator,
+		byteLength: input.bytes.byteLength,
+		sha256: input.sha256
+	});
+
 	let lOldPassed = false;
+	const lOldCase = createCaseRecord();
+	cases['L-old'] = lOldCase;
+	persist();
 	appendEvent(output, { type: 'case-start', fixtureId: 'L-old', action: 'native-offline-transfer' });
 	try {
+		let phaseStartedAt = beginPhase('L-old', lOldCase, 'fixture-read');
 		const input = readVerifiedFixture(workspaceRoot, manifestState.manifest, 'L-old');
+		lOldCase.fixture = fixtureRecord(input);
 		const sourceBuffer = input.arrayBuffer;
 		const sourceBefore = { byteLength: bufferLength(sourceBuffer), sha256: hashBuffer(sourceBuffer) };
+		lOldCase.sourceBuffer = { before: sourceBefore };
+		finishPhase('L-old', lOldCase, 'fixture-read', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'load');
 		const result = await new BomcLoader().load(sourceBuffer, path.basename(input.filePath), { prepareSolid: true });
+		lOldCase.sourceCounts = result.counts;
+		finishPhase('L-old', lOldCase, 'load', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'application-preparation');
 		applyWorkerPreparation(result);
+		finishPhase('L-old', lOldCase, 'application-preparation', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'fingerprint-before');
 		const inventory = createTransferFingerprint(result);
 		const originalAssets = result.appearance.assets;
 		const originalAssetBackings = new Map<ArrayBuffer, { byteLength: number; sha256: string }>();
@@ -613,6 +676,20 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 			const buffer = asset.bytes.buffer as ArrayBuffer;
 			if (!originalAssetBackings.has(buffer)) originalAssetBackings.set(buffer, { byteLength: bufferLength(buffer), sha256: hashBuffer(buffer) });
 		}
+		const before = {
+			geometryViewBackingCount: inventory.backings.length,
+			geometryViewBackingBytes: inventory.backings.reduce((sum, backing) => sum + backing.byteLength, 0),
+			nonemptyGeometryBackingCount: inventory.backings.filter((backing) => backing.byteLength > 0).length,
+			nonemptyGeometryBackingBytes: inventory.backings.reduce((sum, backing) => sum + (backing.byteLength > 0 ? backing.byteLength : 0), 0),
+			geometryViewCount: inventory.viewCount,
+			assetCount: inventory.assets.length,
+			assetBytes: inventory.assets.reduce((sum, asset) => sum + asset.byteLength, 0)
+		};
+		lOldCase.before = before;
+		lOldCase.originalAssetBackingCount = originalAssetBackings.size;
+		finishPhase('L-old', lOldCase, 'fingerprint-before', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'packing');
 		const packed = prepareBomcWorkerTransfer(result, sourceBuffer);
 		const transferBufferBytes = transferBytes(packed.transferList);
 		const retainedOriginalBuffers = new Set<ArrayBuffer>([sourceBuffer, ...originalAssetBackings.keys()]);
@@ -622,18 +699,37 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 		const geometryStats = packed.result.diagnostics.workerTransfer?.geometry;
 		if (!geometryStats) throw new Error('Transfer proof failed: worker transfer geometry diagnostics are missing.');
 		require(geometryStats.packedBufferCount <= MAX_GEOMETRY_TRANSFERS, `geometry transfer count ${geometryStats.packedBufferCount} exceeds ${MAX_GEOMETRY_TRANSFERS}`);
+		const diagnostics = packed.result.diagnostics.workerTransfer!;
+		lOldCase.geometryStats = geometryStats;
+		lOldCase.assets = { count: diagnostics.assetBufferCount, bytes: diagnostics.assetBytes };
+		lOldCase.transfers = { count: packed.transferList.length, bytes: transferBufferBytes };
+		lOldCase.packing = {
+			geometryPackingMs: geometryStats.packingMs,
+			totalPackingMs: diagnostics.totalPackingMs
+		};
+		finishPhase('L-old', lOldCase, 'packing', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'native-transfer');
 		const received = structuredClone(packed.result, { transfer: packed.transferList });
+		lOldCase.nativeTransfer = true;
+		finishPhase('L-old', lOldCase, 'native-transfer', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'fingerprint-after');
 		const after = verifyTransferFingerprint(received, inventory);
+		finishPhase('L-old', lOldCase, 'fingerprint-after', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('L-old', lOldCase, 'retained-postchecks');
 		const sourceAfter = { byteLength: bufferLength(sourceBuffer), sha256: hashBuffer(sourceBuffer) };
 		require(sourceAfter.byteLength === sourceBefore.byteLength && sourceAfter.sha256 === sourceBefore.sha256, 'retained source buffer changed or detached');
 		for (const [buffer, expected] of originalAssetBackings) {
 			require(bufferLength(buffer) === expected.byteLength && hashBuffer(buffer) === expected.sha256, 'retained original asset backing changed or detached');
 		}
-		const diagnostics = packed.result.diagnostics.workerTransfer!;
-		const record = {
+		lOldCase.sourceBuffer = { before: sourceBefore, after: sourceAfter };
+		finishPhase('L-old', lOldCase, 'retained-postchecks', phaseStartedAt);
+		Object.assign(lOldCase, {
 			status: 'pass',
-			fixture: { id: input.fixture.id, locator: input.fixture.locator, byteLength: input.bytes.byteLength, sha256: input.sha256 },
-			nativeTransfer: true,
+			phase: 'complete',
+			fixture: fixtureRecord(input),
 			assertions: {
 				graphFingerprintPreserved: true,
 				constructorLengthAndViewIdentityPreserved: true,
@@ -647,15 +743,7 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 				totalTransferLimit: packed.transferList.length <= MAX_GEOMETRY_TRANSFERS + MAX_ASSET_TRANSFERS
 			},
 			sourceCounts: result.counts,
-			before: {
-				geometryViewBackingCount: inventory.backings.length,
-				geometryViewBackingBytes: inventory.backings.reduce((sum, backing) => sum + backing.byteLength, 0),
-				nonemptyGeometryBackingCount: inventory.backings.filter((backing) => backing.byteLength > 0).length,
-				nonemptyGeometryBackingBytes: inventory.backings.reduce((sum, backing) => sum + (backing.byteLength > 0 ? backing.byteLength : 0), 0),
-				geometryViewCount: inventory.viewCount,
-				assetCount: inventory.assets.length,
-				assetBytes: inventory.assets.reduce((sum, asset) => sum + asset.byteLength, 0)
-			},
+			before,
 			after: {
 				...after,
 				geometryStats,
@@ -665,54 +753,62 @@ export async function runTransferProof(workspaceRootInput: string, outputInput: 
 				assetBytes: diagnostics.assetBytes,
 				totalPackingMs: diagnostics.totalPackingMs
 			},
-			sourceBuffer: { before: sourceBefore, after: sourceAfter },
 			originalAssetBackingCount: originalAssetBackings.size
-		};
-		(proof.cases as Record<string, unknown>)['L-old'] = record;
+		});
 		lOldPassed = true;
-		writeJson(proofPath, proof);
+		persist();
 		appendEvent(output, { type: 'case-finish', fixtureId: 'L-old', status: 'pass', geometryTransferCount: geometryStats.packedBufferCount, totalTransferCount: packed.transferList.length });
 	} catch (cause) {
-		const message = cause instanceof Error ? cause.message : String(cause);
-		(proof.cases as Record<string, unknown>)['L-old'] = { status: 'fail', error: message };
-		writeJson(proofPath, proof);
-		appendEvent(output, { type: 'case-finish', fixtureId: 'L-old', status: 'fail', error: message });
+		failCase('L-old', lOldCase, cause);
 	}
 
 	let s2Passed = false;
+	const s2Case = createCaseRecord();
+	cases['S2-new'] = s2Case;
+	persist();
 	appendEvent(output, { type: 'case-start', fixtureId: 'S2-new', action: 'unchanged-material-version-rejection' });
 	try {
+		let phaseStartedAt = beginPhase('S2-new', s2Case, 'fixture-read');
 		const input = readVerifiedFixture(workspaceRoot, manifestState.manifest, 'S2-new');
+		s2Case.fixture = fixtureRecord(input);
 		const sourceBuffer = input.arrayBuffer;
 		const before = { byteLength: bufferLength(sourceBuffer), sha256: hashBuffer(sourceBuffer) };
+		s2Case.sourceBuffer = { before };
+		finishPhase('S2-new', s2Case, 'fixture-read', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('S2-new', s2Case, 'load');
 		let rejection = '';
 		let returnedResult: AdaptedBomcResult | undefined;
 		try { returnedResult = await new BomcLoader().load(sourceBuffer, path.basename(input.filePath), { prepareSolid: true }); }
 		catch (cause) { rejection = cause instanceof Error ? cause.message : String(cause); }
+		s2Case.returnedFullResult = returnedResult !== undefined;
+		s2Case.observedRejection = rejection || null;
+		finishPhase('S2-new', s2Case, 'load', phaseStartedAt);
+
+		phaseStartedAt = beginPhase('S2-new', s2Case, 'source-postchecks');
 		const expectedRejection = 'BOMC invalid: material section version.';
 		const after = { byteLength: bufferLength(sourceBuffer), sha256: hashBuffer(sourceBuffer) };
 		require(returnedResult === undefined, 'S2-new unexpectedly returned a renderable/full result');
 		require(rejection === expectedRejection, `S2-new rejection was ${JSON.stringify(rejection)}, expected ${JSON.stringify(expectedRejection)}`);
 		require(before.byteLength === after.byteLength && before.sha256 === after.sha256, 'S2-new rejection changed its source buffer');
-		(proof.cases as Record<string, unknown>)['S2-new'] = {
+		s2Case.sourceBuffer = { before, after };
+		finishPhase('S2-new', s2Case, 'source-postchecks', phaseStartedAt);
+		Object.assign(s2Case, {
 			status: 'pass',
-			fixture: { id: input.fixture.id, locator: input.fixture.locator, byteLength: input.bytes.byteLength, sha256: input.sha256 },
+			phase: 'complete',
+			fixture: fixtureRecord(input),
 			returnedFullResult: false,
-		exactRejection: rejection,
-			sourceBuffer: { before, after }
-		};
+			exactRejection: rejection
+		});
 		s2Passed = true;
-		writeJson(proofPath, proof);
+		persist();
 		appendEvent(output, { type: 'case-finish', fixtureId: 'S2-new', status: 'pass', rejection });
 	} catch (cause) {
-		const message = cause instanceof Error ? cause.message : String(cause);
-		(proof.cases as Record<string, unknown>)['S2-new'] = { status: 'fail', error: message };
-		writeJson(proofPath, proof);
-		appendEvent(output, { type: 'case-finish', fixtureId: 'S2-new', status: 'fail', error: message });
+		failCase('S2-new', s2Case, cause);
 	}
 
 	proof.status = lOldPassed && s2Passed ? 'pass' : 'fail';
-	writeJson(proofPath, proof);
+	persist();
 	appendEvent(output, { type: 'proof-finish', status: proof.status });
 	return { output, status: proof.status, lOldPassed, s2Passed };
 }

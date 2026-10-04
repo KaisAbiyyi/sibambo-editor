@@ -421,6 +421,7 @@ export function prepareBomcWorkerTransfer(result: AdaptedBomcResult, sourceBuffe
 	if (appearance === null || typeof appearance !== 'object' || Array.isArray(appearance) || !isPlainContainer(appearance, '$.appearance')) {
 		fail('$.appearance', 'appearance must be a plain object');
 	}
+	const appearanceRecord = appearance as Record<string, unknown>;
 	const assetsDescriptor = Object.getOwnPropertyDescriptor(appearance, 'assets');
 	if (!assetsDescriptor || !('value' in assetsDescriptor) || assetsDescriptor.writable !== true || !Array.isArray(assetsDescriptor.value) || Object.getPrototypeOf(assetsDescriptor.value) !== Array.prototype) {
 		fail('$.appearance.assets', 'assets must be a writable plain array');
@@ -454,9 +455,9 @@ export function prepareBomcWorkerTransfer(result: AdaptedBomcResult, sourceBuffe
 
 	let completed = false;
 	try {
-		appearance.assets = [];
+		appearanceRecord.assets = [];
 		const packed = packGeometryTransfer(result, { retainedBuffers });
-		appearance.assets = isolatedAssets;
+		appearanceRecord.assets = isolatedAssets;
 		const transferList = [...packed.transferList];
 		const transferSet = new Set(transferList);
 		let assetBufferCount = 0;
@@ -492,6 +493,6 @@ export function prepareBomcWorkerTransfer(result: AdaptedBomcResult, sourceBuffe
 		completed = true;
 		return { result: packed.result, transferList };
 	} finally {
-		if (!completed) appearance.assets = originalAssets;
+		if (!completed) appearanceRecord.assets = originalAssets;
 	}
 }

@@ -11,6 +11,7 @@
 		"./container": "./src/container.ts",
 		"./jpeg-color-map": "./src/jpeg-color-map.ts",
 		"./progressive-bomc-load": "./src/progressive-bomc-load.ts",
+		"./worker-transfer": "./src/worker-transfer.ts",
 		"./types": "./src/types.ts"
 	},
 	"dependencies": {
