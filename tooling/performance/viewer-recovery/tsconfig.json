@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"skipLibCheck": true,
+		"noEmit": true,
+		"paths": {
+			"@sibambo/contracts": ["../../../packages/contracts/src/index.ts"],
+			"@sibambo/contracts/scene": ["../../../packages/contracts/src/scene.ts"],
+			"@sibambo/scene-runtime": ["../../../packages/scene-runtime/src/index.ts"],
+			"@sibambo/scene-runtime/types": ["../../../packages/scene-runtime/src/prepared-types.ts"],
+			"@sibambo/viewport": ["../../../packages/viewport/src/index.ts"],
+			"@sibambo/e4-import": ["../../../packages/e4-import/src/index.ts"],
+			"@sibambo/e4-import/worker-transfer": ["../../../packages/e4-import/src/worker-transfer.ts"]
+		}
+	},
+	"include": ["./*.ts", "./*.d.ts"]
+}

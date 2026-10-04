@@ -2017,6 +2017,19 @@ function boundsFromBox(box: Box3): Bounds3 {
 	return { min: pointFromVector(box.min), max: pointFromVector(box.max), size: pointFromVector(size), center: pointFromVector(center) };
 }
 
+export function resolveBomcSceneNodeVisibility(
+	instances: readonly { readonly visible: boolean }[],
+	visibleNodeIndices: readonly number[],
+	hiddenNodeIndices: readonly number[]
+) {
+	const visible = new Set(visibleNodeIndices);
+	const hidden = new Set(hiddenNodeIndices);
+	for (let index = 0; index < instances.length; index += 1) {
+		if (instances[index]?.visible === false && !visible.has(index)) hidden.add(index);
+	}
+	return [...hidden].sort((left, right) => left - right);
+}
+
 export function decodeScenes(
 	bytes: Uint8Array,
 	strings: string[],
@@ -2258,6 +2271,7 @@ export function decodeScenes(
 				: hiddenNodeIndices.map((i) => instances[i]?.name || instances[i]?.label || `node:${i}`)),
 			...unresolvedHiddenOverrides
 		];
+		const effectiveHiddenNodeIndices = resolveBomcSceneNodeVisibility(instances, visibleNodeIndices, hiddenNodeIndices);
 
 		const stableId = strings[idIdx] || `scene:doc:${nameIdx}`;
 		if (seenIds.has(stableId)) {
@@ -2304,7 +2318,7 @@ export function decodeScenes(
 				visibleTagIndices,
 				hiddenTagIndices,
 				visibleNodeIndices,
-				hiddenNodeIndices,
+				hiddenNodeIndices: effectiveHiddenNodeIndices,
 				sourceVisibleNodeOverrideCount: visibleNodeIndices.length + unresolvedVisibleOverrides.length,
 				sourceHiddenNodeOverrideCount: hiddenNodeIndices.length + unresolvedHiddenOverrides.length,
 				resolvedVisibleNodeOverrideCount: visibleNodeIndices.length,

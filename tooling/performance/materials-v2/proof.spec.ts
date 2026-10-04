@@ -122,7 +122,8 @@ test('generated PNG codec case preserves alpha-zero RGB and Ruby output bytes', 
 		await page.evaluate(() => (window as Window & { __m2Proof: any }).__m2Proof.cancel()).catch(() => undefined);
 	} finally {
 		const snapshot = await page.evaluate(() => (window as Window & { __m2Proof: any }).__m2Proof.snapshot()).catch(() => null);
-		const report = { fixtureId: 'generated-png', browserVersion: browser.version(), result: result || null, snapshot, pageErrors: runtime.pageErrors, consoleErrors: runtime.consoleErrors, wasmResponses: runtime.wasmResponses, executionError: executionError?.message || null, recordedAt: new Date().toISOString() };
+		const sourceIdentity = await captureSourceIdentity();
+		const report = { fixtureId: 'generated-png', sourceIdentity, browserVersion: browser.version(), result: result || null, snapshot, pageErrors: runtime.pageErrors, consoleErrors: runtime.consoleErrors, wasmResponses: runtime.wasmResponses, executionError: executionError?.message || null, recordedAt: new Date().toISOString() };
 		await persistReport(report, 'generated-png', testInfo);
 	}
 	if (executionError) throw executionError;

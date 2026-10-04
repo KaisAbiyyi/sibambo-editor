@@ -1,10 +1,12 @@
-import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Spherical, Vector3 } from 'three';
+import { Camera, MOUSE, OrthographicCamera, PerspectiveCamera, Quaternion, Spherical, Vector3 } from 'three';
 
 export type CameraPose = { position: Vector3; target: Vector3 };
+export type CameraDragSnapshot = { pose: CameraPose; orbitAnchor: Vector3; sceneEpoch: number };
 export type CameraPreset = 'top' | 'front' | 'iso';
 export type CameraPresetBounds = { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
 export type NavigationTool = 'pan' | 'orbit';
 export type CameraNavigationAction = NavigationTool | null;
+export type DollyBurstState = { direction: 1 | -1; lastTimeMs: number; lastAppliedStep: number };
 
 const GROUND_Y = 0;
 const ANCHOR_EPSILON = 1e-7;
@@ -121,7 +123,92 @@ export function cameraPresetPose(bounds: CameraPresetBounds, name: CameraPreset)
 	return { position: target.clone().add(offset.normalize().multiplyScalar(span)), target };
 }
 
-export function orbitCameraDrag(start: CameraPose, deltaX: number, deltaY: number, radiansPerPixel = ORBIT_RADIANS_PER_PIXEL): CameraPose {
+export function nearestGroundBoundsAnchor(pose: CameraPose, bounds: CameraPresetBounds): Vector3 | null {
+	const values = [bounds.min.x, bounds.min.z, bounds.max.x, bounds.max.z];
+	if (!values.every(Number.isFinite) || bounds.max.x < bounds.min.x || bounds.max.z < bounds.min.z) return null;
+	const originX = pose.position.x;
+	const originZ = pose.position.z;
+	if (!Number.isFinite(originX) || !Number.isFinite(originZ)) return null;
+	if (originX >= bounds.min.x && originX <= bounds.max.x && originZ >= bounds.min.z && originZ <= bounds.max.z) return null;
+	const forward = pose.target.clone().sub(pose.position);
+	if (!forward.toArray().every(Number.isFinite) || forward.lengthSq() < ANCHOR_EPSILON) return null;
+	forward.normalize();
+	const horizontalLength = Math.hypot(forward.x, forward.z);
+	if (!Number.isFinite(horizontalLength) || horizontalLength <= 1e-7) return null;
+	const dx = forward.x / horizontalLength;
+	const dz = forward.z / horizontalLength;
+	let entry = Number.NEGATIVE_INFINITY;
+	let exit = Number.POSITIVE_INFINITY;
+	for (const [origin, direction, minimum, maximum] of [
+		[originX, dx, bounds.min.x, bounds.max.x],
+		[originZ, dz, bounds.min.z, bounds.max.z]
+	] as const) {
+		if (direction === 0) {
+			if (origin < minimum || origin > maximum) return null;
+			continue;
+		}
+		const first = (minimum - origin) / direction;
+		const second = (maximum - origin) / direction;
+		entry = Math.max(entry, Math.min(first, second));
+		exit = Math.min(exit, Math.max(first, second));
+		if (entry > exit) return null;
+	}
+	if (!Number.isFinite(entry) || !Number.isFinite(exit) || entry <= 0 || exit < entry) return null;
+	const x = originX + dx * entry;
+	const z = originZ + dz * entry;
+	return Number.isFinite(x) && Number.isFinite(z) ? new Vector3(x, GROUND_Y, z) : null;
+}
+
+export function perspectiveDollyStep(
+	depth: number,
+	span: number,
+	deltaPixels: number,
+	previous: DollyBurstState | undefined,
+	nowMs: number
+): { step: number; state: DollyBurstState } | null {
+	if (!Number.isFinite(depth) || depth < 0 || !Number.isFinite(span) || !Number.isFinite(deltaPixels) || deltaPixels === 0 || !Number.isFinite(nowMs)) return null;
+	const normalizedSpan = span <= 0 ? 0.001 : span;
+	const epsilon = Math.max(normalizedSpan * 1e-6, 1e-6);
+	const magnitude = Math.max(0.08, Math.min(2.5, Math.abs(deltaPixels) / 100));
+	const floor = Math.max(normalizedSpan * 0.0005, 0.0005);
+	const desired = Math.max(depth * 0.18, floor) * magnitude;
+	const direction: 1 | -1 = deltaPixels < 0 ? 1 : -1;
+	const priorIsValid = previous !== undefined
+		&& (previous.direction === 1 || previous.direction === -1)
+		&& Number.isFinite(previous.lastTimeMs)
+		&& Number.isFinite(previous.lastAppliedStep)
+		&& previous.lastAppliedStep > 0;
+	const sameBurst = priorIsValid && previous.direction === direction && nowMs >= previous.lastTimeMs && nowMs - previous.lastTimeMs <= 250;
+	const maximumIncrease = priorIsValid ? Math.max(previous.lastAppliedStep * 1.5, floor * magnitude) : desired;
+	const step = Math.max(epsilon, sameBurst ? Math.min(desired, maximumIncrease) : desired);
+	if (!Number.isFinite(step) || step <= 0) return null;
+	return { step, state: { direction, lastTimeMs: nowMs, lastAppliedStep: step } };
+}
+
+export function orbitCameraDrag(
+	start: CameraPose,
+	deltaX: number,
+	deltaY: number,
+	radiansPerPixel = ORBIT_RADIANS_PER_PIXEL,
+	orbitAnchor?: Vector3
+): CameraPose {
+	if (orbitAnchor) {
+		const forward = start.target.clone().sub(start.position).normalize();
+		const yaw = new Quaternion().setFromAxisAngle(WORLD_UP, -deltaX * radiansPerPixel);
+		const yawedForward = forward.clone().applyQuaternion(yaw).normalize();
+		const elevation = Math.asin(Math.max(-1, Math.min(1, forward.y)));
+		const nextElevation = Math.max(-Math.PI / 2 + 0.035, Math.min(Math.PI / 2 - 0.035, elevation - deltaY * radiansPerPixel));
+		const startRight = new Vector3().crossVectors(forward, uprightCameraUp(start)).normalize().applyQuaternion(yaw).normalize();
+		const right = new Vector3().crossVectors(yawedForward, WORLD_UP);
+		if (right.lengthSq() <= 1e-12) right.copy(startRight);
+		else right.normalize();
+		const pitch = new Quaternion().setFromAxisAngle(right, nextElevation - elevation);
+		const rotation = pitch.multiply(yaw);
+		return {
+			position: orbitAnchor.clone().add(start.position.clone().sub(orbitAnchor).applyQuaternion(rotation)),
+			target: orbitAnchor.clone().add(start.target.clone().sub(orbitAnchor).applyQuaternion(rotation))
+		};
+	}
 	const grounded = groundedCameraPose(start);
 	const offset = grounded.position.clone().sub(grounded.target);
 	const spherical = new Spherical().setFromVector3(offset);

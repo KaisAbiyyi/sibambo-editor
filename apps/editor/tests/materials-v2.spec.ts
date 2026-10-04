@@ -270,7 +270,7 @@ function observeRuntime(page: Page) {
 	page.context().on('response', (response) => {
 		const url = response.url();
 		if (!/\.wasm(?:[?#]|$)/i.test(url)) return;
-		wasmResponses.push({ url, status: response.status(), sameOrigin: new URL(url).origin === 'http://127.0.0.1:5175' || new URL(url).origin === 'http://localhost:5175' });
+		wasmResponses.push({ url, status: response.status(), sameOrigin: new URL(url).origin === new URL(page.url()).origin });
 	});
 	return { pageErrors, consoleErrors, wasmResponses };
 }

@@ -8,10 +8,11 @@
 	import type { EditorTool } from '$lib/editor/EditorState';
 	import { pinchZoomDelta, pointerCameraTool, selectionDragMode, selectionModifierMode, type EditorSelectionModifier } from '$lib/editor/camera-navigation';
 	import { loadE4InWorker } from '$lib/e4-worker-client';
-	import { type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewportPick } from '@sibambo/viewport';
+	import { type CameraDragSnapshot, type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewportPick } from '@sibambo/viewport';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
+	import { loadedModelTabTitle as resolveLoadedModelTabTitle } from '$lib/model-tab-title';
 
 	const build = __SIBAMBO_APP_BUILD__;
 
@@ -19,6 +20,7 @@
 	let provenanceFile = $state<File | null>(null);
 	let provenance = $state<ResearchProvenance | null>(null);
 	let artifactSha256 = $state('');
+	let modelTabTitle = $state('Sibambo Editor');
 	let result = $state.raw<AdaptedBomcResult | null>(null);
 	let session = $state.raw<EditorSession | null>(null);
 	let viewport = $state.raw<PreparedSceneViewport | null>(null);
@@ -52,10 +54,10 @@
 	let unsubscribeOccurrenceTransforms: (() => void) | null = null;
 	let pointerGesture: any = null;
 	const activeTouchPoints = new Map<number, { x: number; y: number }>();
-	type CameraPose = ReturnType<PreparedSceneViewport['getCameraPose']>;
 	type LoadedEditorState = {
 		provenance: ResearchProvenance | null;
 		artifactSha256: string;
+		modelTabTitle: string;
 		result: AdaptedBomcResult | null;
 		session: EditorSession | null;
 		viewport: PreparedSceneViewport | null;
@@ -70,7 +72,7 @@
 
 	function snapshotLoadedState(): LoadedEditorState {
 		return {
-			provenance, artifactSha256, result, session, viewport, ready, picked,
+			provenance, artifactSha256, modelTabTitle, result, session, viewport, ready, picked,
 			selectedOccurrenceHandles: [...selectedOccurrenceHandles], activeTool, sceneId,
 			hostChildren: viewportHost ? Array.from(viewportHost.childNodes) : []
 		};
@@ -88,6 +90,7 @@
 		if (session && session !== snapshot.session) session.dispose();
 		provenance = snapshot.provenance;
 		artifactSha256 = snapshot.artifactSha256;
+		modelTabTitle = snapshot.modelTabTitle;
 		result = snapshot.result;
 		session = snapshot.session;
 		viewport = snapshot.viewport;
@@ -215,6 +218,7 @@
 			nextViewport.setOnReady(() => { if (viewport === nextViewport && request === generation) ready = true; });
 			if (previous.viewport && previous.viewport !== nextViewport) previous.viewport.dispose();
 			if (previous.session && previous.session !== nextSession) previous.session.dispose();
+			modelTabTitle = resolveLoadedModelTabTitle({ modelName: loaded.modelName, sourceFileName: loaded.sourceFileName, selectedFileName: file.name }, 'Sibambo Editor');
 			activeLoadSnapshot = null;
 		} catch (cause) {
 			if (request === generation) {
@@ -264,6 +268,7 @@
 	}
 
 	function setTool(tool: EditorTool) {
+		cancelEditorCameraGesture();
 		if (tool === 'select' || tool === 'move') activeCameraTool = null;
 		if (tool === 'move') {
 			const handle = selectedOccurrenceHandles.length === 1 ? selectedOccurrenceHandles[0] : null;
@@ -336,6 +341,7 @@
 		updateSelection([pick.occurrenceHandle], mode, pick);
 	}
 	function activateScene(nextSceneId: string) {
+		cancelEditorCameraGesture();
 		sceneId = nextSceneId;
 		const selected = result?.scenes.find((scene) => scene.id === sceneId);
 		viewport?.setScene(selected ?? null);
@@ -361,15 +367,29 @@
 	function currentFrameRect(event: PointerEvent) {
 		return (event.currentTarget as HTMLElement).getBoundingClientRect();
 	}
+	function isEditorCameraGesture(gesture: any) {
+		return gesture?.kind === 'camera' || gesture?.kind === 'touch-pending' || gesture?.kind === 'touch-orbit' || gesture?.kind === 'touch-pair';
+	}
+	function finishEditorCameraGesture(gesture: any = pointerGesture) {
+		if (isEditorCameraGesture(gesture)) viewport?.endCameraDrag();
+	}
+	function cancelEditorCameraGesture() {
+		if (!isEditorCameraGesture(pointerGesture)) return;
+		finishEditorCameraGesture(pointerGesture);
+		pointerGesture = null;
+		activeTouchPoints.clear();
+	}
 	function startCameraGesture(event: PointerEvent, tool: 'orbit' | 'pan' | 'zoom') {
 		if (!viewport) return;
 		pointerGesture = {
 			kind: 'camera', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
-			lastY: event.clientY, moved: false, cameraTool: tool, cameraPose: viewport.getCameraPose()
+			lastY: event.clientY, moved: false, cameraTool: tool,
+			cameraSnapshot: tool === 'zoom' ? null : viewport.beginCameraDrag(tool)
 		};
 	}
 	function startTouchPairGesture() {
 		if (!viewport || activeTouchPoints.size < 2) return;
+		finishEditorCameraGesture(pointerGesture);
 		const points = [...activeTouchPoints.values()];
 		const center = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
 		const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
@@ -389,7 +409,7 @@
 			if (activeTouchPoints.size >= 2) startTouchPairGesture();
 			else pointerGesture = {
 				kind: 'touch-pending', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
-				moved: false, startPick: viewport.pickAt(event.clientX, event.clientY), cameraPose: viewport.getCameraPose()
+				moved: false, startPick: viewport.pickAt(event.clientX, event.clientY), cameraSnapshot: viewport.beginCameraDrag('orbit')
 			};
 			return;
 		}
@@ -418,7 +438,12 @@
 			const points = [...activeTouchPoints.values()];
 			const center = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
 			const distance = Math.max(Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y), 1);
-			viewport.dragCamera('pan', viewport.getCameraPose(), center.x - pointerGesture.lastCenter.x, center.y - pointerGesture.lastCenter.y, viewportHost?.clientHeight ?? 1);
+			const panSnapshot = viewport.beginCameraDrag('pan');
+			try {
+				viewport.dragCamera('pan', panSnapshot, center.x - pointerGesture.lastCenter.x, center.y - pointerGesture.lastCenter.y, viewportHost?.clientHeight ?? 1);
+			} finally {
+				viewport.endCameraDrag();
+			}
 			viewport.zoomAt(center.x, center.y, pinchZoomDelta(pointerGesture.lastTouchDistance, distance));
 			pointerGesture.lastCenter = center;
 			pointerGesture.lastTouchDistance = distance;
@@ -430,12 +455,12 @@
 		if (Math.hypot(deltaX, deltaY) > 4) pointerGesture.moved = true;
 		if (pointerGesture.kind === 'touch-pending' && pointerGesture.moved) pointerGesture.kind = 'touch-orbit';
 		if (pointerGesture.kind === 'touch-orbit') {
-			viewport.dragCamera('orbit', pointerGesture.cameraPose as CameraPose, deltaX, deltaY, viewportHost?.clientHeight ?? 1);
+			viewport.dragCamera('orbit', pointerGesture.cameraSnapshot as CameraDragSnapshot, deltaX, deltaY, viewportHost?.clientHeight ?? 1);
 		} else if (pointerGesture.kind === 'camera') {
 			if (pointerGesture.cameraTool === 'zoom') {
 				viewport.zoomAt(event.clientX, event.clientY, (event.clientY - pointerGesture.lastY) * 4);
 				pointerGesture.lastY = event.clientY;
-			} else viewport.dragCamera(pointerGesture.cameraTool, pointerGesture.cameraPose as CameraPose, deltaX, deltaY, viewportHost?.clientHeight ?? 1);
+			} else viewport.dragCamera(pointerGesture.cameraTool, pointerGesture.cameraSnapshot as CameraDragSnapshot, deltaX, deltaY, viewportHost?.clientHeight ?? 1);
 		} else if (pointerGesture.kind === 'select') {
 			if (pointerGesture.moved) {
 				const rect = currentFrameRect(event);
@@ -457,7 +482,8 @@
 			activeTouchPoints.delete(event.pointerId);
 			if (activeTouchPoints.size === 1 && pointerGesture?.kind === 'touch-pair') {
 				const [remainingId, position] = [...activeTouchPoints.entries()][0];
-				pointerGesture = { kind: 'touch-orbit', pointerId: remainingId, startX: position.x, startY: position.y, moved: true, cameraPose: viewport?.getCameraPose() };
+				finishEditorCameraGesture(pointerGesture);
+				pointerGesture = { kind: 'touch-orbit', pointerId: remainingId, startX: position.x, startY: position.y, moved: true, cameraSnapshot: viewport?.beginCameraDrag('orbit') };
 				return;
 			}
 			if (activeTouchPoints.size > 0) return;
@@ -465,6 +491,7 @@
 		if (!pointerGesture || (pointerGesture.pointerId !== event.pointerId && pointerGesture.pointerId !== -1)) return;
 		if (event.pointerType !== 'touch' && event.buttons !== 0) return;
 		const gesture = pointerGesture;
+		finishEditorCameraGesture(gesture);
 		pointerGesture = null;
 		selectionBox = null;
 		if (gesture.kind === 'select') {
@@ -488,6 +515,7 @@
 	function handleViewportPointerCancel(event: PointerEvent) {
 		activeTouchPoints.delete(event.pointerId);
 		selectionBox = null;
+		finishEditorCameraGesture(pointerGesture);
 		if (pointerGesture?.kind === 'move') {
 			editorController?.cancel();
 			editorController?.setTool('select');
@@ -518,6 +546,7 @@
 		}
 		if (event.key === 'Escape') {
 			event.preventDefault();
+			finishEditorCameraGesture(pointerGesture);
 			selectionBox = null;
 			pointerGesture = null;
 			activeTouchPoints.clear();
@@ -543,7 +572,7 @@
 			return;
 		}
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
-		if (key === 'z' && event.shiftKey) { event.preventDefault(); viewport?.fit(); activeCameraTool = null; return; }
+		if (key === 'z' && event.shiftKey) { event.preventDefault(); cancelEditorCameraGesture(); viewport?.fit(); activeCameraTool = null; return; }
 		if (key === 'm') { event.preventDefault(); setTool('move'); return; }
 		if (key === 'o' || key === 'h' || key === 'z') {
 			event.preventDefault();
@@ -589,6 +618,7 @@
 		applyDisplayState(faceStyle, { ...viewEffects, ambientOcclusion: (event.currentTarget as HTMLInputElement).checked });
 	}
 	function setCameraTool(tool: 'orbit' | 'pan' | 'zoom') {
+		cancelEditorCameraGesture();
 		if (activeTool === 'move') {
 			editorController?.cancel();
 			editorController?.setTool('select');
@@ -603,13 +633,19 @@
 		setTool('select');
 	}
 	function zoomExtents() {
+		cancelEditorCameraGesture();
 		viewport?.fit();
 		viewport?.levelCamera();
 		editorNotice = 'Zoom Extents · camera and anchor reframed to the visible model.';
 	}
 	function levelCamera() {
+		cancelEditorCameraGesture();
 		viewport?.levelCamera();
 		editorNotice = 'Camera leveled · imported roll removed while preserving the current view direction.';
+	}
+	function setCameraView(name: 'top' | 'front' | 'iso') {
+		cancelEditorCameraGesture();
+		viewport?.view(name);
 	}
 	function applyTheme() {
 		document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
@@ -641,6 +677,7 @@
 		error = loadStatus;
 	}
 	function unload() {
+		cancelEditorCameraGesture();
 		generation += 1;
 		evidenceGeneration += 1;
 		controller?.abort();
@@ -655,6 +692,7 @@
 		editorController = null;
 		editorNotice = '';
 		result = null;
+		modelTabTitle = 'Sibambo Editor';
 		sceneId = '';
 		provenance = null;
 		artifactSha256 = '';
@@ -700,7 +738,7 @@
 </script>
 
 <svelte:head>
-	<title>Sibambo Editor</title>
+	<title>{modelTabTitle}</title>
 	<meta name="description" content="Sibambo Editor model workspace with SketchUp-style camera navigation." />
 	<meta name="theme-color" content={darkMode ? '#15181C' : '#F7F8FA'} />
 </svelte:head>
@@ -744,9 +782,9 @@
 				<button type="button" onclick={zoomExtents} disabled={!viewport}>Zoom Extents<kbd>Shift+Z</kbd></button>
 				<button type="button" onclick={levelCamera} disabled={!viewport}>Level Camera</button>
 				<span class="menu-separator"></span>
-				<button type="button" onclick={() => viewport?.view('top')} disabled={!viewport}>Top</button>
-				<button type="button" onclick={() => viewport?.view('front')} disabled={!viewport}>Front</button>
-				<button type="button" onclick={() => viewport?.view('iso')} disabled={!viewport}>Iso</button>
+				<button type="button" onclick={() => setCameraView('top')} disabled={!viewport}>Top</button>
+				<button type="button" onclick={() => setCameraView('front')} disabled={!viewport}>Front</button>
+				<button type="button" onclick={() => setCameraView('iso')} disabled={!viewport}>Iso</button>
 			</div>
 		</details>
 		<button type="button" class="menu-label" aria-label="Draw menu placeholder">Draw</button>

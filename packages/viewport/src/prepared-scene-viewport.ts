@@ -1,4 +1,5 @@
 import {
+	MOUSE,
 	BufferAttribute,
 	BufferGeometry,
 	Box3,
@@ -44,7 +45,9 @@ import { renderProfilePolicy, resolveRenderProfile } from './render-profile.js';
 import { RuntimeAssetResolver } from './runtime-asset-resolver.js';
 import { RuntimeMaterialCache } from './source-material-cache.js';
 import { buildPreparedInstancedSurfaceGroups } from './prepared-surface.js';
-import { groundedCameraPose, orbitCameraDrag, panCameraDrag, uprightCameraUp, type CameraPose, type NavigationTool } from './camera-navigation.js';
+import { groundedCameraPose, groundPlaneAnchor, nearestGroundBoundsAnchor, orbitCameraDrag, panCameraDrag, perspectiveDollyStep, uprightCameraUp, type CameraDragSnapshot, type CameraPose, type DollyBurstState, type NavigationTool } from './camera-navigation.js';
+import { NavigationSurfaceQuery, type NavigationSurfaceRecord } from './navigation-surface-query.js';
+import { PreparedNavigationInput } from './prepared-navigation-input.js';
 import { SceneVisibilityIndex } from './scene-visibility.js';
 import { sourceEdgeMaterialDescriptor } from './source-edge-style.js';
 import { bomcClipPlaneToThreePlane, resolveSceneClipPlanes } from './scene-clip-program.js';
@@ -99,6 +102,7 @@ type MeshRecord = {
 	occurrenceInstanceIndices?: Uint32Array | number[];
 	occurrenceTagIndices?: Int32Array | number[];
 	visibleOccurrenceIndices: Set<number>;
+	navigationVisible: boolean;
 	geometryGroupIndex: number;
 	visibleSourceFaceIndicesByTriangle?: Uint32Array;
 	visibleOccurrenceCount: number;
@@ -134,6 +138,7 @@ export class PreparedSceneViewport {
 	private readonly requestedTextures = new Set<string>();
 	private readonly settledTextures = new Set<string>();
 	private readonly raycaster = new Raycaster();
+	private readonly navigationQuery = new NavigationSurfaceQuery();
 	private readonly pointer = new Vector2();
 	private disposed = false;
 	private activeSceneSignature: string | null = null;
@@ -147,6 +152,10 @@ export class PreparedSceneViewport {
 	private backend: RendererBackendName;
 	private readonly rendererInitializationMs: number;
 	private pixelRatio = 1;
+	private readonly automaticNavigation: PreparedNavigationInput;
+	private sceneEpoch = 0;
+	private lastDollyBurst: DollyBurstState | undefined;
+	private lastOrbitAnchor: Vector3 | null = null;
 	private onPick?: (pick: ViewportPick) => void;
 	private onReady?: (observation: RendererObservation) => void;
 	private readonly occurrenceTranslations = new Map<string, ViewportOccurrenceTranslation>();
@@ -172,6 +181,14 @@ export class PreparedSceneViewport {
 		this.backend = rendererHost.backend;
 		this.rendererInitializationMs = rendererHost.initializationMs;
 		this.pixelRatio = rendererHost.pixelRatio;
+		this.automaticNavigation = new PreparedNavigationInput(this.canvas, {
+			beginCameraDrag: (tool) => this.beginCameraDrag(tool),
+			dragCamera: (tool, start, deltaX, deltaY, height) => this.dragCamera(tool, start, deltaX, deltaY, height),
+			endCameraDrag: () => this.endCameraDrag(),
+			zoomAt: (x, y, delta) => this.zoomAt(x, y, delta),
+			getPrimaryTool: () => this.controls.mouseButtons.LEFT === MOUSE.PAN ? 'pan' : 'orbit',
+			getViewportHeight: () => this.canvas.getBoundingClientRect().height
+		});
 		rendererHost.setFrameHandlers(
 			undefined,
 			() => {
@@ -197,9 +214,12 @@ export class PreparedSceneViewport {
 		const selectedScene = input.scenes?.find((scene) => scene.id === input.activeSceneId) ?? input.scenes?.find((scene) => scene.isActiveAtExport);
 		if (selectedScene) this.setScene(selectedScene);
 		rendererHost.setResizeHandler(() => {
+			this.invalidateNavigationState();
 			if (this.initialFitComplete && this.selectedOccurrences.size) this.refreshSelectionHelpers();
 		});
 		this.fitWhenLaidOut(!(selectedScene?.useCamera && selectedScene.camera));
+		rendererHost.setOrbitControlsEnabled(false);
+		this.automaticNavigation.setEnabled(true);
 	}
 
 	static async mount(host: HTMLElement, input: PreparedSceneViewportInput, search = window.location.search): Promise<PreparedSceneViewport> {
@@ -239,6 +259,7 @@ export class PreparedSceneViewport {
 		this.materialState.applyDisplayState(next);
 		const nextSuppressed = shouldUseSuppressedSolidGeometry({ viewMode: this.viewMode, editorMode: this.input.editorMode ?? false, encodingProfile: this.input.encodingProfile });
 		if (previousSuppressed !== nextSuppressed) {
+			this.invalidateNavigationState();
 			this.applyGeometryMode();
 			this.applySourceFaceFilter();
 			this.rebuildSourceEdges();
@@ -255,6 +276,7 @@ export class PreparedSceneViewport {
 	}
 
 	setScene(scene: SceneProfile | null) {
+		this.invalidateNavigationState();
 		this.activeScene = scene;
 		this.activeSceneSignature = scene?.visibilitySignature ?? null;
 		this.rendererHost.applySceneCamera(scene);
@@ -270,6 +292,7 @@ export class PreparedSceneViewport {
 
 	/** Filter displayed triangles to source faces selected by the current domain workflow. */
 	setSourceFaceFilter(sourceFaces: readonly ViewportSourceFaceReference[] | null) {
+		this.invalidateNavigationState();
 		this.activeSourceFaceFilter = sourceFaces;
 		this.activeOccurrenceHandles = new Set((sourceFaces ?? []).flatMap((reference) => reference.occurrenceHandle ? [reference.occurrenceHandle] : []));
 		this.sourceFaceFilterAllowsAllOccurrences = sourceFaces?.some((reference) => reference.occurrenceHandle === undefined) ?? false;
@@ -298,7 +321,10 @@ export class PreparedSceneViewport {
 
 	setOnPick(handler?: (pick: ViewportPick) => void) { this.onPick = handler; }
 	setOnReady(handler?: (observation: RendererObservation) => void) { this.onReady = handler; if (this.readyAtMs !== null) handler?.(this.observe()); }
-	setOrbitControlsEnabled(enabled: boolean) { this.rendererHost.setOrbitControlsEnabled(enabled); }
+	setOrbitControlsEnabled(enabled: boolean) {
+		this.rendererHost.setOrbitControlsEnabled(false);
+		this.automaticNavigation.setEnabled(enabled);
+	}
 	getCameraPose(): CameraPose { return { position: this.camera.position.clone(), target: this.controls.target.clone() }; }
 	setCameraPose(pose: CameraPose) {
 		// Editor camera navigation owns the pose directly. The controls target is the
@@ -312,13 +338,39 @@ export class PreparedSceneViewport {
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 	}
+	beginCameraDrag(tool: NavigationTool): CameraDragSnapshot {
+		const pose = this.getCameraPose();
+		let orbitAnchor: Vector3 | null = this.lastOrbitAnchor?.toArray().every(Number.isFinite) ? this.lastOrbitAnchor.clone() : null;
+		if (tool === 'orbit') {
+			orbitAnchor = nearestGroundBoundsAnchor(pose, this.fittedBounds);
+			if (!orbitAnchor) {
+				this.camera.updateMatrixWorld(true);
+				this.raycaster.setFromCamera(new Vector2(0, 0), this.camera);
+				const hit = this.navigationQuery.query(this.raycaster, this.navigationSurfaceRecords(), this.activeClipPlanes, this.navigationEpsilon());
+				if (hit) orbitAnchor = new Vector3(hit.point.x, 0, hit.point.z);
+			}
+			orbitAnchor ??= groundPlaneAnchor(pose);
+		}
+		if (!orbitAnchor || !orbitAnchor.toArray().every(Number.isFinite)) {
+			const previousAnchor = this.lastOrbitAnchor;
+			orbitAnchor = previousAnchor?.toArray().every(Number.isFinite)
+				? previousAnchor.clone()
+				: pose.target.clone().setY(0);
+		}
+		this.lastOrbitAnchor = orbitAnchor.clone();
+		return { pose, orbitAnchor: orbitAnchor.clone(), sceneEpoch: this.sceneEpoch };
+	}
+	endCameraDrag() {
+		this.lastDollyBurst = undefined;
+	}
 	levelCamera() {
 		this.setCameraPose(this.getCameraPose());
 	}
-	dragCamera(tool: NavigationTool, start: CameraPose, deltaX: number, deltaY: number, viewportHeight: number) {
+	dragCamera(tool: NavigationTool, start: CameraDragSnapshot, deltaX: number, deltaY: number, viewportHeight: number) {
+		if (this.disposed || start.sceneEpoch !== this.sceneEpoch) return;
 		this.setCameraPose(tool === 'orbit'
-			? orbitCameraDrag(start, deltaX, deltaY)
-			: panCameraDrag(this.camera, start, deltaX, deltaY, viewportHeight));
+			? orbitCameraDrag(start.pose, deltaX, deltaY, undefined, start.orbitAnchor)
+			: panCameraDrag(this.camera, start.pose, deltaX, deltaY, viewportHeight));
 	}
 	moveDeltaForScreenDrag(deltaX: number, deltaY: number, viewportHeight: number): [number, number, number] {
 		const direction = this.controls.target.clone().sub(this.camera.position).normalize();
@@ -347,25 +399,29 @@ export class PreparedSceneViewport {
 			this.controls.target.add(shift);
 			this.camera.zoom = Math.max(1e-8, Math.min(1e8, this.camera.zoom / factor));
 			this.camera.updateProjectionMatrix();
-		} else {
-			const surface = this.cursorSurfaceHit();
-			const span = this.modelSpan();
-			const targetDistance = Math.max(this.camera.position.distanceTo(this.controls.target), span * 0.001);
-			const anchorDistance = surface?.distance ?? (planeAnchor ? this.camera.position.distanceTo(planeAnchor) : targetDistance);
-			const wheelMagnitude = Math.max(0.08, Math.min(2.5, Math.abs(deltaY) / 100));
-			// The floor term deliberately prevents asymptotic convergence at a picked surface:
-			// repeated zoom-in steps eventually cross it, matching a camera dolly rather than a finite lens zoom.
-			const step = Math.max(anchorDistance * 0.18, span * 0.0005, 0.0005) * wheelMagnitude;
-			const direction = this.raycaster.ray.direction.clone().normalize();
-			const travel = direction.multiplyScalar((deltaY < 0 ? 1 : -1) * step);
-			this.camera.position.add(travel);
-			this.controls.target.add(travel);
+			const grounded = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
+			this.camera.position.copy(grounded.position);
+			this.controls.target.copy(grounded.target);
+			this.camera.up.copy(uprightCameraUp(grounded));
+			this.camera.lookAt(grounded.target);
+			this.camera.updateMatrixWorld();
+			this.rendererHost.updateClipRange(this.fittedBounds);
+			return;
 		}
-		const grounded = groundedCameraPose({ position: this.camera.position, target: this.controls.target });
-		this.camera.position.copy(grounded.position);
-		this.controls.target.copy(grounded.target);
-		this.camera.up.copy(uprightCameraUp(grounded));
-		this.camera.lookAt(grounded.target);
+		const surface = this.cursorSurfaceHit();
+		const span = this.modelSpan();
+		const targetDistance = Math.max(this.camera.position.distanceTo(this.controls.target), span * 0.001);
+		const planeDistance = planeAnchor ? this.camera.position.distanceTo(planeAnchor) : Number.NaN;
+		const depth = surface?.distance ?? (Number.isFinite(planeDistance) && planeDistance > 0 ? planeDistance : targetDistance);
+		const dolly = perspectiveDollyStep(depth, span, deltaY, this.lastDollyBurst, performance.now());
+		if (!dolly) return;
+		this.lastDollyBurst = dolly.state;
+		const direction = this.raycaster.ray.direction.clone().normalize();
+		const travel = direction.multiplyScalar((deltaY < 0 ? 1 : -1) * dolly.step);
+		this.camera.position.add(travel);
+		this.controls.target.add(travel);
+		this.camera.up.copy(uprightCameraUp({ position: this.camera.position, target: this.controls.target }));
+		this.camera.lookAt(this.controls.target);
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 	}
@@ -431,6 +487,7 @@ export class PreparedSceneViewport {
 		this.renderOnce();
 	}
 	setOccurrenceTransforms(transforms: ReadonlyMap<string, ViewportOccurrenceTranslation>) {
+		this.invalidateNavigationState();
 		const previous = new Map(this.occurrenceTranslations);
 		this.occurrenceTranslations.clear();
 		for (const [handle, translation] of transforms) {
@@ -440,6 +497,7 @@ export class PreparedSceneViewport {
 		this.applyOccurrenceTransforms(changed);
 	}
 	setOccurrencePreview(occurrenceHandle: string | null, translation?: ViewportOccurrenceTranslation | null) {
+		this.invalidateNavigationState();
 		const previousHandle = this.occurrencePreview?.handle;
 		this.occurrencePreview = occurrenceHandle && translation && this.hasOccurrence(occurrenceHandle)
 			? { handle: occurrenceHandle, translation: [...translation] as ViewportOccurrenceTranslation } : null;
@@ -448,18 +506,22 @@ export class PreparedSceneViewport {
 	}
 
 	fit() {
+		this.invalidateNavigationState();
 		const bounds = visibleSceneBounds(this.meshRecords);
 		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 		this.refreshNavigationAxes();
-		this.focusBounds(this.fittedBounds);
+		this.rendererHost.focusBounds(this.fittedBounds);
+		this.renderOnce();
 	}
 
 	focusBounds(bounds: ViewportBounds) {
+		this.invalidateNavigationState();
 		this.rendererHost.focusBounds(bounds);
 		this.renderOnce();
 	}
 
 	view(name: 'top' | 'front' | 'iso') {
+		this.invalidateNavigationState();
 		this.rendererHost.view(this.fittedBounds, name);
 		this.renderOnce();
 	}
@@ -509,6 +571,9 @@ export class PreparedSceneViewport {
 
 	dispose() {
 		if (this.disposed) return;
+		this.invalidateNavigationState();
+		this.automaticNavigation.dispose();
+		this.navigationQuery.dispose();
 		this.disposed = true;
 		if (this.initialFitHandle) cancelAnimationFrame(this.initialFitHandle);
 		this.initialFitHandle = 0;
@@ -587,6 +652,7 @@ export class PreparedSceneViewport {
 				occurrenceHierarchyIndices: group.occurrenceHierarchyIndices,
 				occurrenceInstanceIndices: group.occurrenceInstanceIndices, occurrenceTagIndices: group.occurrenceTagIndices,
 				visibleOccurrenceIndices: new Set(Array.from({ length: surface.instanceCount }, (_, index) => index)), geometryGroupIndex: groupIndex,
+				navigationVisible: false,
 				visibleOccurrenceCount: surface.instanceCount, visibleSceneSignatures: group.visibleSceneSignatures,
 				sourceOccurrenceIndices: Array.from({ length: surface.instanceCount }, (_, index) => index),
 				computeNormalsFromSource: !(surface.buffers.normals?.length === surface.buffers.positions.length)
@@ -743,6 +809,7 @@ export class PreparedSceneViewport {
 					occurrenceInstanceIndices: subset(base.occurrenceInstanceIndices, occurrences),
 					occurrenceTagIndices: subset(base.occurrenceTagIndices, occurrences),
 					visibleOccurrenceIndices: new Set(occurrences.map((_, index) => index)),
+					navigationVisible: false,
 					sourceOccurrenceIndices: occurrences.map((index) => base.sourceOccurrenceIndices[index]),
 					visibleOccurrenceCount: occurrences.length
 				};
@@ -763,8 +830,8 @@ export class PreparedSceneViewport {
 				this.occurrenceVisible(record.occurrenceHierarchyIndices?.[occurrence], record.occurrenceInstanceIndices?.[occurrence], record.occurrenceTagIndices?.[occurrence], compiled, record.occurrenceHandles?.[occurrence], profile)
 			);
 			record.visibleOccurrenceCount = record.visibleOccurrenceIndices.size;
-			record.mesh.visible = this.displayState.faceStyle !== 'wireframe'
-				&& !isBaseHiddenForIsolation && signatureVisible && record.baseIndices.length > 0 && record.visibleOccurrenceCount > 0;
+			record.navigationVisible = !isBaseHiddenForIsolation && signatureVisible && (record.mesh.geometry.index?.count ?? 0) > 0 && record.visibleOccurrenceCount > 0;
+			record.mesh.visible = record.navigationVisible && this.displayState.faceStyle !== 'wireframe';
 		}
 		this.applyOccurrenceTransforms(new Set([...this.occurrenceTranslations.keys(), ...(this.occurrencePreview ? [this.occurrencePreview.handle] : [])]));
 	}
@@ -866,14 +933,15 @@ export class PreparedSceneViewport {
 		);
 	}
 	private cursorSurfaceHit() {
-		const epsilon = Math.max(this.modelSpan() * 1e-6, 1e-6);
-		const visible = this.meshRecords.filter((record) => record.mesh.visible);
-		const records = new Map(visible.map((record) => [record.mesh, record]));
-		return this.raycaster.intersectObjects(visible.map((record) => record.mesh), false).find((candidate) => {
-			const record = records.get(candidate.object as InstancedMesh);
-			return Boolean(record && candidate.distance > epsilon && !isPointClipped(candidate.point, this.activeClipPlanes)
-				&& (candidate.instanceId === undefined || record.visibleOccurrenceIndices.has(candidate.instanceId)));
-		}) ?? null;
+		return this.navigationQuery.query(this.raycaster, this.navigationSurfaceRecords(), this.activeClipPlanes, this.navigationEpsilon());
+	}
+	private navigationSurfaceRecords(): readonly NavigationSurfaceRecord[] { return this.meshRecords; }
+	private navigationEpsilon() { return Math.max(this.modelSpan() * 1e-6, 1e-6); }
+	private invalidateNavigationState() {
+		this.sceneEpoch += 1;
+		this.lastDollyBurst = undefined;
+		this.lastOrbitAnchor = null;
+		this.automaticNavigation?.cancel();
 	}
 	private renderOnce() { if (!this.disposed) this.rendererHost.renderNow(); }
 	private fitWhenLaidOut(shouldFit = true) {
@@ -917,7 +985,8 @@ export class PreparedSceneViewport {
 		if (this.disposed) return;
 		event.preventDefault();
 		event.stopImmediatePropagation();
-		this.zoomAt(event.clientX, event.clientY, event.deltaY);
+		const deltaPixels = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? this.canvas.getBoundingClientRect().height : 1);
+		this.zoomAt(event.clientX, event.clientY, deltaPixels);
 	};
 
 	private handleClick = (event: MouseEvent) => {

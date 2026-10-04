@@ -4,8 +4,8 @@ import { crc32 } from '../../packages/e4-import/src/container';
 
 type SectionInput = { type: number; bytes: Uint8Array; count: number; compress?: boolean };
 
-export function makeTinyBomc12(options: { faceSurfaceCode?: number; faceRoleCode?: number } = {}): Uint8Array {
-	const strings = stringSection(['model', 'tiny-browser-test.bomc']);
+export function makeTinyBomc12(options: { faceSurfaceCode?: number; faceRoleCode?: number; modelName?: string; sourceFileName?: string } = {}): Uint8Array {
+	const strings = stringSection([options.modelName ?? 'model', options.sourceFileName ?? 'tiny-browser-test.bomc']);
 	const positions = positionBlock(2, packF32([0, 0, 0, 2, 0, 0, 0, 2, 0]), [0, 0, 0], [0, 0, 0], 3);
 	const topology = topologyBlock([0, 1, 2], [0, 1, 2]);
 	const model = concat(Uint8Array.of(1, 1, 1, 5), packU32([0]), packF64([0, 0, 0, 2, 2, 0]), packU32([0, 0, 1, 1, 1, 1, 1, 0, 0]), Uint8Array.of(1, 0));

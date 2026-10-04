@@ -1,5 +1,5 @@
 export { applyNavigationShortcutToControls, cameraPresetPose, handleNavigationShortcut, middleMouseAction, orbitCameraDrag, orbitControlsMouseAction, panCameraDrag, resolveNavigationShortcut, resolvePointerNavigationAction } from './camera-navigation.js';
-export type { CameraNavigationAction, CameraPose, CameraPreset, CameraPresetBounds, NavigationTool } from './camera-navigation.js';
+export type { CameraDragSnapshot, CameraNavigationAction, CameraPose, CameraPreset, CameraPresetBounds, DollyBurstState, NavigationTool } from './camera-navigation.js';
 export {
 	DEFAULT_DISPLAY_STATE,
 	MaterialStateManager,
