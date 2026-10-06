@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,7 @@ export type ResolvedBomcProfileFixture = BomcProfileFixturePin & { path: string;
 const editorRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const workspaceRoot = path.resolve(editorRoot, '..');
 const fixtureRoot = path.join(workspaceRoot, 'skps', 'model-eval-exports');
+const MAX_RELOCATION_ENTRIES = 4096;
 
 const models = [
 	{
@@ -70,18 +71,64 @@ export function resolveBomcProfileFixture(pin: BomcProfileFixturePin): ResolvedB
 	}
 	const expectedPath = path.resolve(fixtureRoot, pin.folder, pin.fileName);
 	assertInside(fixtureRoot, expectedPath);
-	const realPath = realpathSync(expectedPath);
-	assertInside(realpathSync(fixtureRoot), realPath);
-	const stat = statSync(realPath);
-	if (!stat.isFile() || stat.size !== pin.bytes) throw new Error(`BOMC profile fixture byte length differs from its pin: ${pin.id}`);
-	const bytes = readFileSync(realPath);
-	const sha256 = createHash('sha256').update(bytes).digest('hex');
-	if (sha256 !== pin.sha256) throw new Error(`BOMC profile fixture SHA-256 differs from its pin: ${pin.id}`);
+	const rootReal = realpathSync(fixtureRoot);
+	let realPath: string;
+	if (existsSync(expectedPath)) {
+		realPath = realpathSync(expectedPath);
+		assertInside(rootReal, realPath);
+		verifyPinnedFixture(pin, realPath);
+	} else {
+		realPath = findVerifiedRelocation(pin, rootReal, expectedPath);
+	}
 	return { ...pin, path: expectedPath, realPath };
 }
 
 export function resolveAllBomcProfileFixtures(): ResolvedBomcProfileFixture[] {
 	return BOMC_PROFILE_FIXTURE_PINS.map(resolveBomcProfileFixture);
+}
+
+function verifyPinnedFixture(pin: BomcProfileFixturePin, filePath: string) {
+	const stat = statSync(filePath);
+	if (!stat.isFile() || stat.size !== pin.bytes) throw new Error(`BOMC profile fixture byte length differs from its pin: ${pin.id}`);
+	const bytes = readFileSync(filePath);
+	const sha256 = createHash('sha256').update(bytes).digest('hex');
+	if (sha256 !== pin.sha256) throw new Error(`BOMC profile fixture SHA-256 differs from its pin: ${pin.id}`);
+}
+
+function findVerifiedRelocation(pin: BomcProfileFixturePin, rootReal: string, expectedPath: string) {
+	const matches: string[] = [];
+	const pending = [rootReal];
+	let visitedEntries = 0;
+	while (pending.length) {
+		const current = pending.shift()!;
+		const entries = readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+		for (const entry of entries) {
+			visitedEntries += 1;
+			if (visitedEntries > MAX_RELOCATION_ENTRIES) {
+				throw new Error(`BOMC profile fixture relocation search exceeded ${MAX_RELOCATION_ENTRIES} entries: ${pin.id}`);
+			}
+			const candidatePath = path.join(current, entry.name);
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) {
+				pending.push(candidatePath);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			const stat = statSync(candidatePath);
+			if (stat.size !== pin.bytes) continue;
+			const realPath = realpathSync(candidatePath);
+			assertInside(rootReal, realPath);
+			const sha256 = createHash('sha256').update(readFileSync(realPath)).digest('hex');
+			if (sha256 === pin.sha256) matches.push(realPath);
+		}
+	}
+	if (matches.length === 0) {
+		throw new Error(`Pinned BOMC profile fixture is missing and no verified relocation was found: ${pin.id}; expected ${expectedPath}`);
+	}
+	if (matches.length > 1) {
+		throw new Error(`Pinned BOMC profile fixture relocation is ambiguous: ${pin.id}; matches=${matches.join(', ')}`);
+	}
+	return matches[0]!;
 }
 
 function assertInside(root: string, target: string) {
