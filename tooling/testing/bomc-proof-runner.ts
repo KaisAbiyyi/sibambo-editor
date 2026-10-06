@@ -4,9 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	claimProofAttempt, collectExecutionRootFiles, captureSourceIdentity, evaluateFinalGate,
-	inventoryFiles, parsePlaywrightReportJson, resolveProofPaths, setupFailureReason, validateSealedSourceSnapshot, writeProofSidecar, type ColdCycle, type PlaywrightReport,
+	inventoryFiles, parsePlaywrightReportJson, resolveProofPaths, setupFailureReason, unresolvedFixturesForTrack, validateSealedSourceSnapshot, writeProofSidecar, type ColdCycle, type PlaywrightReport,
 	type PlaywrightSpec, type ProofAttempt, type ProofPaths, type ProofTicket, type ProofTrack
 } from './proof-run-contract';
+import { withRuntimeProofLease } from './runtime-proof-lease.js';
 
 const nodePath = 'C:/Users/kaisa/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe';
 const editorRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -34,7 +35,10 @@ async function main() {
 	const occupied = inspectPort(port);
 	if (occupied.length) return fail(`Port ${port} is occupied before ${args.track}; owners=${JSON.stringify(occupied)}`);
 	if (args.mode === 'discover') return await discover(args, paths, runtime, port);
-	return await run(args, paths, runtime, port);
+	return await withRuntimeProofLease(
+		async () => await run(args, paths, runtime, port),
+		{ onWaiting: (owner, waitedMs) => process.stderr.write(`Heavy proof lease held by ${owner.repository} PID ${owner.ownerPID}; waited ${Math.round(waitedMs / 1000)}s.\n`) }
+	);
 }
 
 function parseArguments(argv: string[]): Arguments {
@@ -106,9 +110,15 @@ async function discover(args: Arguments, paths: ProofPaths, runtime: ProofTicket
 }
 
 async function run(args: Arguments, paths: ProofPaths, runtime: ProofTicket['runtime'], port: number) {
+	const unavailable = unresolvedFixturesForTrack(args.track);
+	if (unavailable.length) {
+		console.log(JSON.stringify({ track: args.track, gate: 'blocked', reason: 'Exact inherited input bytes are unavailable; no attempt was claimed.', unavailableFixtures: unavailable }, null, 2));
+		process.exitCode = 2;
+		return;
+	}
 	const ticket = claimProofAttempt({
 		track: args.track, executionRoot: args.root, attempt: args.attempt, cycle: args.cycle,
-		previousReceipt: args.coldReceipt, runtime, requireCommonSnapshot: true
+		previousReceipt: args.coldReceipt, runtime
 	});
 	const reportDir = path.dirname(ticket.reportFile);
 	mkdirSync(reportDir, { recursive: true });
@@ -162,6 +172,7 @@ async function run(args: Arguments, paths: ProofPaths, runtime: ProofTicket['run
 
 function proofEnvironment(args: Arguments, paths: ProofPaths, ticket: ProofTicket | null): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env };
+	if (!env.SIBAMBO_PROOF_SNAPSHOT || !path.isAbsolute(env.SIBAMBO_PROOF_SNAPSHOT)) throw new Error('SIBAMBO_PROOF_SNAPSHOT must be an absolute path before starting proof discovery or execution.');
 	delete env.SIBAMBO_RECOVERY_WORKLOG; delete env.SIBAMBO_RECOVERY_ATTEMPT;
 	delete env.SIBAMBO_WRITER_WORKLOG; delete env.SIBAMBO_WRITER_ATTEMPT;
 	delete env.SIBAMBO_STABILITY_RUN; delete env.SIBAMBO_STABILITY_CYCLE;

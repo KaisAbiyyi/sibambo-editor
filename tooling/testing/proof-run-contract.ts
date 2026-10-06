@@ -5,6 +5,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BOMC_PROFILE_FIXTURE_PINS, resolveAllBomcProfileFixtures } from './bomc-profile-fixtures.js';
 
 export type ProofTrack = 'mirror' | 'cold' | 'semantic' | 'writer';
 export type ColdCycle = 'cold-01' | 'cold-02' | 'cold-03' | 'warm-01';
@@ -14,7 +15,7 @@ export type SourceIdentity = {
 	dirty: boolean;
 	dirtyPaths: string[];
 	sourceInventory: Array<{ path: string; bytes: number; sha256: string }>;
-	fixturePins: Array<{ id: string; path: string; bytes: number; sha256: string }>;
+	fixturePins: Array<{ id: string; path: string; resolvedPath: string | null; bytes: number; sha256: string }>;
 	identitySha256: string;
 };
 export type ProofPaths = {
@@ -34,8 +35,9 @@ export type ProofPaths = {
 };
 export type ProofTicket = SourceIdentity & ProofPaths & {
 	schemaVersion: 'sibambo-proof-run-v1';
-	planId: 'BOMC-PHASE2A-READINESS-001';
+	planId: 'BOMC-EDITOR-NEXT-001';
 	planVersion: '1.1';
+	snapshotPath: string;
 	nonce: string;
 	repoRoot: string;
 	runtime: { node: string; nodePath: string; bun: string; playwright: string };
@@ -44,18 +46,26 @@ export type ProofTicket = SourceIdentity & ProofPaths & {
 };
 export type DiscoveryContext = ProofPaths & {
 	discoveryOnly: true;
-	planId: 'BOMC-PHASE2A-READINESS-001';
+	planId: 'BOMC-EDITOR-NEXT-001';
 	planVersion: '1.1';
 	};
 export type ReadProofContext = ProofTicket | DiscoveryContext;
+export type ProofRuntime = { node: string; nodePath: string; bun: string; playwright: string };
+export type ProofSourceSnapshot = {
+	schemaVersion: 'sibambo-editor-next-source-snapshot-v1';
+	planId: 'BOMC-EDITOR-NEXT-001';
+	planVersion: '1.1';
+	capturedAt: string;
+	sourceIdentity: SourceIdentity;
+	runtime: ProofRuntime;
+};
 
 const helperDir = path.dirname(fileURLToPath(import.meta.url));
 export const editorRoot = path.resolve(helperDir, '../..');
 export const workspaceRoot = path.resolve(editorRoot, '..');
 const worklogRoot = path.join(workspaceRoot, 'docs', 'worklogs');
-const planId = 'BOMC-PHASE2A-READINESS-001' as const;
+const planId = 'BOMC-EDITOR-NEXT-001' as const;
 const planVersion = '1.1' as const;
-const commonSnapshotFile = path.join(worklogRoot, planId, '2026-10-06-implementation-run-001', 'common-source-snapshot.json');
 const toolNodePath = 'C:/Users/kaisa/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe';
 
 const testTitles: Record<ProofTrack, (cycle: ColdCycle | 'stability' | null) => string[]> = {
@@ -122,7 +132,7 @@ const sourceFiles = [
 	'package.json', 'bun.lock', 'tsconfig.json', 'packages/tsconfig.json',
 	'apps/editor/package.json', 'apps/editor/tsconfig.json', 'apps/editor/svelte.config.js',
 	'apps/editor/vite.config.ts', 'apps/editor/playwright.config.ts',
-	'apps/editor/playwright.dev.config.ts', 'apps/editor/playwright.stability.config.ts'
+	'apps/editor/playwright.dev.config.ts', 'apps/editor/playwright.stability.config.ts', 'apps/editor/playwright.profiles.config.ts'
 ];
 
 export function resolveProofPaths(input: {
@@ -194,14 +204,27 @@ export function captureSourceIdentity(): SourceIdentity {
 	return { testedHead, dirty: dirtyPaths.length > 0, dirtyPaths, sourceInventory: inventory, fixturePins: fixtures, identitySha256: sha256(digestInput) };
 }
 
+export function captureProofRuntime(): ProofRuntime {
+	const node = execFileSync(toolNodePath, ['--version'], { cwd: editorRoot, encoding: 'utf8' }).trim();
+	const bun = execFileSync('bun', ['--version'], { cwd: editorRoot, encoding: 'utf8' }).trim();
+	const playwright = (JSON.parse(readFileSync(path.join(editorRoot, 'node_modules', '@playwright', 'test', 'package.json'), 'utf8')) as { version: string }).version;
+	return { node, nodePath: toolNodePath, bun, playwright };
+}
+
+export function unresolvedFixturesForTrack(track: ProofTrack, identity = captureSourceIdentity()) {
+	const required = track === 'mirror' ? ['S1-new', 'S2-new']
+		: track === 'cold' ? ['S2-new']
+		: track === 'semantic' ? ['S2-new', 'S2-jcm'] : [];
+	return identity.fixturePins.filter((fixture) => required.includes(fixture.id) && fixture.resolvedPath === null);
+}
+
 export function claimProofAttempt(input: {
 	track: ProofTrack; executionRoot: string; attempt: ProofAttempt;
-	cycle?: ColdCycle | 'stability'; previousReceipt?: string | null; runtime: ProofTicket['runtime']; requireCommonSnapshot?: boolean
+	cycle?: ColdCycle | 'stability'; previousReceipt?: string | null; runtime: ProofTicket['runtime']
 }): ProofTicket {
 	const paths = resolveProofPaths(input);
 	const identity = captureSourceIdentity();
-	if (input.requireCommonSnapshot) validateSealedSourceSnapshot(identity);
-	else validateCommonSourceSnapshot(identity);
+	const snapshotPath = validateSealedSourceSnapshot(identity, input.runtime);
 	let previousReceipt: string | null = null;
 	if (input.attempt === '02') {
 		const attemptOne = resolveProofPaths({ ...input, attempt: '01' });
@@ -233,7 +256,7 @@ export function claimProofAttempt(input: {
 	const claim = {
 		...paths,
 		schemaVersion: 'sibambo-proof-run-v1' as const,
-		planId, planVersion,
+		planId, planVersion, snapshotPath,
 		nonce: randomUUID(),
 		repoRoot: editorRoot,
 		...identity,
@@ -255,7 +278,7 @@ export function readProofTicket(expectedTrack?: ProofTrack): ReadProofContext {
 		const track = expectedTrack ?? inferTrack(env);
 		if (expectedTrack && inferTrack(env) !== expectedTrack) throw new Error(`Discovery environment does not match ${expectedTrack}.`);
 		const resolved = resolveProofPaths({ track, executionRoot: requiredTrackRoot(track, env), attempt: requiredAttempt(track, env), cycle: requiredCycle(track, env) });
-		validateSealedSourceSnapshot();
+		validateSealedSourceSnapshot(captureSourceIdentity(), captureProofRuntime());
 		return { ...resolved, discoveryOnly: true, planId, planVersion };
 	}
 	const ticketPath = env.SIBAMBO_PROOF_TICKET;
@@ -265,6 +288,7 @@ export function readProofTicket(expectedTrack?: ProofTrack): ReadProofContext {
 	if (path.resolve(ticket.repoRoot) !== path.resolve(editorRoot)) throw new Error('Proof ticket repository root is invalid.');
 	if (expectedTrack && ticket.track !== expectedTrack) throw new Error(`Proof ticket track ${ticket.track} does not match ${expectedTrack}.`);
 	if (env.SIBAMBO_PROOF_NONCE !== ticket.nonce) throw new Error('Proof ticket nonce does not match the runner environment.');
+	if (path.resolve(ticket.snapshotPath) !== path.resolve(requiredProofSnapshotPath(env))) throw new Error('Proof ticket snapshotPath does not match SIBAMBO_PROOF_SNAPSHOT.');
 	const paths = resolveProofPaths({ track: ticket.track, executionRoot: ticket.executionRoot, attempt: ticket.attempt, cycle: ticket.cycle ?? undefined });
 	for (const key of ['canonicalTopicRoot', 'claimRoot', 'outputDir', 'reportFile', 'finalGateFile', 'configPath', 'specPath'] as const) {
 		if (path.resolve(ticket[key]) !== path.resolve(paths[key])) throw new Error(`Proof ticket ${key} does not match its validated path.`);
@@ -283,7 +307,7 @@ export function readProofTicket(expectedTrack?: ProofTrack): ReadProofContext {
 	if (requiredTrackRoot(ticket.track, env) !== ticket.executionRoot || requiredAttempt(ticket.track, env) !== ticket.attempt || (requiredCycle(ticket.track, env) ?? null) !== ticket.cycle) throw new Error('Legacy config environment does not match the immutable ticket.');
 	validateTicketCache(ticket, paths);
 	const current = captureSourceIdentity();
-	validateSealedSourceSnapshot(current);
+	validateSealedSourceSnapshot(current, ticket.runtime);
 	if (!sameIdentity(ticket, current)) throw new Error('Current source or fixture identity differs from the frozen proof ticket.');
 	return ticket;
 }
@@ -476,14 +500,20 @@ export function sameRuntime(left: ProofTicket['runtime'], right: ProofTicket['ru
 	return left.node === right.node && path.resolve(left.nodePath) === path.resolve(right.nodePath) && left.bun === right.bun && left.playwright === right.playwright;
 }
 
-export function validateSealedSourceSnapshot(identity = captureSourceIdentity()) {
-	if (!existsSync(commonSnapshotFile)) throw new Error(`The frozen common source snapshot is missing: ${commonSnapshotFile}`);
-	const sealed = readJson<SourceIdentity>(commonSnapshotFile);
-	if (!sameIdentity(sealed, identity)) throw new Error('Current source/fixture inventory differs from the sealed common readiness snapshot.');
-}
-
-function validateCommonSourceSnapshot(identity: SourceIdentity) {
-	if (existsSync(commonSnapshotFile)) validateSealedSourceSnapshot(identity);
+export function validateSealedSourceSnapshot(identity = captureSourceIdentity(), runtime = captureProofRuntime()) {
+	const snapshotPath = requiredProofSnapshotPath(process.env);
+	const topicRoot = path.join(worklogRoot, planId);
+	if (!existsSync(topicRoot) || !statSync(topicRoot).isDirectory()) throw new Error(`Canonical plan worklog topic is missing: ${topicRoot}`);
+	assertPotentialPathInside(realpathSync(topicRoot), snapshotPath);
+	if (!existsSync(snapshotPath) || !statSync(snapshotPath).isFile() || lstatSync(snapshotPath).isSymbolicLink()) throw new Error(`The sealed source snapshot is missing or not a regular file: ${snapshotPath}`);
+	assertRealpathInside(realpathSync(topicRoot), snapshotPath);
+	const sealed = readJson<ProofSourceSnapshot>(snapshotPath);
+	if (sealed.schemaVersion !== 'sibambo-editor-next-source-snapshot-v1' || sealed.planId !== planId || sealed.planVersion !== planVersion) {
+		throw new Error('Sealed source snapshot schema or governing plan identity is invalid.');
+	}
+	if (!sameIdentity(sealed.sourceIdentity, identity)) throw new Error('Current source/fixture inventory differs from the sealed Editor-next source snapshot.');
+	if (!sameRuntime(sealed.runtime, runtime)) throw new Error('Current proof runtime differs from the sealed Editor-next source snapshot.');
+	return snapshotPath;
 }
 
 function validateTicketCache(ticket: ProofTicket, paths: ProofPaths) {
@@ -504,6 +534,12 @@ function requiredTrackRoot(track: ProofTrack, env: NodeJS.ProcessEnv) {
 	const value = track === 'mirror' ? env.SIBAMBO_RECOVERY_WORKLOG
 		: track === 'writer' ? env.SIBAMBO_WRITER_WORKLOG : env.SIBAMBO_STABILITY_RUN;
 	if (!value || !path.isAbsolute(value)) throw new Error(`The ${track} execution root environment variable must be absolute.`);
+	return path.resolve(value);
+}
+
+function requiredProofSnapshotPath(env: NodeJS.ProcessEnv) {
+	const value = env.SIBAMBO_PROOF_SNAPSHOT;
+	if (!value || !path.isAbsolute(value)) throw new Error('SIBAMBO_PROOF_SNAPSHOT must be an absolute path to the current Editor-next sealed snapshot.');
 	return path.resolve(value);
 }
 
@@ -539,17 +575,25 @@ function assertTrack(value: string): asserts value is ProofTrack {
 function fixtureIdentities(manifestPath: string) {
 	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { schemaVersion?: string; fixtures?: Array<{ id: string; locator: string; bytes: number; sha256: string }> };
 	if (manifest.schemaVersion !== 'bomc-loader-fixture-manifest-v1' || !manifest.fixtures) throw new Error('BOMC fixture manifest schema is not the pinned version.');
-	return ['S1-new', 'S2-new', 'S2-jcm'].map((id) => {
+	const legacy = ['S1-new', 'S2-new', 'S2-jcm'].map((id) => {
 		const row = manifest.fixtures!.find((fixture) => fixture.id === id);
 		if (!row) throw new Error(`Required browser fixture is not in the manifest: ${id}`);
 		const absolute = path.resolve(workspaceRoot, row.locator);
 		const relative = path.relative(workspaceRoot, absolute);
 		if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Fixture path escapes the workspace: ${id}`);
-		const bytes = readFileSync(absolute);
-		const actualSha = sha256(bytes);
-		if (bytes.byteLength !== row.bytes || actualSha !== row.sha256) throw new Error(`Pinned fixture identity mismatch: ${id}`);
-		return { id, path: path.relative(editorRoot, absolute).replaceAll(path.sep, '/'), bytes: bytes.byteLength, sha256: actualSha };
+		let resolvedPath: string | null = null;
+		if (existsSync(absolute)) {
+			const bytes = readFileSync(absolute);
+			if (bytes.byteLength === row.bytes && sha256(bytes) === row.sha256) resolvedPath = path.relative(workspaceRoot, realpathSync(absolute)).replaceAll(path.sep, '/');
+		}
+		return { id, path: row.locator.replaceAll('\\', '/'), resolvedPath, bytes: row.bytes, sha256: row.sha256 };
 	});
+	const resolvedProfiles = resolveAllBomcProfileFixtures();
+	const profile = BOMC_PROFILE_FIXTURE_PINS.map((pin, index) => {
+		const resolved = resolvedProfiles[index]!;
+		return { id: pin.id, path: path.relative(workspaceRoot, resolved.path).replaceAll(path.sep, '/'), resolvedPath: path.relative(workspaceRoot, resolved.realPath).replaceAll(path.sep, '/'), bytes: pin.bytes, sha256: pin.sha256 };
+	});
+	return [...legacy, ...profile];
 }
 
 function walkSourceFiles(directory: string): string[] {

@@ -160,11 +160,27 @@ test('Open controls remain disabled until the client bindings are ready', async 
 	const workerUrls: string[] = [];
 	let releaseScripts!: () => void;
 	let released = false;
+	const deferredRoutes = new Set<import('@playwright/test').Route>();
+	const ownedContinuations = new Set<Promise<void>>();
+	const routeErrorsObserved: string[] = [];
+	let routeCleanupFailure: unknown = null;
 	const scriptsReleased = new Promise<void>((resolve) => { releaseScripts = resolve; });
 	const release = () => { if (!released) { released = true; releaseScripts(); } };
 	const deferScripts = async (route: import('@playwright/test').Route) => {
-		if (route.request().resourceType() === 'script') await scriptsReleased;
-		await route.continue();
+		const continuation = (async () => {
+			if (route.request().resourceType() === 'script') {
+				deferredRoutes.add(route);
+				await scriptsReleased;
+				if (!deferredRoutes.delete(route)) return;
+			}
+			await route.continue();
+		})();
+		ownedContinuations.add(continuation);
+		void continuation.then(
+			() => ownedContinuations.delete(continuation),
+			error => { routeErrorsObserved.push(error instanceof Error ? error.message : String(error)); ownedContinuations.delete(continuation); }
+		);
+		return continuation;
 	};
 	page.on('pageerror', (error) => pageErrors.push(error.message));
 	page.on('request', (request) => { if (request.url().includes('/__fixture__/')) fixtureRequests.push(request.url()); });
@@ -177,25 +193,43 @@ test('Open controls remain disabled until the client bindings are ready', async 
 		stage = 'ssr-committed';
 		const main = page.locator('main[data-app="editor"]');
 		await expect(main).toHaveAttribute('data-editor-ready', 'false');
-		const openButtons = page.getByRole('button', { name: 'Open Model…' });
-		await expect(openButtons).toHaveCount(2);
-		await expect(openButtons.nth(0)).toBeDisabled();
-		await expect(openButtons.nth(1)).toBeDisabled();
+		const menuOpen = page.locator('.editor-menubar .menu-popover button').filter({ hasText: /^Open Model…\s*Ctrl\+O$/ });
+		const emptyOpen = page.locator('.empty-workspace .empty-open');
+		const allOpenButtons = page.getByRole('button', { name: 'Open Model…', includeHidden: true });
+		await expect(allOpenButtons).toHaveCount(2);
+		await expect(page.getByRole('button', { name: 'Open Model…' })).toHaveCount(1);
+		await expect(menuOpen).toHaveCount(1);
+		await expect(emptyOpen).toHaveCount(1);
+		await expect(menuOpen).toBeDisabled();
+		await expect(emptyOpen).toBeDisabled();
 		const sourceInput = page.locator('input[type="file"][accept^=".bomc"]');
 		await expect(sourceInput).toBeDisabled();
 		release();
 		await expect(main).toHaveAttribute('data-editor-ready', 'true', { timeout: 30_000 });
-		await expect(openButtons.nth(0)).toBeEnabled();
-		await expect(openButtons.nth(1)).toBeEnabled();
+		await expect(emptyOpen).toBeEnabled();
 		await expect(sourceInput).toBeEnabled();
+		const fileSummary = page.locator('.editor-menubar details.menu-root').first().locator('summary');
+		await expect(fileSummary).toHaveText('File');
+		await fileSummary.click();
+		await expect(menuOpen).toBeVisible();
+		await expect(menuOpen).toBeEnabled();
 		stage = 'client-bindings-ready';
 		expect(fixtureRequests).toEqual([]);
 		expect(workerUrls).toEqual([]);
 		expect(pageErrors).toEqual([]);
 	} finally {
 		release();
-		await page.unroute('**/*', deferScripts).catch(() => undefined);
-		const report = { observedStatus: testInfo.status, expectedStatus: testInfo.expectedStatus, stage, errors: [...testInfo.errors.map((error) => error.message), ...pageErrors], pageErrors, fixtureRequests, workerUrls };
+		try {
+			while (ownedContinuations.size > 0) await Promise.all([...ownedContinuations]);
+		} catch (error) {
+			routeCleanupFailure = error;
+		}
+		if (deferredRoutes.size > 0 && !routeCleanupFailure) routeCleanupFailure = new Error(`${deferredRoutes.size} owned deferred script route(s) were not continued.`);
+		if (routeErrorsObserved.length > 0 && !routeCleanupFailure) routeCleanupFailure = new Error(`Deferred route continuation failed: ${routeErrorsObserved.join(' | ')}`);
+		await page.unroute('**/*', deferScripts);
+		const routeErrors = routeCleanupFailure ? [routeCleanupFailure instanceof Error ? routeCleanupFailure.message : String(routeCleanupFailure)] : [];
+		const report = { observedStatus: routeErrors.length ? 'failed' : testInfo.status, expectedStatus: testInfo.expectedStatus, stage, errors: [...testInfo.errors.map((error) => error.message), ...pageErrors, ...routeErrors], pageErrors, routeErrors, fixtureRequests, workerUrls, deferredRoutesRemaining: deferredRoutes.size };
 		if (proofTicket) writeProofSidecar(proofTicket, testInfo.title, report);
+		if (routeCleanupFailure) throw routeCleanupFailure;
 	}
 });

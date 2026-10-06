@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import {
-	captureSourceIdentity, claimProofAttempt, collectExecutionRootFiles, evaluateFinalGate, inventoryFiles,
-	markProofOutcome, parsePlaywrightReportJson, readProofTicket, resolveProofPaths, setupFailureReason,
+	captureProofRuntime, captureSourceIdentity, claimProofAttempt, collectExecutionRootFiles, evaluateFinalGate, inventoryFiles,
+	markProofOutcome, parsePlaywrightReportJson, readProofTicket, resolveProofPaths, setupFailureReason, validateSealedSourceSnapshot,
 	 type ColdCycle, type FinalGateReceipt, type PlaywrightReport, type ProofAttempt,
 	type ProofTicket, type ProofTrack
 } from './proof-run-contract';
@@ -10,14 +10,25 @@ import path from 'node:path';
 
 const workspaceRoot = path.resolve(import.meta.dir, '../..', '..');
 const worklogRoot = path.join(workspaceRoot, 'docs', 'worklogs');
-const runtime = {
-	node: 'v24.19.0',
-	nodePath: 'C:/Users/kaisa/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe',
-	bun: '1.3.10',
-	playwright: '1.61.1'
-};
+const runtime = captureProofRuntime();
 const ownedRoots: string[] = [];
 const originalEnv = new Map<string, string | undefined>();
+const sourceSnapshotRoot = mkdtempSync(path.join(worklogRoot, 'BOMC-EDITOR-NEXT-001', '.proof-contract-snapshot-'));
+const sourceSnapshotPath = path.join(sourceSnapshotRoot, 'common-source-snapshot.json');
+const originalSnapshotEnv = process.env.SIBAMBO_PROOF_SNAPSHOT;
+
+beforeAll(() => {
+	writeFileSync(sourceSnapshotPath, `${JSON.stringify({
+		schemaVersion: 'sibambo-editor-next-source-snapshot-v1', planId: 'BOMC-EDITOR-NEXT-001', planVersion: '1.1', capturedAt: new Date().toISOString(),
+		sourceIdentity: captureSourceIdentity(), runtime
+	}, null, 2)}\n`, { flag: 'wx' });
+	process.env.SIBAMBO_PROOF_SNAPSHOT = sourceSnapshotPath;
+});
+
+afterAll(() => {
+	if (originalSnapshotEnv === undefined) delete process.env.SIBAMBO_PROOF_SNAPSHOT; else process.env.SIBAMBO_PROOF_SNAPSHOT = originalSnapshotEnv;
+	if (existsSync(sourceSnapshotRoot)) rmSync(sourceSnapshotRoot, { recursive: true, force: true });
+});
 
 afterEach(() => {
 	for (const key of [...originalEnv.keys()]) {
@@ -48,6 +59,7 @@ describe('BOMC readiness proof ownership contract', () => {
 		if ('discoveryOnly' in firstRead || 'discoveryOnly' in secondRead) throw new Error('Run ticket unexpectedly resolved as discovery metadata.');
 		expect(firstRead.nonce).toBe(ticket.nonce);
 		expect(secondRead.nonce).toBe(ticket.nonce);
+		expect(ticket.snapshotPath).toBe(sourceSnapshotPath);
 
 		setEnv({ SIBAMBO_PROOF_DISCOVERY: '1', SIBAMBO_PROOF_TICKET: undefined, SIBAMBO_PROOF_NONCE: undefined,
 			SIBAMBO_RECOVERY_WORKLOG: root, SIBAMBO_RECOVERY_ATTEMPT: '01', SIBAMBO_PROOF_ATTEMPT: '01' });
@@ -56,6 +68,16 @@ describe('BOMC readiness proof ownership contract', () => {
 		expect('discoveryOnly' in discovery && discovery.discoveryOnly).toBe(true);
 		expect(() => markProofOutcome(discovery, ticket.testTitles[0]!)).toThrow();
 		expect(collectExecutionRootFiles(root)).toEqual(beforeDiscovery);
+	});
+
+	it('requires the plan-scoped absolute snapshot and exact runtime identity', () => {
+		setEnv({ SIBAMBO_PROOF_SNAPSHOT: undefined });
+		expect(() => validateSealedSourceSnapshot(captureSourceIdentity(), runtime)).toThrow(/SIBAMBO_PROOF_SNAPSHOT must be an absolute path/);
+		const outside = makeRoot('BOMC-WEB-WRITER-001');
+		setEnv({ SIBAMBO_PROOF_SNAPSHOT: path.join(outside, 'common-source-snapshot.json') });
+		expect(() => validateSealedSourceSnapshot(captureSourceIdentity(), runtime)).toThrow(/strict child/);
+		setEnv({ SIBAMBO_PROOF_SNAPSHOT: sourceSnapshotPath });
+		expect(() => validateSealedSourceSnapshot(captureSourceIdentity(), { ...runtime, bun: 'other-runtime' })).toThrow(/proof runtime differs/);
 	});
 
 	it('rejects outside roots, junction escapes, and wrong ticket environment values', () => {
