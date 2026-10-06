@@ -7,6 +7,7 @@
 		"skipLibCheck": true,
 		"noEmit": true,
 		"paths": {
+			"@sibambo/e4-import/bomc-loader": ["../../../packages/e4-import/src/bomc-loader.ts"],
 			"@sibambo/contracts": ["../../../packages/contracts/src/index.ts"],
 			"@sibambo/contracts/scene": ["../../../packages/contracts/src/scene.ts"],
 			"@sibambo/scene-runtime": ["../../../packages/scene-runtime/src/index.ts"],

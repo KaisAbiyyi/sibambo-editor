@@ -1,0 +1,17 @@
+{
+	"name": "@sibambo/bomc-document",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./document": "./src/document.ts",
+		"./writer": "./src/writer.ts",
+		"./reader": "./src/reader.ts",
+		"./source-envelope": "./src/source-envelope.ts",
+		"./types": "./src/types.ts"
+	},
+	"dependencies": {
+		"fflate": "~0.8.2"
+	}
+}

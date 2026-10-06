@@ -9,5 +9,20 @@ const identity = getAppBuildIdentity({ appName: 'editor', appRoot: process.cwd()
 export default defineConfig({
 	plugins: [sveltekit()],
 	define: { __SIBAMBO_APP_BUILD__: JSON.stringify(identity) },
+	optimizeDeps: {
+		include: [
+			'three',
+			'three/webgpu',
+			'three/addons/postprocessing/EffectComposer.js',
+			'three/addons/postprocessing/OutputPass.js',
+			'three/addons/postprocessing/RenderPass.js',
+			'three/addons/postprocessing/SSAOPass.js',
+			'three/examples/jsm/controls/OrbitControls.js',
+			'@sibambo/e4-import > @jsquash/png/decode.js',
+			'@sibambo/e4-import > @jsquash/png/encode.js',
+			'@sibambo/e4-import > @jsquash/webp/decode.js'
+		],
+		holdUntilCrawlEnd: true
+	},
 	server: { host: '127.0.0.1', port: 5175, strictPort: true }
 });

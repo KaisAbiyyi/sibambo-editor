@@ -654,7 +654,9 @@ export class PreparedSceneViewport {
 				visibleOccurrenceIndices: new Set(Array.from({ length: surface.instanceCount }, (_, index) => index)), geometryGroupIndex: groupIndex,
 				navigationVisible: false,
 				visibleOccurrenceCount: surface.instanceCount, visibleSceneSignatures: group.visibleSceneSignatures,
-				sourceOccurrenceIndices: Array.from({ length: surface.instanceCount }, (_, index) => index),
+				sourceOccurrenceIndices: group.sourceOccurrenceIndices
+					? Array.from(group.sourceOccurrenceIndices)
+					: Array.from({ length: surface.instanceCount }, (_, index) => index),
 				computeNormalsFromSource: !(surface.buffers.normals?.length === surface.buffers.positions.length)
 			};
 			this.baseMeshRecords.push(record);

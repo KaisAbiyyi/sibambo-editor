@@ -47,4 +47,18 @@ describe('app E4 render preparation', () => {
 		expect(source.meshes[0].positions).toHaveLength(0);
 		expect(progress.at(-1)).toMatchObject({ phase: 'batching', completed: 1001, total: 1001 });
 	});
+
+	test('normalizes reflected occurrences after compaction without changing Exact source data', () => {
+		const source = scene(1001);
+		const reflected = source.groups[0]!;
+		reflected.matrices[0] = -1;
+		reflected.sourceOccurrenceIndices = Uint32Array.from({ length: 1 }, (_, index) => index);
+		const result = prepareApplicationRenderScene(source, 'exact');
+		expect(result.surfaceBatching?.sourceGroupCount).toBe(1001);
+		expect(result.mirroredInstancing?.mirroredOccurrenceCount).toBe(1);
+		expect(source.groups.every((entry) => Array.from(entry.matrices).every((_, index) => index % 16 !== 0 || entry.matrices[index]! >= 0))).toBe(true);
+		expect(source.groups.reduce((sum, entry) => sum + entry.matrices.length / 16, 0)).toBe(1001);
+		expect(source.groups.some((entry) => entry.batchPositions?.length === 0)).toBe(false);
+		expect(source.meshes[0]!.positions).toHaveLength(0);
+	});
 });

@@ -76,6 +76,8 @@ export type PreparedRuntimeGeometryGroup = Omit<RuntimeGeometryGroup, 'geometry'
 	occurrenceInstanceIndices?: Uint32Array | number[];
 	occurrenceTagIndices?: Int32Array | number[];
 	occurrenceHierarchyIndices?: Uint32Array;
+	/** Original row ordinals carried through derived renderer partitions. */
+	sourceOccurrenceIndices?: Uint32Array;
 	sourceFaceIndicesByTriangle?: Uint32Array;
 	sourceTagIndicesByTriangle?: Uint32Array;
 	sourceFrontMaterialIndicesByTriangle?: Uint32Array;

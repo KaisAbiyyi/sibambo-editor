@@ -1,11 +1,39 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { packGeometryTransfer, prepareBomcWorkerTransfer } from './worker-transfer.js';
+import { normalizePreparedMirroredInstances } from '../../scene-runtime/src/mirrored-instancing.js';
 import { createTransferFingerprint, verifyTransferFingerprint } from '../../../tooling/performance/loader-transfer-proof.ts';
 
 const SLAB_BYTES = 16 * 1024 * 1024;
 
 describe('BOMC worker full-result transfer packing', () => {
+	test('retains normalized reflected group buffers and source occurrence ordinals through transfer', () => {
+		const source = {
+			meshes: [{ sourceMeshIndex: 4, positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]) }],
+			groups: [{
+				key: 'door', sourceMeshIndex: 4, definitionIndex: 2, faceCount: 1,
+				indices: new Uint16Array([0, 1, 2]), matrices: new Float32Array([
+					1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+					-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 0, 0, 1
+				]), occurrenceHandles: ['positive-handle', 'mirror-handle'], occurrenceInstanceIndices: new Uint32Array([5, 9]),
+				localBounds: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 0] as [number, number, number], sphereCenter: [0.5, 0.5, 0] as [number, number, number], sphereRadius: 1 },
+				worldBounds: { min: [0, 0, 0] as [number, number, number], max: [3, 1, 0] as [number, number, number] }, baseY: 0, topY: 1
+			}], totalUnits: 1
+		};
+		normalizePreparedMirroredInstances(source as never);
+		const beforeTransfer = source.groups[1]!;
+		const expectedMatrices = new Float32Array(beforeTransfer.matrices);
+		const expectedBatchPositions = new Float32Array(beforeTransfer.batchPositions!);
+		const packed = packGeometryTransfer(source, { retainedBuffers: new Set() });
+		const received = structuredClone(packed.result, { transfer: packed.transferList }) as typeof source;
+		expect(received.groups[1]!.sourceOccurrenceIndices).toEqual(new Uint32Array([1]));
+		expect(received.groups[1]!.indices).toEqual(new Uint16Array([0, 2, 1]));
+		expect(received.groups[1]!.matrices).toEqual(expectedMatrices);
+		expect(received.groups[1]!.batchPositions).toEqual(expectedBatchPositions);
+		expect(received.groups[1]!.occurrenceHandles).toEqual(['mirror-handle']);
+		expect(received.groups[1]!.occurrenceInstanceIndices).toEqual(new Uint32Array([9]));
+	});
+
 	test('keeps cycles, repeated objects, repeated views, overlap, constructors and whole backing bytes', () => {
 		const firstBacking = patternedBuffer(64, 17);
 		const secondBacking = patternedBuffer(13, 91);
@@ -106,10 +134,10 @@ describe('BOMC worker full-result transfer packing', () => {
 			afterLarge: new Uint8Array(afterLarge)
 		};
 		const expected = {
-			almostCapacity: copyBytes(almostCapacity),
+			almostCapacity: Buffer.from(new Uint8Array(almostCapacity)),
 			oneByte: copyBytes(oneByte),
-			exactCapacity: copyBytes(exactCapacity),
-			overCapacity: copyBytes(overCapacity),
+			exactCapacity: Buffer.from(new Uint8Array(exactCapacity)),
+			overCapacity: Buffer.from(new Uint8Array(overCapacity)),
 			afterLarge: copyBytes(afterLarge)
 		};
 		const packed = packGeometryTransfer(input, { retainedBuffers: new Set() });
@@ -121,10 +149,13 @@ describe('BOMC worker full-result transfer packing', () => {
 		expect(packed.stats.copiedBytes).toBe((SLAB_BYTES - 1) + 1 + 4);
 
 		const received = structuredClone(packed.result, { transfer: packed.transferList });
-		expect(copyViewBytes(received.almostCapacity)).toEqual(expected.almostCapacity);
+		expect(bytesForView(received.almostCapacity).equals(expected.almostCapacity)).toBe(true);
 		expect(copyViewBytes(received.oneByte)).toEqual(expected.oneByte);
-		expect(copyViewBytes(received.exactCapacity)).toEqual(expected.exactCapacity);
-		expect(copyViewBytes(received.overCapacity)).toEqual(expected.overCapacity);
+		expect(bytesForView(received.exactCapacity).equals(expected.exactCapacity)).toBe(true);
+		expect(bytesForView(received.overCapacity).equals(expected.overCapacity)).toBe(true);
+		const corruptedSlab = Buffer.from(bytesForView(received.overCapacity));
+		corruptedSlab[corruptedSlab.byteLength - 1] ^= 0xff;
+		expect(corruptedSlab.equals(expected.overCapacity)).toBe(false);
 		expect(copyViewBytes(received.afterLarge)).toEqual(expected.afterLarge);
 		expect(received.oneByte.buffer).toBe(received.afterLarge.buffer);
 		expect(received.afterLarge.byteOffset).toBe(8);
@@ -157,7 +188,7 @@ describe('BOMC worker full-result transfer packing', () => {
 		const small = patternedBuffer(32, 42);
 		const large = patternedBuffer(SLAB_BYTES, 56);
 		const smallBytes = copyBytes(small);
-		const largeBytes = copyBytes(large);
+		const largeBytes = Buffer.from(new Uint8Array(large));
 		const input = { small: new Uint8Array(small, 3, 12), large: new Uint8Array(large, 8, 9) };
 		const packed = packGeometryTransfer(input, { retainedBuffers: new Set([small, large]) });
 		expect(packed.transferList).toHaveLength(2);
@@ -170,11 +201,16 @@ describe('BOMC worker full-result transfer packing', () => {
 		expect(small.byteLength).toBe(32);
 		expect(large.byteLength).toBe(SLAB_BYTES);
 		expect(copyBytes(small)).toEqual(smallBytes);
-		expect(copyBytes(large)).toEqual(largeBytes);
+		expect(Buffer.from(new Uint8Array(large)).equals(largeBytes)).toBe(true);
 		expect(received.small.buffer).not.toBe(small);
 		expect(received.large.buffer).not.toBe(large);
+		expect(received.large.byteOffset).toBe(8);
+		expect(received.large.byteLength).toBe(9);
 		expect(copyBytes(received.small.buffer)).toEqual(smallBytes);
-		expect(copyBytes(received.large.buffer)).toEqual(largeBytes);
+		expect(Buffer.from(received.large.buffer).equals(largeBytes)).toBe(true);
+		const corruptedRetainedBacking = Buffer.from(new Uint8Array(received.large.buffer));
+		corruptedRetainedBacking[corruptedRetainedBacking.byteLength - 1] ^= 0xff;
+		expect(corruptedRetainedBacking.equals(largeBytes)).toBe(false);
 	});
 
 	test('keeps empty backing/view identities without transferring empties and preserves zero views at backing ends', () => {
@@ -357,6 +393,10 @@ function copyBytes(buffer: ArrayBuffer, byteOffset = 0, byteLength = buffer.byte
 
 function copyViewBytes(view: ArrayBufferView): number[] {
 	return Array.from(new Uint8Array(view.buffer as ArrayBuffer, view.byteOffset, view.byteLength));
+}
+
+function bytesForView(view: ArrayBufferView): Buffer {
+	return Buffer.from(view.buffer as ArrayBuffer, view.byteOffset, view.byteLength);
 }
 
 function hashBuffer(buffer: ArrayBuffer): string {

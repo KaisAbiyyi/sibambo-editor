@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readProofTicket, writeProofSidecar } from '../../testing/proof-run-contract';
 
 const harnessRoot = path.dirname(fileURLToPath(import.meta.url));
 export const editorRoot = path.resolve(harnessRoot, '../../..');
@@ -17,10 +18,19 @@ const sourcePaths = [
 	'packages/viewport/src/navigation-surface-query.ts',
 	'packages/viewport/src/prepared-navigation-input.ts',
 	'packages/viewport/src/prepared-scene-viewport.ts',
+	'packages/viewport/src/prepared-surface.ts',
+	'packages/viewport/src/source-material-cache.ts',
+	'packages/viewport/src/source-edge-style.ts',
+	'packages/viewport/src/scene-visibility.ts',
+	'packages/viewport/src/viewport-render-state.ts',
+	'packages/scene-runtime/src/application-preparation.ts',
+	'packages/scene-runtime/src/prepared-types.ts',
+	'packages/scene-runtime/src/mirrored-instancing.ts',
 	'packages/viewport/src/renderer-host.ts',
 	'apps/editor/src/lib/e4-worker-client.ts',
 	'apps/editor/src/lib/e4-import.worker.ts',
 	'packages/e4-import/src/bomc-loader.ts',
+	'packages/e4-import/src/worker-transfer.ts',
 	'packages/e4-import/src/semantic-colorize.ts',
 	'packages/e4-import/src/image-pixel-codec.ts',
 	'tooling/performance/viewer-recovery/vite.config.ts',
@@ -30,8 +40,10 @@ const sourcePaths = [
 	'tooling/performance/viewer-recovery/vite-env.d.ts',
 	'tooling/performance/viewer-recovery/navigation.spec.ts',
 	'tooling/performance/viewer-recovery/door-visibility.spec.ts',
+	'tooling/performance/viewer-recovery/mirrored-surfaces.spec.ts',
 	'tooling/performance/viewer-recovery/reporting.ts',
-	'tooling/performance/viewer-recovery/index.html'
+	'tooling/performance/viewer-recovery/index.html',
+	'tooling/testing/proof-run-contract.ts', 'tooling/testing/bomc-proof-runner.ts', 'tooling/testing/tsconfig.json'
 ];
 
 export function captureSourceIdentity() {
@@ -49,6 +61,14 @@ export function persistRecoveryReport(name: string, report: unknown) {
 	mkdirSync(reports, { recursive: true });
 	const filePath = path.join(reports, `${name}.json`);
 	writeFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx' });
+	if (process.env.SIBAMBO_PROOF_TICKET) {
+		const row = report as Record<string, unknown>;
+		if (typeof row.test !== 'string') throw new Error(`Recovery report ${name} has no selected test title.`);
+		writeProofSidecar(readProofTicket('mirror'), row.test, {
+			observedStatus: row.observedStatus ?? 'unknown', expectedStatus: row.expectedStatus ?? 'passed',
+			stage: row.reachedStage ?? 'unknown', errors: row.errors ?? [], diagnosticReport: filePath
+		});
+	}
 	return filePath;
 }
 

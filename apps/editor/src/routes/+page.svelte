@@ -29,6 +29,7 @@
 	let provenanceInput: HTMLInputElement;
 	let provenanceUpgradeInput: HTMLInputElement;
 	let busy = $state(false);
+	let clientReady = $state(false);
 	let loadStatus = $state('Choose a BOMC 1.2 model file.');
 	let ready = $state(false);
 	let error = $state('');
@@ -713,6 +714,7 @@
 		loadStatus = 'Choose a BOMC 1.2 model file.';
 	}
 	onMount(() => {
+		if (!sourceInput) throw new Error('Editor source input binding is unavailable.');
 		const saved = localStorage.getItem('sibambo-theme');
 		darkMode = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
 		applyTheme();
@@ -729,7 +731,9 @@
 		};
 		document.addEventListener('pointerdown', closeMenusOutside, true);
 		document.addEventListener('keydown', closeMenusOnEscape);
+		clientReady = true;
 		return () => {
+			clientReady = false;
 			document.removeEventListener('pointerdown', closeMenusOutside, true);
 			document.removeEventListener('keydown', closeMenusOnEscape);
 		};
@@ -743,9 +747,9 @@
 	<meta name="theme-color" content={darkMode ? '#15181C' : '#F7F8FA'} />
 </svelte:head>
 
-<main data-app="editor" class:is-loaded={!!result}>
+<main data-app="editor" data-editor-ready={clientReady ? 'true' : 'false'} class:is-loaded={!!result}>
 	<div class="visually-hidden">
-		<label>BOMC 1.2 file<input bind:this={sourceInput} type="file" accept=".bomc,application/octet-stream" onchange={stageSource} disabled={busy} tabindex="-1" /></label>
+		<label>BOMC 1.2 file<input bind:this={sourceInput} type="file" accept=".bomc,application/octet-stream" onchange={stageSource} disabled={busy || !clientReady} tabindex="-1" /></label>
 		<label>Provenance JSON for next model<input bind:this={provenanceInput} type="file" accept=".json,application/json" onchange={stageProvenance} disabled={busy} tabindex="-1" /></label>
 		<label>Provenance JSON for current model<input bind:this={provenanceUpgradeInput} type="file" accept=".json,application/json" onchange={stageUpgradeProvenance} disabled={busy || !session || !!provenance} tabindex="-1" /></label>
 	</div>
@@ -755,7 +759,7 @@
 		<details class="menu-root">
 			<summary>File</summary>
 			<div class="menu-popover">
-				<button type="button" onclick={() => sourceInput?.click()} disabled={busy}>Open Model…<kbd>Ctrl+O</kbd></button>
+				<button type="button" onclick={() => sourceInput?.click()} disabled={busy || !clientReady}>Open Model…<kbd>Ctrl+O</kbd></button>
 				{#if result}<button type="button" onclick={downloadCapture} disabled={!ready}>Save View…</button>{/if}
 				{#if result && !provenance}<button type="button" onclick={() => provenanceUpgradeInput?.click()} disabled={busy}>Add Provenance…</button>{/if}
 				{#if result}<span class="menu-separator"></span><button type="button" onclick={unload} disabled={busy}>Close Model</button>{/if}
@@ -858,7 +862,7 @@
 					<p class="eyebrow">SIBAMBO EDITOR</p>
 					<h1>Open a model</h1>
 					<p>Open a BOMC 1.2 file to inspect it with the editor camera and scene tools.</p>
-					<button type="button" class="empty-open" onclick={() => sourceInput?.click()} disabled={busy}>{busy ? 'Opening…' : 'Open Model…'}</button>
+					<button type="button" class="empty-open" onclick={() => sourceInput?.click()} disabled={busy || !clientReady}>{busy ? 'Opening…' : 'Open Model…'}</button>
 					{#if busy}<p class="empty-status">{loadStatus}</p>{/if}
 					{#if error}<p class="empty-error" role="alert">{error}</p>{/if}
 				</div>

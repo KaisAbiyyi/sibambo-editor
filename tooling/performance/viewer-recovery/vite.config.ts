@@ -1,22 +1,15 @@
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 // @ts-expect-error This accepted helper is an MJS-only module without declarations.
 import { readIsolationManifest } from '../loader-baseline-isolated.mjs';
+import { readProofTicket } from '../../testing/proof-run-contract';
 
 const harnessRoot = path.dirname(fileURLToPath(import.meta.url));
 const editorRoot = path.resolve(harnessRoot, '../../..');
 const workspaceRoot = path.resolve(editorRoot, '..');
-const worklogValue = process.env.SIBAMBO_RECOVERY_WORKLOG;
-const attempt = process.env.SIBAMBO_RECOVERY_ATTEMPT;
-if (!worklogValue || !path.isAbsolute(worklogValue)) throw new Error('SIBAMBO_RECOVERY_WORKLOG must be an absolute path.');
-if (attempt !== '01' && attempt !== '02') throw new Error('SIBAMBO_RECOVERY_ATTEMPT must be 01 or 02.');
-const worklogRoot = path.resolve(worklogValue);
-assertNested(workspaceRoot, worklogRoot);
-assertNested(path.join(workspaceRoot, 'docs', 'worklogs', 'BOMC-VIEWER-RECOVERY-001'), worklogRoot);
-const outputDir = path.join(worklogRoot, 'browser', `attempt-${attempt}`, 'playwright-output');
-if (existsSync(outputDir)) throw new Error(`Recovery Playwright output already exists; preserving it: ${outputDir}`);
+readProofTicket('mirror');
 
 const manifestPath = path.join(editorRoot, 'tooling', 'performance', 'fixtures.json');
 const manifestInfo = await readIsolationManifest(workspaceRoot, manifestPath);
@@ -57,6 +50,7 @@ export default defineConfig({
 	plugins: [pinnedFixtureMiddleware],
 	resolve: {
 		alias: [
+			{ find: '@sibambo/e4-import/bomc-loader', replacement: path.join(editorRoot, 'packages/e4-import/src/bomc-loader.ts') },
 			{ find: '@sibambo/e4-import/worker-transfer', replacement: path.join(editorRoot, 'packages/e4-import/src/worker-transfer.ts') },
 			{ find: '@sibambo/e4-import', replacement: path.join(editorRoot, 'packages/e4-import/src/index.ts') },
 			{ find: '@sibambo/scene-runtime/types', replacement: path.join(editorRoot, 'packages/scene-runtime/src/prepared-types.ts') },
@@ -68,10 +62,3 @@ export default defineConfig({
 	},
 	server: { host: '127.0.0.1', port: 5197, strictPort: true, fs: { allow: [workspaceRoot] } }
 });
-
-function assertNested(root: string, target: string) {
-	const relative = path.relative(path.resolve(root), path.resolve(target));
-	if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new Error(`Recovery worklog must be nested inside ${root}.`);
-	}
-}

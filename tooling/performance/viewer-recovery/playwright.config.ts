@@ -1,29 +1,24 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from '@playwright/test';
+import { defineConfig, type PlaywrightTestConfig } from '@playwright/test';
+import { readProofTicket } from '../../testing/proof-run-contract';
 
 const harnessRoot = path.dirname(fileURLToPath(import.meta.url));
 const editorRoot = path.resolve(harnessRoot, '../../..');
-const workspaceRoot = path.resolve(editorRoot, '..');
-const worklogValue = process.env.SIBAMBO_RECOVERY_WORKLOG;
-const attempt = process.env.SIBAMBO_RECOVERY_ATTEMPT;
-if (!worklogValue || !path.isAbsolute(worklogValue)) throw new Error('SIBAMBO_RECOVERY_WORKLOG must be an absolute path.');
-if (attempt !== '01' && attempt !== '02') throw new Error('SIBAMBO_RECOVERY_ATTEMPT must be 01 or 02.');
-const worklogRoot = path.resolve(worklogValue);
-assertNested(workspaceRoot, worklogRoot);
-assertNested(path.join(workspaceRoot, 'docs', 'worklogs', 'BOMC-VIEWER-RECOVERY-001'), worklogRoot);
-const outputDir = path.join(worklogRoot, 'browser', `attempt-${attempt}`, 'playwright-output');
+const proof = readProofTicket('mirror');
+const discovery = 'discoveryOnly' in proof;
 
-export default defineConfig({
+const config: PlaywrightTestConfig = {
 	testDir: harnessRoot,
-	testMatch: ['navigation.spec.ts', 'door-visibility.spec.ts'],
-	outputDir,
-	timeout: 120_000,
-	globalTimeout: 900_000,
+	testMatch: ['navigation.spec.ts', 'door-visibility.spec.ts', 'mirrored-surfaces.spec.ts'],
+	outputDir: proof.outputDir,
+	timeout: 180_000,
+	globalTimeout: 360_000,
 	fullyParallel: false,
 	workers: 1,
 	retries: 0,
-	reporter: 'list',
+	maxFailures: 1,
+	reporter: discovery ? 'list' : [['list'], ['json', { outputFile: proof.reportFile }]],
 	use: {
 		baseURL: 'http://127.0.0.1:5197',
 		browserName: 'chromium',
@@ -32,19 +27,14 @@ export default defineConfig({
 		deviceScaleFactor: 1,
 		serviceWorkers: 'block'
 	},
-	webServer: {
+	...(discovery ? {} : { webServer: {
 		command: `bunx vite --config "${path.join(harnessRoot, 'vite.config.ts')}" --host 127.0.0.1 --port 5197 --strictPort`,
 		cwd: editorRoot,
 		url: 'http://127.0.0.1:5197',
 		reuseExistingServer: false,
 		timeout: 60_000,
-		env: { SIBAMBO_RECOVERY_WORKLOG: worklogRoot, SIBAMBO_RECOVERY_ATTEMPT: attempt }
-	}
-});
+		env: { SIBAMBO_RECOVERY_WORKLOG: proof.executionRoot, SIBAMBO_RECOVERY_ATTEMPT: proof.attempt }
+	} })
+};
 
-function assertNested(root: string, target: string) {
-	const relative = path.relative(path.resolve(root), path.resolve(target));
-	if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new Error(`Recovery worklog must be nested inside ${root}.`);
-	}
-}
+export default defineConfig(config);

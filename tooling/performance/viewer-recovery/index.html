@@ -6,12 +6,14 @@
 		<title>BOMC viewer recovery harness</title>
 		<style>
 			html, body, #viewer { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+			#oracle-viewer { position: absolute; left: -1600px; top: 0; width: 1440px; height: 900px; overflow: hidden; }
 			#status { position: fixed; z-index: 1; top: 8px; left: 8px; padding: 4px 8px; background: white; font: 12px sans-serif; }
 		</style>
 	</head>
 	<body>
 		<div id="status">Starting isolated viewport harness…</div>
 		<div id="viewer"></div>
+		<div id="oracle-viewer" aria-hidden="true"></div>
 		<script type="module" src="/entry.ts"></script>
 	</body>
 </html>

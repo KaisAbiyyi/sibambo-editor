@@ -300,10 +300,10 @@ export async function installEditorMaterialsV2Probe(page: Page) {
 			},
 			rememberSession() {
 				state.rememberedCanvas = document.querySelector<HTMLCanvasElement>(canvasSelector);
-				state.rememberedTitle = document.querySelector<HTMLElement>('.tool-context span')?.textContent ?? '';
+				state.rememberedTitle = document.title;
 			},
 			sessionStillMounted() {
-				return { sameCanvas: !!state.rememberedCanvas && state.rememberedCanvas === document.querySelector<HTMLCanvasElement>(canvasSelector), sameTitle: state.rememberedTitle === (document.querySelector<HTMLElement>('.tool-context span')?.textContent ?? ''), title: document.querySelector<HTMLElement>('.tool-context span')?.textContent ?? '' };
+				return { sameCanvas: !!state.rememberedCanvas && state.rememberedCanvas === document.querySelector<HTMLCanvasElement>(canvasSelector), sameTitle: state.rememberedTitle !== '' && state.rememberedTitle === document.title, title: document.title };
 			},
 			async waitForAssetProbes(requestId: number) {
 				await state.assetProbePromises.get(requestId);

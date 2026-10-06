@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import { markProofOutcome, readProofTicket } from '../../../tooling/testing/proof-run-contract';
 import {
 	captureSourceHashes, corruptFirstActiveSemanticHash, loadOracleMetadata,
 	readPinnedInput, installEditorMaterialsV2Probe, type OracleMetadata, type PinnedInput
@@ -97,6 +98,7 @@ test('S2-new maps every active material and texture metric to its verified seman
 	try {
 		fixture = readPinnedInput('S2-new');
 		await page.goto('/?renderer=webgl2');
+		if (process.env.SIBAMBO_PROOF_TICKET) markProofOutcome(readProofTicket('semantic'), testInfo.title);
 		const requestIndex = await requestCount(page);
 		const importDeadline = Date.now() + 120_000;
 		await chooseBomcFile(page, fixture, false);
@@ -197,20 +199,23 @@ test('corrupt semantic replacement errors while the usable S2-jcm session stays 
 		baselineFixture = readPinnedInput('S2-jcm');
 		replacementFixture = readPinnedInput('S2-new');
 		corruption = await corruptFirstActiveSemanticHash(replacementFixture.bytes);
+		await page.goto('/?renderer=webgl2');
+		if (process.env.SIBAMBO_PROOF_TICKET) markProofOutcome(readProofTicket('semantic'), testInfo.title);
 		expect(corruption.changedPayloadBytes).toBe(1);
 		expect(corruption.changedSections).toEqual(['MATERIALS']);
 		expect(corruption.expectedHash).not.toBe(corruption.corruptedHash);
-		await page.goto('/?renderer=webgl2');
 		const baselineIndex = await requestCount(page);
 		const baselineDeadline = Date.now() + 120_000;
 		await chooseBomcFile(page, baselineFixture, false);
 		baselineWorker = await waitForSuccessfulWorkerAndReady(page, baselineIndex, baselineDeadline);
+		await expect.poll(() => page.title(), { timeout: remainingMs(baselineDeadline) }).toBe('PROJECT SBOOST 2');
 		expect(baselineWorker.result.semanticMaterials).toMatchObject({ sectionVersion: 1, activeCount: 0, verifiedCount: 0, generatedAssetCount: 0 });
 		expect(runtime.wasmResponses).toEqual([]);
 		await provePositiveViewportDraw(page, baselineWorker.requestId!);
 		await page.evaluate(() => (window as UiProbeWindow).__m2UiProbe.rememberSession());
 		sessionBefore = await page.evaluate(() => (window as UiProbeWindow).__m2UiProbe.sessionStillMounted());
-		expect(sessionBefore).toMatchObject({ sameCanvas: true, sameTitle: true });
+		expect(sessionBefore).toMatchObject({ sameCanvas: true, sameTitle: true, title: 'PROJECT SBOOST 2' });
+		expect(await page.title()).toBe('PROJECT SBOOST 2');
 
 		const replacementIndex = await requestCount(page);
 		const replacementDeadline = Date.now() + 120_000;
@@ -227,7 +232,8 @@ test('corrupt semantic replacement errors while the usable S2-jcm session stays 
 		expect(failedWorker.errors).toEqual([]);
 		expect(failedWorker.terminated).toBe(true);
 		sessionAfter = await page.evaluate(() => (window as UiProbeWindow).__m2UiProbe.sessionStillMounted());
-		expect(sessionAfter).toMatchObject({ sameCanvas: true, sameTitle: true });
+		expect(sessionAfter).toMatchObject({ sameCanvas: true, sameTitle: true, title: 'PROJECT SBOOST 2' });
+		expect(await page.title()).toBe('PROJECT SBOOST 2');
 		await provePositiveViewportDraw(page, failedWorker.requestId!);
 		// Hash rejection happens before PNG encoding, so this request may need no WASM asset.
 		expect(runtime.wasmResponses.every((item) => item.status === 200 && item.sameOrigin)).toBe(true);

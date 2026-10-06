@@ -56,6 +56,13 @@
         "vite": "^8.0.16",
       },
     },
+    "packages/bomc-document": {
+      "name": "@sibambo/bomc-document",
+      "version": "0.1.0",
+      "dependencies": {
+        "fflate": "~0.8.2",
+      },
+    },
     "packages/contracts": {
       "name": "@sibambo/contracts",
       "version": "0.1.0",
@@ -287,6 +294,8 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.62.2", "", { "os": "win32", "cpu": "x64" }, "sha512-T6xr6ucWSFto+VGajA8YH26LdpHRuP4YLHEKAtCWvJDOlnmWcDZVCI2Jmjr+IFHDlt2zRaTAKE4tfjTaWLgJBg=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.2", "", { "os": "win32", "cpu": "x64" }, "sha512-BfzEnDJOt9T8M989/lA37EcJgat01wLRnoi5dQf3QzOH7jzpqTAzdDbVfRljVr5r+jzKqpbHeyOfAaXxAd0PAA=="],
+
+    "@sibambo/bomc-document": ["@sibambo/bomc-document@workspace:packages/bomc-document"],
 
     "@sibambo/contracts": ["@sibambo/contracts@workspace:packages/contracts"],
 
