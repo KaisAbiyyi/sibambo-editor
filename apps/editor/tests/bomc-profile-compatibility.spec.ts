@@ -21,6 +21,16 @@ async function settleFrames(page: Page) {
 	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
+async function waitForEditorReady(page: Page, fixture: ResolvedBomcProfileFixture) {
+	const ready = page.locator('.footer-status').getByText('Ready', { exact: true });
+	const alert = page.getByRole('alert');
+	await expect(ready.or(alert).first()).toBeVisible({ timeout: 180_000 });
+	if (await alert.isVisible()) {
+		throw new Error(`${fixture.id} import failed before viewport readiness: ${(await alert.innerText()).trim()}`);
+	}
+	await expect(ready).toBeVisible();
+}
+
 async function openModelSourceDetails(page: Page) {
 	const details = page.locator('details.inspection-details');
 	if (await details.evaluate((element) => (element as HTMLDetailsElement).open)) return;
@@ -61,7 +71,7 @@ async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedB
 
 	await page.goto('/?renderer=webgl2', { waitUntil: 'networkidle' });
 	await page.getByLabel('BOMC 1.2 file').setInputFiles(fixture.realPath);
-	await expect(page.getByText('Textures settled and first frame observed')).toBeVisible({ timeout: 180_000 });
+	await waitForEditorReady(page, fixture);
 	await expect(page.getByRole('alert')).toHaveCount(0);
 	await expect(page.locator('.tool-context span').nth(1)).toHaveText(fixture.profile, { timeout: 30_000 });
 
