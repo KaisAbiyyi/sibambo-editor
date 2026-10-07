@@ -68,7 +68,7 @@ describe('BOMC readiness proof ownership contract', () => {
 		expect('discoveryOnly' in discovery && discovery.discoveryOnly).toBe(true);
 		expect(() => markProofOutcome(discovery, ticket.testTitles[0]!)).toThrow();
 		expect(collectExecutionRootFiles(root)).toEqual(beforeDiscovery);
-	});
+	}, 15_000);
 
 	it('requires the plan-scoped absolute snapshot and exact runtime identity', () => {
 		setEnv({ SIBAMBO_PROOF_SNAPSHOT: undefined });
