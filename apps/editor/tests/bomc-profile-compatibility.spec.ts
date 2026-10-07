@@ -7,6 +7,13 @@ import {
 
 type CanvasBox = { x: number; y: number; width: number; height: number };
 type PickEvidence = { xFraction: number; yFraction: number; footerStatus: string };
+type ReadinessTransition = { elapsedMs: number; status: string };
+type ReadinessEvidence = { elapsedMs: number; timeoutMs: number; transitions: ReadinessTransition[] };
+
+const HEAVY_FIXTURE_BYTES = 10 * 1024 * 1024;
+const LIGHT_READINESS_TIMEOUT_MS = 180_000;
+const HEAVY_READINESS_TIMEOUT_MS = 600_000;
+const POST_READINESS_BUDGET_MS = 120_000;
 
 const fixtures = resolveAllBomcProfileFixtures();
 const fixtureIds = fixtures.map((fixture) => fixture.id);
@@ -18,18 +25,60 @@ function sha256(bytes: Buffer) {
 	return createHash('sha256').update(bytes).digest('hex');
 }
 
+function readinessTimeoutMs(fixture: ResolvedBomcProfileFixture) {
+	return fixture.bytes >= HEAVY_FIXTURE_BYTES ? HEAVY_READINESS_TIMEOUT_MS : LIGHT_READINESS_TIMEOUT_MS;
+}
+
+function caseTimeoutMs(fixture: ResolvedBomcProfileFixture) {
+	return readinessTimeoutMs(fixture) + POST_READINESS_BUDGET_MS;
+}
+
 async function settleFrames(page: Page) {
 	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
-async function waitForEditorReady(page: Page, fixture: ResolvedBomcProfileFixture) {
+async function visibleText(locator: ReturnType<Page['locator']>) {
+	try {
+		if (!(await locator.isVisible())) return '';
+		return (await locator.innerText()).trim();
+	} catch {
+		return '';
+	}
+}
+
+async function waitForEditorReady(page: Page, fixture: ResolvedBomcProfileFixture): Promise<ReadinessEvidence> {
 	const ready = page.locator('.footer-status').getByText('Ready', { exact: true });
 	const alert = page.getByRole('alert');
-	await expect(ready.or(alert).first()).toBeVisible({ timeout: 180_000 });
-	if (await alert.isVisible()) {
-		throw new Error(`${fixture.id} import failed before viewport readiness: ${(await alert.innerText()).trim()}`);
+	const timeoutMs = readinessTimeoutMs(fixture);
+	const startedAt = Date.now();
+	const transitions: ReadinessTransition[] = [];
+	let lastStatus = '';
+
+	while (Date.now() - startedAt < timeoutMs) {
+		if (await alert.isVisible().catch(() => false)) {
+			throw new Error(`${fixture.id} import failed before viewport readiness: ${(await alert.innerText()).trim()}`);
+		}
+		if (await ready.isVisible().catch(() => false)) {
+			return { elapsedMs: Date.now() - startedAt, timeoutMs, transitions };
+		}
+
+		const statusParts = await Promise.all([
+			visibleText(page.locator('.viewport-status span').first()),
+			visibleText(page.locator('.empty-status').first()),
+			visibleText(page.locator('.footer-status').first())
+		]);
+		const status = [...new Set(statusParts.filter(Boolean))].join(' | ') || 'No visible import status';
+		if (status !== lastStatus) {
+			transitions.push({ elapsedMs: Date.now() - startedAt, status });
+			lastStatus = status;
+		}
+		await page.waitForTimeout(1_000);
 	}
-	await expect(ready).toBeVisible();
+
+	throw new Error(
+		`${fixture.id} did not reach viewport readiness within ${timeoutMs}ms; `
+		+ `lastStatus=${JSON.stringify(lastStatus)}; transitions=${JSON.stringify(transitions)}`
+	);
 }
 
 function isPickEvidenceStatus(status: string) {
@@ -58,6 +107,7 @@ async function pickVisibleGeometry(page: Page, canvasBox: CanvasBox): Promise<Pi
 }
 
 async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedBomcProfileFixture) {
+	testInfo.setTimeout(caseTimeoutMs(fixture));
 	const pageErrors: string[] = [];
 	const consoleErrors: string[] = [];
 	const workerRequests: string[] = [];
@@ -72,7 +122,7 @@ async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedB
 
 	await page.goto('/?renderer=webgl2', { waitUntil: 'networkidle' });
 	await page.getByLabel('BOMC 1.2 file').setInputFiles(fixture.realPath);
-	await waitForEditorReady(page, fixture);
+	const readiness = await waitForEditorReady(page, fixture);
 	await expect(page.getByRole('alert')).toHaveCount(0);
 	await expect(page.locator('.tool-context span').nth(1)).toHaveText(fixture.profile, { timeout: 30_000 });
 
@@ -126,6 +176,7 @@ async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedB
 			},
 			buildIdentity,
 			workerRequests,
+			readiness,
 			orbit: { beforeSha256, afterSha256 },
 			pick: pickedAt
 		}, null, 2)),
