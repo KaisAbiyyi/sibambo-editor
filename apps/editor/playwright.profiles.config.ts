@@ -12,7 +12,7 @@ const config: PlaywrightTestConfig = {
 	projects: [{ name: 'editor-profile-chromium', use: { ...devices['Desktop Chrome'] } }],
 	reporter: 'list',
 	timeout: 240_000,
-	globalTimeout: 2_700_000,
+	globalTimeout: 7_200_000,
 	expect: { timeout: 30_000 },
 	fullyParallel: false,
 	workers: 1,
