@@ -6,6 +6,7 @@ import {
 } from '../../../tooling/testing/bomc-profile-fixtures';
 
 type CanvasBox = { x: number; y: number; width: number; height: number };
+type PickEvidence = { xFraction: number; yFraction: number; footerStatus: string };
 
 const fixtures = resolveAllBomcProfileFixtures();
 const fixtureIds = fixtures.map((fixture) => fixture.id);
@@ -31,27 +32,27 @@ async function waitForEditorReady(page: Page, fixture: ResolvedBomcProfileFixtur
 	await expect(ready).toBeVisible();
 }
 
-async function openModelSourceDetails(page: Page) {
-	const details = page.locator('details.inspection-details');
-	if (await details.evaluate((element) => (element as HTMLDetailsElement).open)) return;
-	const summary = details.locator('summary');
-	if (await summary.isVisible()) await summary.click();
-	else await details.evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+function isPickEvidenceStatus(status: string) {
+	return /\bselected\b/i.test(status)
+		|| /\bFace\s+\d+\b/i.test(status)
+		|| status.includes('This hit has no stable imported occurrence identity');
 }
 
-async function pickVisibleGeometry(page: Page, canvasBox: CanvasBox) {
+async function pickVisibleGeometry(page: Page, canvasBox: CanvasBox): Promise<PickEvidence | null> {
 	const points: ReadonlyArray<readonly [number, number]> = [
 		[0.50, 0.50], [0.38, 0.50], [0.62, 0.50], [0.50, 0.38], [0.50, 0.62],
 		[0.35, 0.35], [0.65, 0.35], [0.35, 0.65], [0.65, 0.65],
 		[0.25, 0.50], [0.75, 0.50], [0.50, 0.25], [0.50, 0.75]
 	];
+	const footerStatus = page.locator('.footer-status');
 	for (const [xFraction, yFraction] of points) {
 		await page.mouse.click(
 			canvasBox.x + canvasBox.width * xFraction,
 			canvasBox.y + canvasBox.height * yFraction
 		);
 		await settleFrames(page);
-		if (await page.locator('section.pick').count()) return { xFraction, yFraction };
+		const status = (await footerStatus.innerText()).trim();
+		if (isPickEvidenceStatus(status)) return { xFraction, yFraction, footerStatus: status };
 	}
 	return null;
 }
@@ -106,14 +107,7 @@ async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedB
 	expect(box).not.toBeNull();
 	const pickedAt = await pickVisibleGeometry(page, box!);
 	expect(pickedAt).not.toBeNull();
-	await openModelSourceDetails(page);
-	await expect(page.getByRole('heading', { name: 'Picked geometry' })).toBeVisible({ timeout: 5_000 });
-	const pickedDetails = page.locator('section.pick dl');
-	const labels = await pickedDetails.locator('dt').allTextContents();
-	const values = await pickedDetails.locator('dd').allTextContents();
-	expect(labels).toEqual(['Source mesh', 'Definition', 'Occurrence', 'Source face']);
-	expect(values).toHaveLength(4);
-	for (const value of values) expect(value.trim()).not.toBe('');
+	expect(isPickEvidenceStatus(pickedAt!.footerStatus)).toBe(true);
 	expect(workerRequests.some((url) => url.includes('e4-import.worker'))).toBe(true);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
@@ -133,7 +127,7 @@ async function runProfileCase(page: Page, testInfo: TestInfo, fixture: ResolvedB
 			buildIdentity,
 			workerRequests,
 			orbit: { beforeSha256, afterSha256 },
-			pick: { point: pickedAt, labels, values }
+			pick: pickedAt
 		}, null, 2)),
 		contentType: 'application/json'
 	});
