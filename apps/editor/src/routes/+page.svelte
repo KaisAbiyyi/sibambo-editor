@@ -13,7 +13,7 @@
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
 	import { loadedModelTabTitle as resolveLoadedModelTabTitle } from '$lib/model-tab-title';
-	import { AuthoringClient } from '$lib/authoring/bomc-authoring-client';
+	import { AuthoringClient, type AuthoringRecoveryState } from '$lib/authoring/bomc-authoring-client';
 	import { graphsEqual } from '$lib/authoring/history';
 	import { projectAuthoringScene } from '$lib/authoring/scene';
 	import { AuthoringToolController } from '$lib/authoring/tools';
@@ -39,6 +39,8 @@
 	let authoringClient = $state.raw<AuthoringClient | null>(null);
 	let authoringCheckpoint = $state.raw<AuthoringCheckpoint | null>(null);
 	let authoringTools = $state.raw<AuthoringToolController | null>(null);
+	let authoringRecovery = $state.raw<AuthoringRecoveryState>(Object.freeze({ phase: 'closed', error: null }));
+	let unsubscribeAuthoringRecovery: (() => void) | null = null;
 	let authoringTool = $state<AuthoringTool>('select');
 	let extrusionDistanceText = $state('');
 	let selectedEntityId = $state('');
@@ -175,6 +177,7 @@
 		sceneId = snapshot.sceneId;
 		snapshot.viewport?.setSelectedOccurrences(snapshot.selectedOccurrenceHandles);
 		restoreHostChildren(snapshot.hostChildren);
+		bindAuthoringRecovery(snapshot.authoringClient);
 	}
 
 	function stageSource(event: Event) {
@@ -220,17 +223,48 @@
 		return bounds;
 	}
 
-	function makeAuthoringTools(client: AuthoringClient, target: PreparedSceneViewport, initial: AuthoringCheckpoint, request: number) {
+	function ownsAuthoringController(client: AuthoringClient, target: PreparedSceneViewport, tools: AuthoringToolController) {
+		return mode === 'authoring' && authoringClient === client && viewport === target && authoringTools === tools && !client.isClosed;
+	}
+
+	function bindAuthoringRecovery(client: AuthoringClient | null) {
+		unsubscribeAuthoringRecovery?.();
+		unsubscribeAuthoringRecovery = null;
+		if (!client) {
+			authoringRecovery = Object.freeze({ phase: 'closed', error: null });
+			return;
+		}
+		const owner = client;
+		unsubscribeAuthoringRecovery = client.subscribeRecovery((state) => {
+			if (authoringClient !== owner) return;
+			authoringRecovery = state;
+			if (state.phase === 'ready' && mode === 'authoring') {
+				const checkpoint = owner.checkpoint;
+				if (!checkpoint) return;
+				authoringCheckpoint = checkpoint;
+				authoringTools?.setCheckpoint(checkpoint);
+				modelTabTitle = authoringTitle(checkpoint);
+				refreshAuthoringProjection(false);
+			} else if (state.phase === 'restoring') {
+				editorNotice = 'Restoring the last acknowledged authoring checkpoint…';
+			} else if (state.phase === 'failed') {
+				editorNotice = `Authoring recovery failed. ${state.error ?? 'Retry Restore or close the document.'}`;
+			}
+		});
+	}
+
+	function makeAuthoringTools(client: AuthoringClient, target: PreparedSceneViewport, initial: AuthoringCheckpoint) {
 		let tools!: AuthoringToolController;
 		tools = new AuthoringToolController({
 			viewport: target,
 			getCheckpoint: () => authoringCheckpoint,
 				submitCommand: async (command: AuthoringCommand) => {
-					if (request !== generation || mode !== 'authoring' || authoringClient !== client || saveBusy || busy || authoringOperationBusy) throw new Error('Authoring input is unavailable while the document is changing.');
-					authoringOperationBusy = true;
-					try {
-						const acknowledged = await client.command(command);
-						if (request !== generation || mode !== 'authoring' || authoringClient !== client) return acknowledged;
+						const operationGeneration = generation;
+						if (!ownsAuthoringController(client, target, tools) || authoringRecovery.phase !== 'ready' || saveBusy || busy || authoringOperationBusy) throw new Error('Authoring input is unavailable while the document is changing.');
+						authoringOperationBusy = true;
+						try {
+							const acknowledged = await client.command(command);
+							if (operationGeneration !== generation || !ownsAuthoringController(client, target, tools)) return acknowledged;
 						authoringCheckpoint = acknowledged.checkpoint;
 						tools.setCheckpoint(acknowledged.checkpoint);
 						if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
@@ -243,11 +277,11 @@
 							editorNotice = 'The canonical edit was acknowledged, but its viewport projection failed. Retry render before continuing the visual proof.';
 						}
 						return acknowledged;
-					} finally { if (request === generation) authoringOperationBusy = false; }
-				},
-			onSelectionChange: (entityId: string | null) => { if (request === generation && authoringClient === client) selectedEntityId = entityId ?? ''; },
-			onError: (message: string) => { if (request === generation && authoringClient === client) editorNotice = message; }
-		});
+						} finally { if (operationGeneration === generation && ownsAuthoringController(client, target, tools)) authoringOperationBusy = false; }
+					},
+				onSelectionChange: (entityId: string | null) => { if (ownsAuthoringController(client, target, tools)) selectedEntityId = entityId ?? ''; },
+				onError: (message: string) => { if (ownsAuthoringController(client, target, tools)) editorNotice = message; }
+			});
 		tools.setCheckpoint(initial);
 		return tools;
 	}
@@ -261,7 +295,17 @@
 	}
 
 	function canAuthor() {
-		return clientReady && mode === 'authoring' && !!authoringClient && !!authoringCheckpoint && !busy && !saveBusy && !authoringOperationBusy && !authoringClient.isRestoring;
+		return clientReady && mode === 'authoring' && !!authoringClient && !authoringClient.isClosed && !!authoringCheckpoint && authoringRecovery.phase === 'ready' && !busy && !saveBusy && !authoringOperationBusy;
+	}
+
+	async function retryAuthoringRestore() {
+		const client = authoringClient;
+		if (!client || mode !== 'authoring' || authoringRecovery.phase !== 'failed') return;
+		try {
+			await client.retryRestore();
+		} catch (cause) {
+			if (client === authoringClient && mode === 'authoring') editorNotice = cause instanceof Error ? cause.message : 'Authoring recovery failed.';
+		}
 	}
 
 	function refreshAuthoringProjection(focus = false) {
@@ -521,7 +565,8 @@
 			selectionBox = null; pointerGesture = null; activeTouchPoints.clear(); moveDistanceText = ''; moveAxis = null;
 			ready = true; editorNotice = 'Writable BOMC · New canonical document. Coordinates remain in metres.';
 			modelTabTitle = authoringTitle(created.checkpoint);
-			authoringTools = makeAuthoringTools(client, candidateViewport, created.checkpoint, request);
+				authoringTools = makeAuthoringTools(client, candidateViewport, created.checkpoint);
+				bindAuthoringRecovery(client);
 			candidateViewport.setOnReady(() => { if (viewport === candidateViewport && request === generation) ready = true; });
 			disposePreviousOwners(previous, candidateViewport);
 			pendingCandidateViewports.delete(candidateViewport); if (pendingCandidateClient === client) pendingCandidateClient = null;
@@ -625,7 +670,8 @@
 				sceneId = ''; viewport = writableViewport; authoringClient = candidateClient; authoringCheckpoint = checkpoint;
 				authoringBounds = bounds; authoringTool = 'select'; extrusionDistanceText = ''; selectedEntityId = ''; picked = null; selectedOccurrenceHandles = [];
 				activeTool = 'select'; activeCameraTool = null; selectionBox = null; pointerGesture = null; activeTouchPoints.clear();
-				ready = true; authoringTools = makeAuthoringTools(candidateClient, writableViewport, checkpoint, request);
+					ready = true; authoringTools = makeAuthoringTools(candidateClient, writableViewport, checkpoint);
+					bindAuthoringRecovery(candidateClient);
 				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · This file is inside the supported Editor rectangle/extrusion subset.';
 				writableViewport.setOnReady(() => { if (viewport === writableViewport && request === generation) ready = true; });
 				pendingCandidateViewports.delete(writableViewport); pendingCandidateViewports.delete(importedViewport);
@@ -639,7 +685,8 @@
 				pendingCandidateSession = candidateSession;
 				mode = 'imported'; result = loaded; session = candidateSession; editorController = new EditorController(candidateSession.editableGeometry);
 				provenance = admitted.provenance; artifactSha256 = admitted.artifactSha256; activeSourceName = file.name; modelTabTitle = resolveLoadedModelTabTitle({ modelName: loaded.modelName, sourceFileName: loaded.sourceFileName, selectedFileName: file.name }, 'Sibambo Editor');
-				sceneId = nextSceneId; viewport = importedViewport; authoringClient = null; authoringCheckpoint = null; authoringTools = null; authoringBounds = null;
+					sceneId = nextSceneId; viewport = importedViewport; authoringClient = null; authoringCheckpoint = null; authoringTools = null; authoringBounds = null;
+					bindAuthoringRecovery(null);
 				ready = false; picked = null; selectedOccurrenceHandles = []; activeTool = 'select'; authoringTool = 'select'; extrusionDistanceText = ''; activeCameraTool = null;
 				moveDistanceText = ''; moveAxis = null; editorNotice = inspection.reason; selectionBox = null; importedViewport.setSelectedOccurrences([]);
 				unsubscribeOccurrenceTransforms?.();
@@ -874,7 +921,7 @@
 		if (middleTool) { authoringTools?.handlePointerDown(event, true); startCameraGesture(event, middleTool); return; }
 		if (event.button !== 0) { authoringTools?.handlePointerDown(event, true); return; }
 		if (activeCameraTool) { authoringTools?.handlePointerDown(event, true); startCameraGesture(event, activeCameraTool); return; }
-		if (mode === 'authoring') { authoringTools?.handlePointerDown(event, false); return; }
+			if (mode === 'authoring') { if (canAuthor()) authoringTools?.handlePointerDown(event, false); return; }
 		if (activeTool === 'move') {
 			const pick = viewport.pickAt(event.clientX, event.clientY);
 			const movingHandle = editorController?.occurrenceMovePreview?.occurrenceHandle;
@@ -891,7 +938,7 @@
 	}
 	function handleViewportPointerMove(event: PointerEvent) {
 		if (!viewport || busy || saveBusy || authoringOperationBusy) return;
-		if (!pointerGesture) { if (mode === 'authoring') authoringTools?.handlePointerMove(event, false); return; }
+			if (!pointerGesture) { if (mode === 'authoring' && canAuthor()) authoringTools?.handlePointerMove(event, false); return; }
 		if (event.pointerType === 'touch') activeTouchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (pointerGesture.kind === 'touch-pair' && activeTouchPoints.size >= 2) {
 			const points = [...activeTouchPoints.values()];
@@ -935,11 +982,11 @@
 			editorController?.updateOccurrenceMove(movement);
 			refreshOccurrencePreview();
 		}
-		if (mode === 'authoring') authoringTools?.handlePointerMove(event, isEditorCameraGesture(pointerGesture));
-	}
-	function handleViewportPointerUp(event: PointerEvent) {
-		if (mode === 'authoring' && !pointerGesture) {
-			authoringTools?.handlePointerUp(event, false);
+			if (mode === 'authoring' && (isEditorCameraGesture(pointerGesture) || canAuthor())) authoringTools?.handlePointerMove(event, isEditorCameraGesture(pointerGesture));
+		}
+		function handleViewportPointerUp(event: PointerEvent) {
+			if (mode === 'authoring' && !pointerGesture) {
+				if (canAuthor()) authoringTools?.handlePointerUp(event, false);
 			try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch { /* capture may already be released */ }
 			return;
 		}
@@ -975,7 +1022,7 @@
 		} else if (gesture.kind === 'touch-pair' || gesture.kind === 'touch-orbit' || gesture.kind === 'camera') {
 			// Navigation is temporary for the duration of the pointer gesture.
 		}
-		if (mode === 'authoring') authoringTools?.handlePointerUp(event, isEditorCameraGesture(gesture));
+			if (mode === 'authoring' && (isEditorCameraGesture(gesture) || canAuthor())) authoringTools?.handlePointerUp(event, isEditorCameraGesture(gesture));
 		try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch { /* capture may already be released */ }
 	}
 	function handleViewportPointerCancel(event: PointerEvent) {
@@ -1003,8 +1050,8 @@
 		if (target?.closest('input, textarea, select, [contenteditable="true"]') || event.repeat || busy || saveBusy || authoringOperationBusy) return;
 		const key = event.key.toLowerCase();
 		if ((event.ctrlKey || event.metaKey) && key === 'z') {
-			const canChangeHistory = mode === 'authoring'
-				? event.shiftKey ? !!authoringCheckpoint?.history.redo.length : !!authoringCheckpoint?.history.undo.length
+				const canChangeHistory = mode === 'authoring'
+					? canAuthor() && (event.shiftKey ? !!authoringCheckpoint?.history.redo.length : !!authoringCheckpoint?.history.undo.length)
 				: event.shiftKey ? !!editorController?.history.canRedo : !!editorController?.history.canUndo;
 			if (!canChangeHistory) return;
 			event.preventDefault();
@@ -1176,8 +1223,10 @@
 		viewport = null;
 		session?.dispose();
 		session = null;
-		if (authoringClient) void authoringClient.close();
+		const closingAuthoringClient = authoringClient;
 		authoringClient = null;
+		bindAuthoringRecovery(null);
+		if (closingAuthoringClient) void closingAuthoringClient.close();
 		authoringCheckpoint = null;
 		authoringBounds = null;
 		activeSourceName = null;
@@ -1280,8 +1329,9 @@
 		};
 	});
 	onDestroy(() => {
-		generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
-		unsubscribeOccurrenceTransforms?.(); authoringTools?.dispose(); viewport?.dispose(); session?.dispose();
+			generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
+			unsubscribeAuthoringRecovery?.(); unsubscribeAuthoringRecovery = null;
+			unsubscribeOccurrenceTransforms?.(); authoringTools?.dispose(); viewport?.dispose(); session?.dispose();
 		if (authoringClient) void authoringClient.close();
 		for (const candidate of pendingCandidateViewports) candidate.dispose();
 		pendingCandidateViewports.clear();
@@ -1328,8 +1378,8 @@
 		<details class="menu-root">
 			<summary>Edit</summary>
 			<div class="menu-popover">
-				<button type="button" onclick={undoAction} disabled={mode === 'authoring' ? !authoringCheckpoint?.history.undo.length || busy || saveBusy || authoringOperationBusy : !editorController?.history.canUndo}>Undo<kbd>Ctrl+Z</kbd></button>
-				<button type="button" onclick={redoAction} disabled={mode === 'authoring' ? !authoringCheckpoint?.history.redo.length || busy || saveBusy || authoringOperationBusy : !editorController?.history.canRedo}>Redo<kbd>Ctrl+Shift+Z</kbd></button>
+					<button type="button" onclick={undoAction} disabled={mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.undo.length : !editorController?.history.canUndo}>Undo<kbd>Ctrl+Z</kbd></button>
+					<button type="button" onclick={redoAction} disabled={mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.redo.length : !editorController?.history.canRedo}>Redo<kbd>Ctrl+Shift+Z</kbd></button>
 			</div>
 		</details>
 		<details class="menu-root">
@@ -1458,14 +1508,20 @@
 				{/if}
 			{#if mode === 'authoring' && authoringTool === 'extrude'}
 				<div class="extrude-hud" aria-label="Push/Pull controls">
-					<label>Extrusion (m) <input type="text" inputmode="decimal" autocomplete="off" value={extrusionDistanceText} aria-describedby="extrude-help" oninput={(event) => { extrusionDistanceText = (event.currentTarget as HTMLInputElement).value; authoringTools?.setExtrusionDistance(extrusionDistanceText); }} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); authoringTools?.commitExtrusionDistance(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); authoringTools?.cancelPreview(); setAuthoringTool('select'); } }} /> </label>
+						<label>Extrusion (m) <input type="text" inputmode="decimal" autocomplete="off" value={extrusionDistanceText} aria-describedby="extrude-help" disabled={!canAuthor()} oninput={(event) => { extrusionDistanceText = (event.currentTarget as HTMLInputElement).value; authoringTools?.setExtrusionDistance(extrusionDistanceText); }} onkeydown={(event) => { if (event.key === 'Enter' && canAuthor()) { event.preventDefault(); authoringTools?.commitExtrusionDistance(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); authoringTools?.cancelPreview(); setAuthoringTool('select'); } }} /> </label>
 					<span id="extrude-help">Enter commits the complete finite distance; negative values pull below the source plane.</span>
 					<button type="button" class="hud-primary" onclick={() => authoringTools?.commitExtrusionDistance()} disabled={!canAuthor()}>Commit</button>
 					<button type="button" onclick={() => { authoringTools?.cancelPreview(); setAuthoringTool('select'); }}>Cancel</button>
 				</div>
 			{/if}
 			{#if selectionBox}<div class="selection-box" class:intersect={selectionBox.direction === 'intersect'} style:left={`${selectionBox.left}px`} style:top={`${selectionBox.top}px`} style:width={`${selectionBox.width}px`} style:height={`${selectionBox.height}px`} aria-hidden="true"></div>{/if}
-			{#if busy || error || projectionError}<div class="viewport-status" class:error-state={!!error || !!projectionError} role="status"><span>{error || projectionError || loadStatus}</span>{#if busy}<button type="button" onclick={cancelLoad}>Cancel</button>{/if}{#if projectionError && mode === 'authoring'}<button type="button" onclick={() => refreshAuthoringProjection(false)}>Retry Render</button>{/if}</div>{/if}
+				{#if mode === 'authoring' && authoringRecovery.phase !== 'ready'}
+					<div class="viewport-status" class:error-state={authoringRecovery.phase === 'failed'} role="status">
+						<span>{authoringRecovery.phase === 'restoring' ? 'Restoring the last acknowledged authoring checkpoint…' : `Authoring recovery failed. ${authoringRecovery.error ?? 'The retained checkpoint is read-only until recovery succeeds.'}`}</span>
+						{#if authoringRecovery.phase === 'failed'}<button type="button" onclick={() => void retryAuthoringRestore()}>Retry Restore</button>{/if}
+						<button type="button" onclick={(event) => requestTransition({ kind: 'close' }, event.currentTarget)}>Close</button>
+					</div>
+				{:else if busy || error || projectionError}<div class="viewport-status" class:error-state={!!error || !!projectionError} role="status"><span>{error || projectionError || loadStatus}</span>{#if busy}<button type="button" onclick={cancelLoad}>Cancel</button>{/if}{#if projectionError && mode === 'authoring'}<button type="button" onclick={() => refreshAuthoringProjection(false)}>Retry Render</button>{/if}</div>{/if}
 			<p class="viewport-hint">Middle-drag Orbit · Shift+Middle Pan · Wheel Zoom · O/H/Z camera tools</p>
 		</div>
 	</section>

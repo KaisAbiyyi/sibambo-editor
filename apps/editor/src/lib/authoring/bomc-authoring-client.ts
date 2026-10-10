@@ -60,6 +60,13 @@ type ClientOptions = {
 	documentIdFactory?: () => string;
 };
 
+export type AuthoringRecoveryState = Readonly<{
+	phase: 'ready' | 'restoring' | 'failed' | 'closed';
+	error: string | null;
+}>;
+
+type RecoveryListener = (state: AuthoringRecoveryState) => void;
+
 function uuid(): string {
 	if (typeof globalThis.crypto?.randomUUID !== 'function') throw new AuthoringClientError('INTERNAL_ERROR', 'crypto.randomUUID is unavailable.');
 	return globalThis.crypto.randomUUID();
@@ -182,6 +189,7 @@ export class AuthoringClient {
 	private closeResolve: (() => void) | null = null;
 	private closePromise: Promise<void> | null = null;
 	private readonly currentListeners = new WeakMap<WorkerPort, { message: EventListener; error: EventListener; messageerror: EventListener }>();
+	private readonly recoveryListeners = new Set<RecoveryListener>();
 
 	constructor(options: ClientOptions = {}) {
 		const sessionId = options.sessionId ?? uuid();
@@ -195,6 +203,12 @@ export class AuthoringClient {
 	get restoreError(): Error | null { return this.restoreErrorValue; }
 	get isRestoring() { return this.recoveryPending; }
 	get isClosed() { return this.closed || this.closing; }
+
+	subscribeRecovery(listener: RecoveryListener): () => void {
+		this.recoveryListeners.add(listener);
+		try { listener(this.recoveryState()); } catch { /* recovery observers do not own client state */ }
+		return () => { this.recoveryListeners.delete(listener); };
+	}
 
 	create(documentId = this.documentIdFactory()): Promise<AuthoringResult> {
 		if (!isUuid(documentId)) return Promise.reject(new AuthoringClientError('INVALID_COMMAND', 'documentId must be a UUID.'));
@@ -571,11 +585,12 @@ export class AuthoringClient {
 			const frozenCheckpoint = freezeValue(checked.checkpoint);
 			const publishedResult = { ...checked, checkpoint: frozenCheckpoint };
 			this.checkpointValue = frozenCheckpoint;
-			if (active.internalRestore) {
-				this.recoveryPending = false;
-				this.restoreErrorValue = null;
-				this.restoreSourceCheckpointValue = null;
-				this.finishEntry(active, publishedResult);
+				if (active.internalRestore) {
+					this.recoveryPending = false;
+					this.restoreErrorValue = null;
+					this.restoreSourceCheckpointValue = null;
+					this.notifyRecovery();
+					this.finishEntry(active, publishedResult);
 				this.resolveRestoreWaiters(publishedResult);
 				this.sendNext();
 				return;
@@ -702,11 +717,12 @@ export class AuthoringClient {
 		this.terminateWorker();
 		if (this.checkpointValue) {
 			this.scheduleRestore(this.checkpointValue);
-		} else {
-			this.recoveryPending = false;
-			this.restoreErrorValue = failure;
+			} else {
+				this.recoveryPending = false;
+				this.restoreErrorValue = failure;
+				this.notifyRecovery();
+			}
 		}
-	}
 
 	private abortEntry(entry: RequestEntry, override?: AuthoringClientError) {
 		if (entry.settled) return;
@@ -749,12 +765,14 @@ export class AuthoringClient {
 		this.recoveryPending = true;
 		this.restoreErrorValue = null;
 		this.restoreSourceCheckpointValue = checkpoint;
+		this.notifyRecovery();
 		this.terminateWorker();
 		const id = this.allocateRequestId();
 		if (id === null) {
 			this.recoveryPending = false;
 			this.restoreSourceCheckpointValue = null;
 			this.restoreErrorValue = new AuthoringClientError('RESOURCE_LIMIT', 'Authoring request ID range is exhausted.');
+			this.notifyRecovery();
 			this.rejectRestoreWaiters(this.restoreErrorValue);
 			return;
 		}
@@ -762,10 +780,11 @@ export class AuthoringClient {
 		try { frozenCheckpoint = freezeValue(validateAuthoringCheckpoint(checkpoint, { replayHistory: true })); }
 		catch (error) {
 			const failure = new AuthoringClientError('INVALID_COMMAND', error instanceof Error ? error.message : 'Checkpoint failed restore validation.');
-			this.recoveryPending = false;
-			this.restoreSourceCheckpointValue = null;
-			this.restoreErrorValue = failure;
-			this.rejectRestoreWaiters(failure);
+				this.recoveryPending = false;
+				this.restoreSourceCheckpointValue = null;
+				this.restoreErrorValue = failure;
+				this.notifyRecovery();
+				this.rejectRestoreWaiters(failure);
 			return;
 		}
 		const entry = this.makeEntry<AuthoringResult>('RESTORE_CHECKPOINT', (requestId) => ({
@@ -807,7 +826,23 @@ export class AuthoringClient {
 		this.terminateWorker();
 		this.restoreCheckpointValue = null;
 		this.restoreSourceCheckpointValue = null;
+		this.notifyRecovery();
 		this.rejectRestoreWaiters(failure);
+	}
+
+	private recoveryState(): AuthoringRecoveryState {
+		if (this.closed || this.closing) return Object.freeze({ phase: 'closed', error: null });
+		if (this.recoveryPending) return Object.freeze({ phase: 'restoring', error: null });
+		if (this.restoreErrorValue) return Object.freeze({ phase: 'failed', error: this.restoreErrorValue.message });
+		return Object.freeze({ phase: 'ready', error: null });
+	}
+
+	private notifyRecovery() {
+		if (!this.recoveryListeners.size) return;
+		const state = this.recoveryState();
+		for (const listener of [...this.recoveryListeners]) {
+			try { listener(state); } catch { /* recovery observers do not own client state */ }
+		}
 	}
 
 	private resolveRestoreWaiters(result: AuthoringResult) {
@@ -881,6 +916,8 @@ export class AuthoringClient {
 		this.restoreErrorValue = null;
 		this.rejectRestoreWaiters(error);
 		this.terminateWorker();
+		this.notifyRecovery();
+		this.recoveryListeners.clear();
 		this.closeResolve?.();
 		this.closeResolve = null;
 	}

@@ -360,6 +360,43 @@ describe('canonical authoring worker and client', () => {
 		expect(client.checkpoint).toBeNull();
 	});
 
+	test('publishes immutable recovery state through restore failure, retry, and close', async () => {
+		let failFactory = false;
+		const { client, workers } = makeClient(() => {
+			if (failFactory) throw new Error('controlled factory failure');
+			return new DispatcherWorker() as unknown as Worker;
+		});
+		const observed: Array<{ phase: string; error: string | null }> = [];
+		const unsubscribe = client.subscribeRecovery((state) => {
+			expect(Object.isFrozen(state)).toBe(true);
+			observed.push(state);
+		});
+		try {
+			expect(observed).toEqual([{ phase: 'ready', error: null }]);
+			await client.create();
+			await client.command({ kind: 'CREATE_RECTANGLE', first: [0, 0, 0], opposite: [2, 0, 3] });
+			failFactory = true;
+			workers[0]!.crash();
+			expect(observed.at(-2)).toEqual({ phase: 'restoring', error: null });
+			expect(observed.at(-1)).toEqual({ phase: 'failed', error: 'controlled factory failure' });
+
+			failFactory = false;
+			const retry = client.retryRestore();
+			expect(observed.at(-1)).toEqual({ phase: 'restoring', error: null });
+			await retry;
+			expect(observed.at(-1)).toEqual({ phase: 'ready', error: null });
+
+			await client.close();
+			expect(observed.at(-1)).toEqual({ phase: 'closed', error: null });
+			const countAfterClose = observed.length;
+			workers.at(-1)?.crash();
+			expect(observed).toHaveLength(countAfterClose);
+		} finally {
+			unsubscribe();
+			if (!client.isClosed) await client.close();
+		}
+	});
+
 	test('dispatcher checks expectedRevision and deduplicates duplicate in-flight/cached request IDs', async () => {
 		const messages: AuthoringWorkerMessage[] = [];
 		const dispatcher = new AuthoringWorkerDispatcher((message) => messages.push(message), () => 'cf1a8f05-5fdb-4af5-a6c1-96e6a244ecdd');

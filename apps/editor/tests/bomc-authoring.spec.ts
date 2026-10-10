@@ -25,7 +25,7 @@ async function probe(page: Page) {
 
 function latestAuthoringWorker(observation: AuthoringWorkerProbe) {
 	const matches = observation.workers.filter((worker) => worker.replies.some((reply) => reply.protocolVersion === 'sibambo-editor-authoring-1'));
-	const current = matches.at(-1);
+	const current = matches.filter((worker) => worker.terminated === 0).at(-1) ?? matches.at(-1);
 	if (!current) throw new Error('No production authoring worker was observed.');
 	return current;
 }
@@ -147,15 +147,26 @@ async function saveBomc(page: Page, target: string): Promise<{ download: Downloa
 	const sha256 = createHash('sha256').update(bytes).digest('hex');
 	await expect.poll(async () => {
 		const next = await probe(page);
-		const current = next.workers.at(-1);
-		return current?.replies.some((reply) => reply.event === 'RESULT' && reply.requestType === 'WRITE' && reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength) ?? false;
+		return next.workers.some((worker) => worker.terminated === 0 && worker.replies.some((reply) =>
+			reply.event === 'RESULT' && reply.requestType === 'WRITE' && reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength));
 	}).toBe(true);
 	const after = await probe(page);
-	const writes = latestAuthoringWorker(after).replies.filter((reply) => reply.event === 'RESULT' && reply.requestType === 'WRITE');
+	const matchingWorker = [...after.workers].reverse().find((worker) => worker.terminated === 0 && worker.replies.some((reply) =>
+		reply.event === 'RESULT' && reply.requestType === 'WRITE' && reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength));
+	if (!matchingWorker) throw new Error(`Downloaded BOMC (${bytes.byteLength} bytes, ${sha256}) did not match a live production worker WRITE result.`);
+	const writes = matchingWorker.replies.filter((reply) => reply.event === 'RESULT' && reply.requestType === 'WRITE');
 	const workerWrite = writes.find((reply) => reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength);
 	if (!workerWrite) throw new Error(`Downloaded BOMC (${bytes.byteLength} bytes, ${sha256}) did not match a production worker WRITE result.`);
-	await expect.poll(async () => latestAuthoringWorker(await probe(page)).requests.some((request) => request.type === 'ACK_DOWNLOAD' && request.data?.writeId === workerWrite.result.writeId && request.expectedRevision === workerWrite.result.revision)).toBe(true);
-	const acknowledgedWorker = latestAuthoringWorker(await probe(page));
+	await expect.poll(async () => {
+		const next = await probe(page);
+		const worker = next.workers.find((candidate) => candidate.terminated === 0 && candidate.replies.some((reply) =>
+			reply.event === 'RESULT' && reply.requestType === 'WRITE' && reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength));
+		return worker?.requests.some((request) => request.type === 'ACK_DOWNLOAD' && request.data?.writeId === workerWrite.result.writeId && request.expectedRevision === workerWrite.result.revision) ?? false;
+	}).toBe(true);
+	const acknowledgedObservation = await probe(page);
+	const acknowledgedWorker = acknowledgedObservation.workers.find((candidate) => candidate.terminated === 0 && candidate.replies.some((reply) =>
+		reply.event === 'RESULT' && reply.requestType === 'WRITE' && reply.result?.sha256 === sha256 && reply.result?.length === bytes.byteLength));
+	if (!acknowledgedWorker) throw new Error('The worker that produced the matching WRITE result is no longer active before ACK verification.');
 	const ackRequest = acknowledgedWorker.requests.find((request) => request.type === 'ACK_DOWNLOAD'
 		&& request.data?.writeId === workerWrite.result.writeId
 		&& request.expectedRevision === workerWrite.result.revision);
@@ -227,6 +238,19 @@ function rectangleEntityId(graph: BomcGraph, sequence: number) {
 		} catch { return false; }
 	})) throw new Error(`Canonical graph does not contain expected authored rectangle ${entityId}.`);
 	return entityId;
+}
+
+function authoredRectangleEntityIds(graph: BomcGraph): string[] {
+	const ids = new Set<string>();
+	for (const mesh of graph.meshes) {
+		for (const face of mesh.faces) {
+			try {
+				const label = JSON.parse(face.label ?? 'null');
+				if (label[0] === 'sibambo-editor-shape-v1' && label[1] === 'rectangle' && typeof label[2] === 'string') ids.add(label[2]);
+			} catch { /* non-authoring labels are outside this helper */ }
+		}
+	}
+	return [...ids];
 }
 
 async function selectProjectedRectangle(page: Page, graph: BomcGraph, entityId: string) {
@@ -599,17 +623,165 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await page.getByRole('dialog', { name: 'Save changes?' }).getByRole('button', { name: 'Cancel', exact: true }).click();
 		expect(await page.title()).toBe(exactTitleBeforeOpenCancel);
 		expect(await currentCheckpoint(page)).toStrictEqual(exactDirtyBeforeOpenCancel);
-		for (const candidate of corrupt) {
-			const exactDirtyBeforeOpen = await currentCheckpoint(page);
-			const exactTitleBeforeOpen = await page.title();
-			await uploadBytes(page, candidate.bytes, candidate.id + '.bomc');
+			for (const [candidateIndex, candidate] of corrupt.entries()) {
+				const exactDirtyBeforeOpen = await currentCheckpoint(page);
+				const exactTitleBeforeOpen = await page.title();
+				await uploadBytes(page, candidate.bytes, candidate.id + '.bomc');
 			await expect(page.getByRole('dialog', { name: 'Save changes?' })).toBeVisible();
 			await page.getByRole('dialog', { name: 'Save changes?' }).getByRole('button', { name: 'Discard', exact: true }).click();
 			await expect(page.locator('.viewport-status.error-state')).toContainText(/invalid|truncated|section|BOMC|corrupt/i, { timeout: 180_000 });
-			expect(await page.title()).toBe(exactTitleBeforeOpen);
-			expect(await currentCheckpoint(page)).toStrictEqual(exactDirtyBeforeOpen);
-			await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
-		}
+				expect(await page.title()).toBe(exactTitleBeforeOpen);
+				expect(await currentCheckpoint(page)).toStrictEqual(exactDirtyBeforeOpen);
+				await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
+
+				// A rejected replacement must leave the restored controller usable. Prove a
+				// new canonical edit, extrusion, actual Save bytes, and independent reopen.
+				await ensureTopView(page);
+				const createCountBefore = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length;
+				await drawRectangle(page, 0.24 + candidateIndex * 0.12, 0.62, 0.08, 0.07);
+				await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(exactDirtyBeforeOpen.snapshot.revision + 1);
+				const postRollbackDraw = await currentCheckpoint(page);
+				expect((await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE')).toHaveLength(createCountBefore + 1);
+				const beforeEntityIds = new Set(authoredRectangleEntityIds(exactDirtyBeforeOpen.snapshot.graph as BomcGraph));
+				const addedEntityIds = authoredRectangleEntityIds(postRollbackDraw.snapshot.graph as BomcGraph).filter((entityId) => !beforeEntityIds.has(entityId));
+				expect(addedEntityIds).toHaveLength(1);
+				const newEntityId = addedEntityIds[0]!;
+				await ensureTopView(page);
+				await selectProjectedRectangle(page, postRollbackDraw.snapshot.graph as BomcGraph, newEntityId);
+				const extrudeCountBefore = (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length;
+				await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+				await page.getByLabel('Extrusion (m)').fill(String(0.6 + candidateIndex * 0.2));
+				await page.getByRole('button', { name: 'Commit', exact: true }).click();
+				await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length).toBe(extrudeCountBefore + 1);
+				await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(postRollbackDraw.snapshot.revision + 1);
+				const expectedAfterRollbackEdit = await currentCheckpoint(page);
+				const savedAfterRollback = await saveBomc(page, testInfo.outputPath(`${candidate.id}-rollback-edit.bomc`));
+				const independentlyRead = await readWebBomc(new Uint8Array(savedAfterRollback.bytes));
+				try { expect(independentlyRead.snapshot().graph).toStrictEqual(expectedAfterRollbackEdit.snapshot.graph); }
+				finally { independentlyRead.dispose(); }
+				await openFileMenu(page);
+				await page.getByRole('button', { name: 'Close Model' }).click();
+				await expect(page.locator('.empty-workspace')).toBeVisible();
+				await uploadBytes(page, savedAfterRollback.bytes, `${candidate.id}-rollback-edit-reopen.bomc`);
+				await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+				expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(expectedAfterRollbackEdit.snapshot.graph);
+
+				// Keep the next replacement attempt dirty so it traverses the same guarded
+				// transition path instead of bypassing the Save/Discard/Cancel contract.
+				if (candidateIndex < corrupt.length - 1) {
+					await ensureTopView(page);
+					await drawRectangle(page, 0.70, 0.62, 0.06, 0.06);
+				}
+			}
+		});
+
+	test('keeps the active authoring controller usable after an in-flight replacement is cancelled', async ({ page }, testInfo) => {
+		test.setTimeout(180_000);
+		await createNew(page);
+		await ensureTopView(page);
+		await drawRectangle(page, 0.40, 0.40, 0.10, 0.10);
+		const seed = await saveBomc(page, testInfo.outputPath('cancelled-replacement-seed.bomc'));
+		await ensureTopView(page);
+		await drawRectangle(page, 0.60, 0.40, 0.09, 0.09);
+		const retained = await currentCheckpoint(page);
+		const retainedTitle = await page.title();
+		const commandsBeforeCancel = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length;
+
+		await page.evaluate(() => window.__editorAuthoringWorkerFaultControl?.pauseNextRequest('OPEN'));
+		await uploadBytes(page, seed.bytes, 'cancelled-in-flight-open.bomc');
+		await expect(page.getByRole('dialog', { name: 'Save changes?' })).toBeVisible();
+		await page.getByRole('dialog', { name: 'Save changes?' }).getByRole('button', { name: 'Discard', exact: true }).click();
+		await expect.poll(async () => (await probe(page)).workers.some((worker) => worker.requests.some((request) => request.type === 'OPEN') && worker.terminated === 0)).toBe(true);
+		const cancel = page.locator('.viewport-status').getByRole('button', { name: 'Cancel', exact: true });
+		await expect(cancel).toBeVisible();
+		await cancel.click();
+		await expect(page.locator('.viewport-status.error-state')).toContainText(/cancelled/i);
+		expect(await page.title()).toBe(retainedTitle);
+		expect(await currentCheckpoint(page)).toStrictEqual(retained);
+
+		await ensureTopView(page);
+		await drawRectangle(page, 0.28, 0.64, 0.08, 0.07);
+		await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length).toBe(commandsBeforeCancel + 1);
+		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(retained.snapshot.revision + 1);
+		const expected = await currentCheckpoint(page);
+		const saved = await saveBomc(page, testInfo.outputPath('cancelled-replacement-continued.bomc'));
+		const independent = await readWebBomc(new Uint8Array(saved.bytes));
+		try { expect(independent.snapshot().graph).toStrictEqual(expected.snapshot.graph); }
+		finally { independent.dispose(); }
+		await openFileMenu(page);
+		await page.getByRole('button', { name: 'Close Model' }).click();
+		await expect(page.locator('.empty-workspace')).toBeVisible();
+		await uploadBytes(page, saved.bytes, 'cancelled-replacement-continued-reopen.bomc');
+		await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+		expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(expected.snapshot.graph);
+	});
+
+	test('shows failed recovery read-only, retries the retained checkpoint, and closes during restore without resurrection', async ({ page }, testInfo) => {
+		test.setTimeout(180_000);
+		await createNew(page);
+		await ensureTopView(page);
+		await drawRectangle(page, 0.40, 0.40, 0.11, 0.10);
+		const retained = await currentCheckpoint(page);
+		const retainedTitle = await page.title();
+
+		await page.evaluate(() => {
+			const control = window.__editorAuthoringWorkerFaultControl;
+			if (!control) throw new Error('Authoring worker fault control is unavailable.');
+			control.failNextWorkerConstruction();
+			if (!control.triggerLatestMessageError()) throw new Error('No live authoring worker was available for messageerror.');
+		});
+		const retry = page.getByRole('button', { name: 'Retry Restore', exact: true });
+		await expect(retry).toBeVisible();
+		await expect(page.locator('.viewport-status.error-state')).toContainText(/recovery failed|simulated restore worker construction failure/i);
+		await expect(page.getByRole('button', { name: 'Rectangle', exact: true })).toBeDisabled();
+		await openFileMenu(page);
+		await expect(page.getByRole('button', { name: /Save BOMC/ })).toBeDisabled();
+		await closeMenu(page, 0);
+		expect(await page.title()).toBe(retainedTitle);
+		await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
+
+		await retry.click();
+		await expect(retry).toHaveCount(0);
+		await expect(page.getByRole('button', { name: 'Rectangle', exact: true })).toBeEnabled();
+		await expect.poll(async () => (await probe(page)).workers.some((worker) => worker.terminated === 0 && worker.replies.some((reply) => reply.event === 'RESULT' && reply.requestType === 'RESTORE_CHECKPOINT'))).toBe(true);
+		const restored = await currentCheckpoint(page);
+		expect(restored.snapshot.graph).toStrictEqual(retained.snapshot.graph);
+		expect(restored.history).toStrictEqual(retained.history);
+		expect(restored.sequence).toBe(retained.sequence);
+
+		await ensureTopView(page);
+		await drawRectangle(page, 0.62, 0.40, 0.09, 0.08);
+		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(retained.snapshot.revision + 1);
+		const edited = await currentCheckpoint(page);
+		const saved = await saveBomc(page, testInfo.outputPath('recovery-retry-save.bomc'));
+		const independent = await readWebBomc(new Uint8Array(saved.bytes));
+		try { expect(independent.snapshot().graph).toStrictEqual(edited.snapshot.graph); }
+		finally { independent.dispose(); }
+		await openFileMenu(page);
+		await page.getByRole('button', { name: 'Close Model' }).click();
+		await expect(page.locator('.empty-workspace')).toBeVisible();
+		await uploadBytes(page, saved.bytes, 'recovery-retry-reopen.bomc');
+		await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+		expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(edited.snapshot.graph);
+
+		await ensureTopView(page);
+		await drawRectangle(page, 0.30, 0.65, 0.07, 0.06);
+		await page.evaluate(() => {
+			const control = window.__editorAuthoringWorkerFaultControl;
+			if (!control) throw new Error('Authoring worker fault control is unavailable.');
+			control.pauseNextRequest('RESTORE_CHECKPOINT');
+			if (!control.triggerLatestMessageError()) throw new Error('No live authoring worker was available for restore-close proof.');
+		});
+		await expect(page.locator('.viewport-status')).toContainText('Restoring the last acknowledged authoring checkpoint');
+		await page.locator('.viewport-status').getByRole('button', { name: 'Close', exact: true }).click();
+		const closeDialog = page.getByRole('dialog', { name: 'Save changes?' });
+		await expect(closeDialog).toBeVisible();
+		await expect(closeDialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+		await closeDialog.getByRole('button', { name: 'Discard', exact: true }).click();
+		await expect(page.locator('.empty-workspace')).toBeVisible();
+		await page.waitForTimeout(100);
+		const afterClose = await probe(page);
+		expect(afterClose.workers.filter((worker) => worker.terminated === 0 && (worker.requests.some((request) => request.protocolVersion === 'sibambo-editor-authoring-1') || worker.replies.some((reply) => reply.protocolVersion === 'sibambo-editor-authoring-1')))).toHaveLength(0);
 	});
 
 	test('keeps unsupported S2-current and BWEB capabilities in read-only viewer mode', async ({ page }, testInfo) => {

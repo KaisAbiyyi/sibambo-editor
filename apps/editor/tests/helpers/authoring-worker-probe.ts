@@ -66,25 +66,56 @@ export type AuthoringWorkerProbe = {
 	}>;
 };
 
+export type AuthoringWorkerFaultControl = {
+	failNextWorkerConstruction(): void;
+	pauseNextRequest(type: AuthoringRequest['type']): void;
+	triggerLatestMessageError(): boolean;
+};
+
 declare global {
-	interface Window { __editorAuthoringWorkerProbe?: AuthoringWorkerProbe }
+	interface Window {
+		__editorAuthoringWorkerProbe?: AuthoringWorkerProbe;
+		__editorAuthoringWorkerFaultControl?: AuthoringWorkerFaultControl;
+	}
 }
 
 /**
- * Installs a read-only observer around browser Workers. It records only the
- * authoring protocol envelope and cloned replies; it does not change messages,
- * add route hooks, or synthesize a successful worker response.
+ * Installs an observer around browser Workers. Normal tests only record cloned
+ * authoring envelopes. Explicit negative tests may opt into the fault control
+ * to drop one request, dispatch messageerror, or fail one worker construction;
+ * the helper never synthesizes a successful protocol reply.
  */
 export async function installAuthoringWorkerProbe(page: Page) {
 	await page.addInitScript(() => {
 		const NativeWorker = window.Worker;
 		const probe: AuthoringWorkerProbe = { workers: [] };
+		const liveWorkers: Array<{ worker: Worker; record: AuthoringWorkerProbe['workers'][number] }> = [];
+		let failNextConstruction = false;
+		let pauseNextRequestType: string | null = null;
 		window.__editorAuthoringWorkerProbe = probe;
+		window.__editorAuthoringWorkerFaultControl = {
+			failNextWorkerConstruction() { failNextConstruction = true; },
+			pauseNextRequest(type) { pauseNextRequestType = type; },
+			triggerLatestMessageError() {
+				const target = [...liveWorkers].reverse().find(({ record }) => record.terminated === 0
+					&& (record.requests.some((request) => request.protocolVersion === 'sibambo-editor-authoring-1')
+						|| record.replies.some((reply) => reply.protocolVersion === 'sibambo-editor-authoring-1')));
+				if (!target) return false;
+				target.worker.dispatchEvent(new MessageEvent('messageerror'));
+				return true;
+			}
+		};
 		class ObservedWorker extends NativeWorker {
 			constructor(scriptURL: string | URL, options?: WorkerOptions) {
 				super(scriptURL, options);
+				if (failNextConstruction) {
+					failNextConstruction = false;
+					super.terminate();
+					throw new Error('simulated restore worker construction failure');
+				}
 				const record: AuthoringWorkerProbe['workers'][number] = { url: String(scriptURL), terminated: 0, requests: [], replies: [] };
 				probe.workers.push(record);
+				liveWorkers.push({ worker: this, record });
 				this.addEventListener('message', (event: MessageEvent) => {
 					const message = event.data;
 					if (!message || message.protocolVersion !== 'sibambo-editor-authoring-1') return;
@@ -105,8 +136,12 @@ export async function installAuthoringWorkerProbe(page: Page) {
 							const ownedBuffer = (data as { ownedBuffer: ArrayBuffer }).ownedBuffer;
 							request.data = { ...(data as Record<string, unknown>), ownedBuffer: null, byteLength: ownedBuffer.byteLength };
 						}
-						record.requests.push(request as unknown as AuthoringWorkerRequestObservation);
-					}
+								record.requests.push(request as unknown as AuthoringWorkerRequestObservation);
+								if (pauseNextRequestType === request.type) {
+									pauseNextRequestType = null;
+									return;
+								}
+							}
 					return Reflect.apply(nativePostMessage, this, args);
 				};
 				this.postMessage = observedPostMessage as typeof Worker.prototype.postMessage;
