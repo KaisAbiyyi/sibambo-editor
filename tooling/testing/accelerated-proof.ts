@@ -260,6 +260,7 @@ export function claimAcceleratedAttempt(input: {
 	assertStrictChild(topicReal, executionRoot, 'Accelerated execution root must be below the canonical topic root.');
 	ensureSafeExistingAncestors(topicReal, executionRoot);
 	const executionRootExists = existsSync(executionRoot);
+	if (input.attempt === 1 && executionRootExists) throw new Error(`Accelerated run root may not be reused: ${executionRoot}`);
 	const fixtures = acceleratedFixturesForSuite(input.suite);
 	const references = acceleratedReferencesForSuite(input.suite);
 	const identity = captureAcceleratedSourceIdentity({ fixtures, references });
@@ -274,7 +275,6 @@ export function claimAcceleratedAttempt(input: {
 		suite: input.suite, cycle: input.cycle ?? null, attempt: input.attempt,
 		identity, runtime: input.runtime, executionRoot, attemptRoot
 	});
-	if (input.attempt === 1 && executionRootExists) throw new Error(`Accelerated run root may not be reused: ${executionRoot}`);
 	if (input.attempt === 2 && !executionRootExists) throw new Error('Attempt 2 must use the same existing execution root as its recognized attempt 1 setup receipt.');
 	createSafeDirectoryTree(topicReal, path.dirname(attemptRoot));
 	createSafeDirectoryTree(topicReal, attemptRoot);
