@@ -72,8 +72,9 @@ main[data-app="editor"].is-loaded {
 .menu-root:nth-of-type(2) .menu-popover { left: 112px; top: 29px; }
 .menu-root:nth-of-type(3) .menu-popover { left: 150px; top: 29px; }
 .menu-root:nth-of-type(4) .menu-popover { left: 190px; top: 29px; }
-.menu-root:nth-of-type(5) .menu-popover { left: 295px; top: 29px; }
-.menu-root:nth-of-type(6) .menu-popover { left: 345px; top: 29px; }
+.menu-root:nth-of-type(5) .menu-popover { left: 250px; top: 29px; }
+.menu-root:nth-of-type(6) .menu-popover { left: 310px; top: 29px; }
+.menu-root:nth-of-type(7) .menu-popover { left: 370px; top: 29px; }
 .menu-popover button {
 	display: flex;
 	min-height: 30px;
@@ -92,6 +93,8 @@ main[data-app="editor"].is-loaded {
 .menu-popover button:disabled { opacity: .42; }
 .menu-popover kbd { color: var(--color-text-muted); font: 9px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .menu-separator { height: 1px; margin: 3px 2px; background: var(--color-border); }
+.menu-status { display: block; padding: 5px 8px; color: var(--color-text-muted); font-size: 9px; line-height: 1.45; white-space: normal; }
+.menu-error { color: var(--color-danger); }
 .menu-form { gap: 7px; padding: 8px; }
 .menu-form label { display: grid; gap: 4px; color: var(--color-text-muted); font-size: 10px; font-weight: 650; }
 .menu-form select {
@@ -139,6 +142,7 @@ main[data-app="editor"].is-loaded {
 .tool-context { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--color-text-muted); font-size: 9px; }
 .tool-context span:first-child { max-width: 34vw; overflow: hidden; color: var(--color-text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .tool-context span:last-child { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 4px; font-weight: 700; }
+.tool-context .mode-badge { border-color: var(--color-primary-border); background: var(--color-primary-soft); color: var(--color-primary-strong); }
 
 .scene-tabs {
 	position: relative;
@@ -170,7 +174,8 @@ main[data-app="editor"].is-loaded {
 .scene-tabs-empty { align-items: center; padding: 0 11px; color: var(--color-text-muted); font-size: 9px; }
 
 .editor-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--color-canvas); }
-.editor-stage .viewport-frame { position: absolute; inset: 0; min-width: 0; min-height: 0; overflow: hidden; }
+.editor-stage .viewport-frame { position: absolute; inset: 0; min-width: 0; min-height: 0; overflow: hidden; outline: none; }
+.editor-stage .viewport-frame:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 .editor-stage .viewport { width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--color-canvas); }
 .editor-stage canvas { display: block; touch-action: none; }
 
@@ -210,6 +215,15 @@ main[data-app="editor"].is-loaded {
 }
 .viewport-status.error-state { border-color: color-mix(in srgb, var(--color-danger) 45%, var(--color-border)); color: var(--color-danger); }
 .viewport-status button { min-height: 25px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: inherit; font-size: 9px; }
+.transition-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(15,20,28,.48); }
+.transition-dialog { width: min(420px, 100%); padding: 20px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); box-shadow: 0 18px 55px rgba(8,14,24,.28); color: var(--color-text); }
+.transition-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+.transition-dialog p { margin: 0 0 16px; color: var(--color-text-secondary); font-size: 11px; line-height: 1.55; }
+.transition-dialog .transition-error { color: var(--color-danger); }
+.transition-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.transition-actions button { min-height: 32px; padding: 0 11px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-surface); color: var(--color-text-secondary); font-size: 10px; font-weight: 650; }
+.transition-actions button.transition-primary { border-color: var(--color-primary); background: var(--color-primary); color: #fff; }
+.transition-actions button:disabled { opacity: .45; }
 
 .move-hud {
 	position: absolute;
@@ -231,10 +245,19 @@ main[data-app="editor"].is-loaded {
 .move-hud .hud-primary { border-color: var(--color-primary); background: var(--color-primary); color: #fff; }
 .move-hud label { display: flex; align-items: center; gap: 5px; color: var(--color-text-muted); font-size: 9px; }
 .move-hud input { width: 82px; min-height: 30px; padding: 4px 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-size: 10px; }
+.extrude-hud { position: absolute; left: 10px; bottom: 10px; z-index: 18; display: flex; align-items: center; gap: 7px; padding: 7px; border: 1px solid var(--color-border); border-radius: 7px; background: color-mix(in srgb, var(--color-surface) 95%, transparent); box-shadow: 0 8px 22px rgba(16,24,40,.12); }
+.extrude-hud label { display: flex; align-items: center; gap: 6px; color: var(--color-text-secondary); font-size: 10px; font-weight: 650; }
+.extrude-hud input { width: 90px; min-height: 30px; padding: 4px 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-size: 10px; }
+.extrude-hud span { max-width: 190px; color: var(--color-text-muted); font-size: 9px; line-height: 1.4; }
+.extrude-hud button { min-height: 30px; padding: 4px 8px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text-secondary); font-size: 10px; }
+.extrude-hud .hud-primary { border-color: var(--color-primary); background: var(--color-primary); color: #fff; }
 
 .empty-workspace {
+	position: absolute;
+	inset: 0;
+	z-index: 14;
 	display: grid;
-	height: 100%;
+	min-height: 0;
 	place-items: center;
 	padding: 24px;
 	background:
@@ -256,6 +279,8 @@ main[data-app="editor"].is-loaded {
 .empty-dropzone h1 { margin: 0 0 7px; font-size: 20px; }
 .empty-dropzone p { margin: 0 0 17px; color: var(--color-text-secondary); font-size: 11px; line-height: 1.5; }
 .empty-open { min-height: 36px; padding: 0 14px; border: 1px solid var(--color-primary); border-radius: 6px; background: var(--color-primary); color: #fff; font-size: 11px; font-weight: 700; }
+.empty-actions { display: flex; justify-content: center; gap: 8px; }
+.empty-open.empty-secondary { border-color: var(--color-border); background: var(--color-surface); color: var(--color-text-secondary); }
 .empty-status { margin-top: 10px !important; color: var(--color-text-muted) !important; }
 .empty-error { margin-top: 10px !important; color: var(--color-danger) !important; }
 
@@ -298,5 +323,6 @@ main[data-app="editor"].is-loaded {
 	.editor-footer { grid-template-columns: minmax(0, 1fr) auto; font-size: 9px; }
 	.footer-brand { display: none; }
 	.footer-build span:first-child { display: none; }
-	.move-hud { right: 8px; left: 8px; flex-wrap: wrap; }
+	.move-hud, .extrude-hud { right: 8px; left: 8px; flex-wrap: wrap; }
+	.extrude-hud span { flex-basis: 100%; max-width: none; }
 }

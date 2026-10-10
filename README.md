@@ -3,7 +3,7 @@
 
 The standalone workspace follows the versioned [Sibambo UI contract](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/sibambo-ui-contract-ui-reunification-001-v1.1.md), based on the production `model-eval` interface. Editor owns its layout and styles locally; shared appearance does not move model data or sessions between apps.
 
-Sibambo Editor is a browser-based E4 viewport and early editing foundation for inspecting BOMC 1.2 captures. The current page opens one model file, renders the imported source, and lets you inspect scenes and source geometry. A provenance sidecar is optional and adds a matched source record when its policy, byte count, hash, and profile checks pass. The app does not provide a complete CAD workflow or write edited geometry back to a BOMC file.
+Sibambo Editor is a browser-based E4 viewport with a bounded BOMC authoring workflow. It opens model files for inspection and lets you create a new flat document, draw ground-plane rectangles, extrude a selected rectangle upward or downward, undo and redo those edits, and download a BOMC file. A provenance sidecar is optional and adds a matched source record when its policy, byte count, hash, and profile checks pass.
 
 ## What it currently does
 
@@ -14,8 +14,17 @@ Sibambo Editor is a browser-based E4 viewport and early editing foundation for i
 - Shows named scenes, Solid, X-Ray, and Wireframe display modes, standard camera views, and orbit, pan, and zoom navigation.
 - Lets you pick source geometry and inspect available mesh, definition, occurrence, and face identifiers.
 - Downloads a PNG of the current view.
+- Creates a new empty BOMC document and edits the flat rectangle/prism subset with canonical double-precision coordinates.
+- Keeps imported documents read-only unless their graph matches that exact editable subset.
+- Downloads edited BOMC bytes and can reopen the downloaded file for further edits.
 
-The imported source is read-only in the current interface. Editor-specific geometry and command classes exist as a foundation, but the page does not expose those tools, a complete edit history, or a save-back workflow.
+This is a constrained authoring phase, not a general CAD editor. Nested instances, textured or otherwise unsupported imported graphs remain view-only. A successful BOMC download does not establish native SketchUp compatibility or certification.
+
+## Create and edit a BOMC
+
+Choose **New BOMC**, select **Rectangle**, and place two points on the ground plane. Select an unextruded rectangle and use **Push/Pull** to enter a signed distance in metres. Undo and Redo operate on acknowledged document edits. **Save BOMC** downloads the current canonical document; after opening that downloaded file, continue editing through the same workflow. A dirty document asks whether to Save, Discard, or Cancel before New, Open, or Close.
+
+The editable subset is intentionally narrow: a flat root document with independent ground rectangles and single upward or downward extrusions. Valid files outside that subset remain available in the viewer with BOMC Save disabled. Unsupported input is not silently flattened or rewritten.
 
 ## Open a model
 
@@ -25,7 +34,7 @@ BOMC import has no fixed app-level file, section, record, geometry, or render-wo
 
 ## Status and evidence limits
 
-E4 remains **candidate_pending_cross_model_validation**. A successful admission or rendered image does not establish parity with another viewer, universal model fidelity, or certification. Complete editing, lossless round-tripping, and modified BOMC export are not established capabilities.
+E4 remains **candidate_pending_cross_model_validation**. The authoring subset's automated download/reopen qualification is being completed in the current implementation batch. A successful admission or rendered image does not establish parity with another viewer, universal model fidelity, or certification. General CAD editing, native SketchUp compatibility, and complex-model round-tripping are outside this subset.
 
 Imported model data and the Editor session are held in page memory. There is no hosted database, model upload service, account sync, or server-side editing history in this app. Saving a view downloads an image to the user’s device.
 

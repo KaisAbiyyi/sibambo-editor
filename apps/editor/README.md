@@ -1,7 +1,7 @@
 
 # Sibambo Editor
 
-Editor is the E4-only viewport application in this self-contained Bun workspace. The workspace includes the five shared packages Editor depends on. Use the repository root for dependency installation and commands.
+Editor is the E4-only viewport and bounded authoring application in this self-contained Bun workspace. The workspace includes the shared packages Editor depends on. Use the repository root for dependency installation and commands.
 
 ## Open a model file
 
@@ -24,7 +24,11 @@ The current route provides:
 - Source-geometry picking, with mesh, definition, occurrence, and face identifiers where available.
 - PNG capture after the viewport is ready.
 
-These controls inspect the imported source. The app page does not expose drawing, push/pull, undo/redo, or a file-writing workflow for imported BOMC geometry.
+## Create a new document
+
+Choose **New BOMC**, select **Rectangle**, and place two ground-plane points. Select a new rectangle and use **Push/Pull** to enter a signed distance in metres. **Undo** and **Redo** apply to acknowledged canonical edits. **Save BOMC** downloads the document; reopen that file with **Open model file** to continue editing. A dirty document prompts for Save, Discard, or Cancel before New, Open, or Close.
+
+The editing scope is one flat root document containing independent ground rectangles and one signed extrusion per rectangle. Valid imported BOMC files outside this exact subset remain view-only with BOMC Save disabled. The app does not flatten unsupported geometry or provide nested/component editing.
 
 ## Import cancellation and session lifetime
 
@@ -34,9 +38,9 @@ The worker keeps decoding and render preparation off the main UI thread. BOMC im
 
 ## Data handling
 
-Editor does not upload the selected model or save it to a hosted database. The selected file reference, imported result, and Editor session remain in page memory. The **Save view** button downloads a PNG to the local device. The current page has no model-save, cloud-sync, or collaboration feature.
+Editor does not upload the selected model or save it to a hosted database. The selected file reference, imported result, canonical authoring document and session remain in page memory. **Save BOMC** and **Save view** create browser downloads; neither action stores files on a server. The app has no cloud-sync or collaboration feature.
 
-The source model is displayed read-only. The [Editor session](src/lib/editor/EditorSession.ts) has a separate Editor-owned geometry store, but the current route does not connect drawing tools or save edited geometry. Treat the application as a viewport foundation, not as a complete or lossless CAD editor.
+Canonical authoring state uses the BOMC document graph. Render buffers and selection/preview overlays are disposable projections. Imported graphs outside the supported authoring subset are displayed read-only; malformed supported authoring data is rejected without replacing the previous session.
 
 ## Security and evidence limits
 
@@ -44,7 +48,7 @@ The app rejects unsupported BOMC versions. It has no fixed app-level BOMC file-s
 
 The sidecar hash is not a security signature and does not prove producer authenticity. BOMC format checks do not certify E4 behavior.
 
-E4 remains **candidate_pending_cross_model_validation**. Cross-model viewer parity, universal fidelity, certification, complete editing, and lossless save-back are unproven. See [Data handling and evidence limits](../../docs/data-and-evidence.md).
+E4 remains **candidate_pending_cross_model_validation**. The current batch is qualifying the bounded authoring/download/reopen flow; until its named browser and independent-reader checks finish, those outcomes remain unverified. Cross-model viewer parity, universal fidelity, certification, native SketchUp behavior, and general-model round-tripping remain separate claims. See [Data handling and evidence limits](../../docs/data-and-evidence.md).
 
 ## Run the workspace
 

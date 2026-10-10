@@ -1,0 +1,197 @@
+import {
+	BufferGeometry,
+	Color,
+	DoubleSide,
+	Float32BufferAttribute,
+	FrontSide,
+	Group,
+	LineBasicMaterial,
+	LineSegments,
+	type Material,
+	Mesh,
+	MeshStandardMaterial,
+	SRGBColorSpace
+} from 'three';
+import type { BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
+import { MaterialStateManager, sourceEdgeMaterialDescriptor, type DisplayState, type ViewportBounds } from '@sibambo/viewport';
+import { validateEditableSubset } from './geometry.js';
+
+const EMPTY_AUTHORING_BOUNDS: ViewportBounds = {
+	min: { x: -5, y: 0, z: -5 },
+	max: { x: 5, y: 3, z: 5 }
+};
+
+export type AuthoringSceneProjection = { group: Group; bounds: ViewportBounds };
+
+export class AuthoringSceneError extends Error {
+	constructor(message: string) { super(message); this.name = 'AuthoringSceneError'; }
+}
+
+function boundsForSnapshot(snapshot: BomcSnapshot): ViewportBounds {
+	const positions = snapshot.graph.meshes.flatMap((mesh) => mesh.positions);
+	if (positions.length === 0) return {
+		min: { ...EMPTY_AUTHORING_BOUNDS.min },
+		max: { ...EMPTY_AUTHORING_BOUNDS.max }
+	};
+	const bounds: ViewportBounds = {
+		min: { x: Number.POSITIVE_INFINITY, y: Number.POSITIVE_INFINITY, z: Number.POSITIVE_INFINITY },
+		max: { x: Number.NEGATIVE_INFINITY, y: Number.NEGATIVE_INFINITY, z: Number.NEGATIVE_INFINITY }
+	};
+	for (let index = 0; index < positions.length; index += 3) {
+		const x = positions[index]!;
+		const y = positions[index + 1]!;
+		const z = positions[index + 2]!;
+		if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) throw new AuthoringSceneError('Canonical snapshot contains a nonfinite position.');
+		bounds.min.x = Math.min(bounds.min.x, x);
+		bounds.min.y = Math.min(bounds.min.y, y);
+		bounds.min.z = Math.min(bounds.min.z, z);
+		bounds.max.x = Math.max(bounds.max.x, x);
+		bounds.max.y = Math.max(bounds.max.y, y);
+		bounds.max.z = Math.max(bounds.max.z, z);
+	}
+	return bounds;
+}
+
+function vertex(mesh: BomcMesh, index: number): [number, number, number] {
+	return [mesh.positions[index * 3]!, mesh.positions[index * 3 + 1]!, mesh.positions[index * 3 + 2]!];
+}
+
+function geometryForFace(mesh: BomcMesh, face: Face): BufferGeometry {
+	const vertexIndices = [...new Set(face.outer)];
+	const localIndex = new Map(vertexIndices.map((sourceIndex, index) => [sourceIndex, index]));
+	const positions = vertexIndices.flatMap((sourceIndex) => vertex(mesh, sourceIndex));
+	const normals = vertexIndices.flatMap(() => [...face.normal]);
+	const indices = face.triangles.map((sourceIndex) => {
+		const index = localIndex.get(sourceIndex);
+		if (index === undefined) throw new AuthoringSceneError(`Face ${face.id} references a vertex outside its canonical outer ring.`);
+		return index;
+	});
+	const geometry = new BufferGeometry();
+	try {
+		geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+		geometry.setAttribute('normal', new Float32BufferAttribute(normals, 3));
+		geometry.setIndex(indices);
+		geometry.computeBoundingSphere();
+		return geometry;
+	} catch (error) {
+		geometry.dispose();
+		throw error;
+	}
+}
+
+function materialForFace(face: Face, snapshot: BomcSnapshot, displayState: DisplayState, doubleSided: boolean): Material {
+	const material = snapshot.graph.materials.find((candidate) => candidate.id === face.frontMaterialId);
+	if (!material) throw new AuthoringSceneError(`Face ${face.id} references a missing front material.`);
+	const alpha = material.rgba[3] / 255 * material.opacityU16 / 65535;
+	const original = new MeshStandardMaterial({
+		color: 0xffffff,
+		roughness: 0.88,
+		metalness: 0.02,
+		opacity: alpha,
+		transparent: alpha < 1,
+		side: doubleSided ? DoubleSide : FrontSide
+	});
+	original.color.setRGB(material.rgba[0] / 255, material.rgba[1] / 255, material.rgba[2] / 255, SRGBColorSpace);
+	const manager = new MaterialStateManager();
+	manager.register(face.id, original, 'structure');
+	try {
+		const selected = manager.materialFor(face.id, displayState, false, false);
+		manager.derivedMaterials.clear();
+		manager.originalMaterials.clear();
+		if (selected !== original) original.dispose();
+		return selected;
+	} catch (error) {
+		manager.dispose();
+		original.dispose();
+		throw error;
+	}
+}
+
+function edgePositionsForEntity(mesh: BomcMesh, faces: readonly Face[]): number[] {
+	const seen = new Set<string>();
+	const positions: number[] = [];
+	for (const face of faces) {
+		for (let index = 0; index < face.outer.length; index += 1) {
+			const first = face.outer[index]!;
+			const second = face.outer[(index + 1) % face.outer.length]!;
+			const key = first < second ? `${first}:${second}` : `${second}:${first}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			positions.push(...vertex(mesh, first), ...vertex(mesh, second));
+		}
+	}
+	return positions;
+}
+
+function disposeUntransferred(group: Group): void {
+	const geometries = new Set<BufferGeometry>();
+	const materials = new Set<Material>();
+	group.traverse((object) => {
+		const drawable = object as typeof object & { geometry?: BufferGeometry; material?: Material | Material[] };
+		if (drawable.geometry) geometries.add(drawable.geometry);
+		if (Array.isArray(drawable.material)) for (const material of drawable.material) materials.add(material);
+		else if (drawable.material) materials.add(drawable.material);
+	});
+	for (const geometry of geometries) geometry.dispose();
+	for (const material of materials) material.dispose();
+}
+
+/** Build a dedicated render-only projection from the acknowledged canonical snapshot. */
+export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: DisplayState): AuthoringSceneProjection {
+	const subset = validateEditableSubset(snapshot.graph);
+	if (!subset.editable) throw new AuthoringSceneError(`Canonical snapshot is outside the editable subset: ${subset.reason}`);
+	const group = new Group();
+	group.name = 'editor-authoring-content';
+	const mesh = snapshot.graph.meshes[0];
+	try {
+		if (mesh) {
+			const entityForFace = new Map(subset.entities.flatMap((entity) => entity.faces.map((face) => [face.id, entity] as const)));
+			for (const face of mesh.faces) {
+				const entity = entityForFace.get(face.id);
+				if (!entity) throw new AuthoringSceneError(`Face ${face.id} has no validated authoring entity.`);
+				const geometry = geometryForFace(mesh, face);
+				let material: Material;
+				try { material = materialForFace(face, snapshot, displayState, entity.kind === 'rectangle'); }
+				catch (error) { geometry.dispose(); throw error; }
+				try {
+					const projected = new Mesh(geometry, material);
+					projected.name = face.id;
+					projected.visible = displayState.faceStyle !== 'wireframe';
+					projected.userData = {
+						authoringFaceId: face.id,
+						authoringEntityId: entity.entityId,
+						authoringSequence: entity.sequence,
+						authoringKind: entity.kind
+					};
+					group.add(projected);
+				} catch (error) {
+					geometry.dispose();
+					material.dispose();
+					throw error;
+				}
+			}
+			const edgePositions = subset.entities.flatMap((entity) => edgePositionsForEntity(mesh, entity.faces));
+			if (edgePositions.length > 0) {
+				const geometry = new BufferGeometry();
+				let material: LineBasicMaterial | null = null;
+				try {
+					geometry.setAttribute('position', new Float32BufferAttribute(edgePositions, 3));
+					material = new LineBasicMaterial(sourceEdgeMaterialDescriptor(displayState));
+					material.toneMapped = false;
+					const edges = new LineSegments(geometry, material);
+					edges.name = 'editor-authoring-source-edges';
+					group.add(edges);
+				} catch (error) {
+					geometry.dispose();
+					material?.dispose();
+					throw error;
+				}
+			}
+		}
+		return { group, bounds: boundsForSnapshot(snapshot) };
+	} catch (error) {
+		disposeUntransferred(group);
+		if (error instanceof AuthoringSceneError) throw error;
+		throw new AuthoringSceneError(error instanceof Error ? error.message : 'Unable to project canonical authoring geometry.');
+	}
+}

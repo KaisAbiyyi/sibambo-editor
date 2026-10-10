@@ -1,4 +1,12 @@
-# Verification and release status
+# Current implementation batch status
+
+**As of:** 2026-10-09, Asia/Jakarta
+
+The bounded New/rectangle/signed-extrusion/Undo-Redo/Save-BOMC/reopen workflow is in the current implementation batch. Its source and test harnesses are being integrated before the plan's verification lane begins. No fresh tests, build, reader interoperability run, browser proof, or performance run is claimed here yet. The Editor and aligned Rooms plans require one whole-batch qualification and one combined review handoff.
+
+E4 remains `candidate_pending_cross_model_validation`. A local authoring pass will not establish native SketchUp behavior, complex-model editing, deployment, or certification.
+
+## Historical standalone snapshot
 
 **Snapshot date:** 2026-09-28 (Asia/Jakarta)
 

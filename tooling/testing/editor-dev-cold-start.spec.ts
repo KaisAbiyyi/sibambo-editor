@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { captureSourceHashes, installEditorMaterialsV2Probe, loadOracleMetadata, readPinnedInput } from '../../apps/editor/tests/materials-v2-helpers';
 import { markProofOutcome, readProofTicket, writeProofSidecar, type ProofTicket } from './proof-run-contract';
+import { expectedEditorBuildIdentity, type AcceleratedBuildIdentity } from './accelerated-proof';
 
 const cycle = process.env.SIBAMBO_STABILITY_CYCLE!;
 const runRoot = path.resolve(process.env.SIBAMBO_STABILITY_RUN!);
@@ -40,7 +41,8 @@ test('one S2-new selection reaches first ready draw without a dev full reload', 
 	let selectedAt = 0;
 	let worker: any = null;
 	let assetProbes: any[] = [];
-	let buildIdentity: any = null;
+	let buildIdentity: BuildIdentity | null = null;
+	let expectedBuildIdentity: AcceleratedBuildIdentity | null = null;
 	let observedStage = 'listeners-installed';
 	page.on('framenavigated', (frame) => { if (frame === page.mainFrame() && selectedAt) navigations.push(frame.url()); });
 	page.on('websocket', (socket) => socket.on('framereceived', (event) => {
@@ -65,9 +67,10 @@ test('one S2-new selection reaches first ready draw without a dev full reload', 
 	try {
 		if (proofTicket) {
 			buildIdentity = await readBuildIdentity(page);
+			expectedBuildIdentity = expectedEditorBuildIdentity();
+			expect(expectedBuildIdentity.commit).toBe(proofTicket.testedHead);
 			expect(buildIdentity.commit).toBe(proofTicket.testedHead);
-			expect(buildIdentity.dirty).toBe(true);
-			expect(buildIdentity.sourceSha256).toMatch(/^[a-f0-9]{64}$/i);
+			expect(buildTuple(buildIdentity)).toEqual(expectedBuildIdentity);
 		} else {
 			const identityResponse = await page.request.get('/__build.json').catch(() => null);
 			if (identityResponse?.ok()) buildIdentity = await identityResponse.json();
@@ -138,7 +141,7 @@ test('one S2-new selection reaches first ready draw without a dev full reload', 
 		const report = {
 			cycle, observedStatus: sourceUnchanged ? testInfo.status : 'failed', expectedStatus: testInfo.expectedStatus, stage: observedStage,
 			fixture: { id: input.id, bytes: input.byteLength, sha256: inputSha }, runTicket: proofTicket, sourceUnchanged,
-			buildIdentity, sourceBefore, sourceAfter, worker, assetProbes, wasmResponses, navigations, fullReloadFrames, pageErrors, consoleErrors,
+			buildIdentity, expectedBuildIdentity, sourceBefore, sourceAfter, worker, assetProbes, wasmResponses, navigations, fullReloadFrames, pageErrors, consoleErrors,
 			errors,
 			startedAtMs: started, selectedAtMs: selectedAt, finishedAtMs: performance.now(), elapsedMs: performance.now() - started
 		};
@@ -233,3 +236,7 @@ test('Open controls remain disabled until the client bindings are ready', async 
 		if (routeCleanupFailure) throw routeCleanupFailure;
 	}
 });
+
+function buildTuple(identity: BuildIdentity) {
+	return { commit: identity.commit, dirty: identity.dirty, sourceSha256: identity.sourceSha256 };
+}

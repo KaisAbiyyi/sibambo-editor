@@ -1,7 +1,7 @@
 
 # Data handling and evidence limits
 
-This document describes the current Editor file path and the claims supported by this source snapshot. Editor is a local browser workspace, not a hosted file service or an editing system of record.
+This document describes the current Editor file path and the claims supported by this source snapshot. Editor is a local browser workspace, not a hosted file service or a general CAD system.
 
 ## Files admitted by the current page
 
@@ -13,7 +13,7 @@ Sidecar JSON is read through a byte-bounded helper before parsing. BOMC section 
 
 The worker can be cancelled and terminated, but cancellation does not replace parser bounds or authenticate input. Do not treat a matching hash as proof that a producer created the file.
 
-Editor has no separate JSON dataset or project import workflow. Its optional JSON input is a provenance sidecar.
+Editor has no separate JSON project import workflow. Its optional JSON input is a provenance sidecar. A new document contains an empty canonical BOMC graph; its supported edits are independent ground rectangles and one signed extrusion per rectangle. Valid imported graphs outside that exact subset remain view-only. The application does not silently normalize unsupported input into the editable subset.
 
 ## Provenance and build identity
 
@@ -23,15 +23,15 @@ The page displays an application source fingerprint, and GET /__build.json retur
 
 ## Where data goes
 
-The selected file, decoded scene, optional provenance, and current Editor session are kept in page memory. The app source does not provide a hosted database, model upload endpoint, account sync, or collaborative editing service. Unloading the model or leaving the page clears the session.
+The selected file, decoded scene, optional provenance, canonical authoring document, and current Editor session are kept in page memory. The app source does not provide a hosted database, model upload endpoint, account sync, or collaborative editing service. Unloading the model or leaving the page clears the session.
 
-The only save action in the current page downloads a PNG view image after the viewport is ready. It does not save edits, rewrite BOMC, or persist a model to a server.
+**Save view** downloads a PNG. **Save BOMC** writes the acknowledged canonical graph and downloads the resulting BOMC bytes in the browser. A matching successful browser-download dispatch and worker acknowledgment clears dirty state; the file is not uploaded or saved to an application server. Users must retain downloaded BOMC files themselves.
 
 ## Evidence and product limits
 
 E4 remains **candidate_pending_cross_model_validation**. A successful import, a source fingerprint, or a rendered screenshot is not evidence of parity with another viewer, universal fidelity, or certification. Those claims require separate comparison evidence.
 
-The current page is a read-only viewport for imported source geometry. Complete editing, validated edit operations across representative models, undo/redo in the user interface, lossless round-tripping, and modified BOMC export are not established capabilities. Editor-specific geometry classes in the source tree are an implementation foundation; they are not proof of a complete user-facing editor.
+The user-facing authoring subset is limited to flat root documents with ground rectangles and single upward or downward extrusions. General CAD operations, nested instances, textures, BOMC-to-SKP, complex native round-tripping, and SketchUp host behavior remain outside scope. The batch's automated authoring/download/reopen and independent-reader qualification must finish before claiming that the end-to-end workflow is verified.
 
 No deployment state, production authentication, hosted retention policy, or server-side storage guarantee is established by this app source.
 

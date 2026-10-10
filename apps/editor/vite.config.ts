@@ -4,7 +4,7 @@ import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const identity = getAppBuildIdentity({ appName: 'editor', appRoot: process.cwd(), repoRoot, packageNames: ['@sibambo/contracts', '@sibambo/e4-import', '@sibambo/provenance', '@sibambo/scene-runtime', '@sibambo/viewport'] });
+const identity = getAppBuildIdentity({ appName: 'editor', appRoot: process.cwd(), repoRoot, packageNames: ['@sibambo/bomc-document', '@sibambo/contracts', '@sibambo/e4-import', '@sibambo/provenance', '@sibambo/scene-runtime', '@sibambo/viewport'] });
 
 export default defineConfig({
 	plugins: [sveltekit()],

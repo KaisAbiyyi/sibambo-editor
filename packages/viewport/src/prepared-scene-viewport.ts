@@ -16,6 +16,7 @@ import {
 	Object3D,
 	Plane,
 	PerspectiveCamera,
+	type Ray,
 	Raycaster,
 	Scene,
 	Vector2,
@@ -425,6 +426,16 @@ export class PreparedSceneViewport {
 		this.camera.updateMatrixWorld();
 		this.rendererHost.updateClipRange(this.fittedBounds);
 	}
+	rayFromScreen(clientX: number, clientY: number): Ray | null {
+		if (this.disposed || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+		const rect = this.canvas.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0 || clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+		this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+		this.camera.updateMatrixWorld(true);
+		this.raycaster.setFromCamera(this.pointer, this.camera);
+		return this.raycaster.ray.clone();
+	}
+
 	pickAt(clientX: number, clientY: number): ViewportPick | null {
 		const rect = this.canvas.getBoundingClientRect();
 		if (!rect.width || !rect.height) return null;
@@ -517,6 +528,41 @@ export class PreparedSceneViewport {
 	focusBounds(bounds: ViewportBounds) {
 		this.invalidateNavigationState();
 		this.rendererHost.focusBounds(bounds);
+		this.renderOnce();
+	}
+
+	/**
+	 * Persist canonical authoring bounds for navigation and clipping without moving the camera.
+	 * Empty authoring viewports use this to replace the imported-scene fallback bounds before
+	 * their deferred initial fit can run.
+	 */
+	setAuthoringBounds(bounds: ViewportBounds): void {
+		if (this.disposed) throw new Error('Viewport is disposed.');
+		if (this.input.editorMode !== true || this.input.scene.meshes.length !== 0 || this.input.scene.groups.length !== 0) {
+			throw new Error('Authoring bounds require an empty editor-mode viewport.');
+		}
+		if (!isValidViewportBounds(bounds)) throw new Error('Authoring bounds must be finite and ordered.');
+		const { width, height } = this.rendererHost.layoutSize;
+		if (width <= 0 || height <= 0) throw new Error('Authoring bounds require a laid-out viewport.');
+
+		if (this.initialFitHandle) cancelAnimationFrame(this.initialFitHandle);
+		this.initialFitHandle = 0;
+		this.initialFitComplete = true;
+		this.fittedBounds = {
+			min: { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z },
+			max: { x: bounds.max.x, y: bounds.max.y, z: bounds.max.z }
+		};
+		this.invalidateNavigationState();
+		this.rendererHost.updateClipRange(this.fittedBounds);
+		this.refreshNavigationAxes();
+		this.renderOnce();
+		this.checkReady();
+	}
+
+	viewBounds(name: 'top' | 'front' | 'iso', bounds: ViewportBounds) {
+		if (!isValidViewportBounds(bounds)) throw new Error('Viewport bounds must be finite and ordered.');
+		this.invalidateNavigationState();
+		this.rendererHost.view(bounds, name);
 		this.renderOnce();
 	}
 
@@ -1110,6 +1156,10 @@ export class PreparedSceneViewport {
 }
 
 function point(value: Vector3) { return { x: value.x, y: value.y, z: value.z }; }
+function isValidViewportBounds(bounds: ViewportBounds) {
+	return [bounds?.min?.x, bounds?.min?.y, bounds?.min?.z, bounds?.max?.x, bounds?.max?.y, bounds?.max?.z].every(Number.isFinite)
+		&& bounds.min.x <= bounds.max.x && bounds.min.y <= bounds.max.y && bounds.min.z <= bounds.max.z;
+}
 function normalizeRect(x1: number, y1: number, x2: number, y2: number) {
 	return { left: Math.min(x1, x2), right: Math.max(x1, x2), top: Math.min(y1, y2), bottom: Math.max(y1, y2) };
 }

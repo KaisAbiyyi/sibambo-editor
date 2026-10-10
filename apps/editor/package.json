@@ -8,9 +8,15 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"build": "vite build",
 		"serve:build": "node build/index.js",
-		"test": "bun test ./unit/editor && playwright test --config ./playwright.config.ts"
+		"test": "bun test ./unit/editor && playwright test --config ./playwright.config.ts",
+		"test:accelerated-proof:contract": "bun test ../../tooling/testing/accelerated-proof.test.ts",
+		"test:accelerated-proof": "bun ../../tooling/testing/run-accelerated-proof.ts",
+		"test:authoring:unit": "bun test ./unit/authoring",
+		"test:authoring:browser": "bun ../../tooling/testing/run-authoring-e2e.ts",
+		"test:authoring:performance": "bun ../../tooling/testing/run-authoring-performance.ts"
 	},
 	"dependencies": {
+		"@sibambo/bomc-document": "workspace:*",
 		"@sibambo/contracts": "workspace:*",
 		"@sibambo/e4-import": "workspace:*",
 		"@sibambo/provenance": "workspace:*",

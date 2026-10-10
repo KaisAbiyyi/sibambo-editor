@@ -37,6 +37,7 @@
       "name": "@sibambo/editor",
       "version": "0.1.0",
       "dependencies": {
+        "@sibambo/bomc-document": "workspace:*",
         "@sibambo/contracts": "workspace:*",
         "@sibambo/e4-import": "workspace:*",
         "@sibambo/provenance": "workspace:*",

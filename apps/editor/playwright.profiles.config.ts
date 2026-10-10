@@ -1,16 +1,19 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/test';
+import { readAcceleratedContext, type AcceleratedProofTicket } from '../../tooling/testing/accelerated-proof';
 
 const editorRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(editorRoot, '../..');
+const proofContext = readAcceleratedContext('profiles');
+const proofTicket = proofContext && !('discoveryOnly' in proofContext) ? proofContext as AcceleratedProofTicket : null;
 
 const config: PlaywrightTestConfig = {
 	testDir: path.join(editorRoot, 'tests'),
 	testMatch: ['bomc-profile-compatibility.spec.ts'],
-	outputDir: path.join(repoRoot, 'test-results', 'bomc-profiles'),
+	outputDir: proofTicket?.outputDir ?? path.join(repoRoot, 'test-results', 'bomc-profiles'),
 	projects: [{ name: 'editor-profile-chromium', use: { ...devices['Desktop Chrome'] } }],
-	reporter: 'list',
+	reporter: proofTicket ? [['list'], ['json', { outputFile: proofTicket.reportFile }]] : 'list',
 	timeout: 240_000,
 	globalTimeout: 7_200_000,
 	expect: { timeout: 30_000 },
