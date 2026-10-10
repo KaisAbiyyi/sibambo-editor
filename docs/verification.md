@@ -1,8 +1,10 @@
 # Current implementation batch status
 
-**As of:** 2026-10-09, Asia/Jakarta
+**As of:** 2026-10-10, Asia/Jakarta
 
-The bounded New/rectangle/signed-extrusion/Undo-Redo/Save-BOMC/reopen workflow is in the current implementation batch. Its source and test harnesses are being integrated before the plan's verification lane begins. No fresh tests, build, reader interoperability run, browser proof, or performance run is claimed here yet. The Editor and aligned Rooms plans require one whole-batch qualification and one combined review handoff.
+The Editor authoring batch is implemented and pushed to `bench/bomc-loader-luna` at `1e3fba9bd08bff4b6ebf81facb42edf2ed83dfb9`. Qualification is partial: the new authoring/browser and performance cases pass, while the full unit run still lacks the exact pinned historical `S1-new` and `S2-new` BOMC inputs. Those inputs were not replaced. Chrome and Edge are available; Firefox and WebKit are not installed in the selected Playwright environment. The single combined implementation handoff is prepared; independent REVIEW and the user's UX check remain pending.
+
+Current checks: `bun run check` passed with 0 Svelte errors/warnings; `bun run build` passed with the existing bundle warnings; unit results were 310/312, with the two failures limited to ENOENT for the exact historical inputs. Authoring integration passed 5/5. The compact authoring matrix passed 2/2 in Chrome and 2/2 in Edge. Current profile cases passed 12/12, cold-start/warm reuse passed 4/4, semantic comparison passed 1/1, and authoring performance passed 3/3. These outcomes do not close the missing historical fixture gate or subjective UX acceptance.
 
 E4 remains `candidate_pending_cross_model_validation`. A local authoring pass will not establish native SketchUp behavior, complex-model editing, deployment, or certification.
 
@@ -30,7 +32,7 @@ The combined F4 app suite across Benchmark, Rooms, and Editor reported **146 uni
 
 ## Release boundaries
 
-- Editor currently displays the imported source read-only; a complete CAD workflow and lossless BOMC save-back are not established capabilities.
+- Writable authoring is restricted to the implemented Editor rectangle/extrusion subset. Other imported documents remain read-only. The new save path downloads canonical BOMC bytes; it does not establish general CAD editing, native SketchUp behavior, complex-model editing, or certification.
 - BOMC import validates encoded structure, lengths, checksums, and references. Sidecar JSON remains byte-bounded and policy-checked; a matching record does not establish producer authentication. See [Data handling and evidence limits](data-and-evidence.md).
 - Imported model data stays in page memory. There is no hosted model database, account synchronization, or server-side edit history.
 - E4 remains **`candidate_pending_cross_model_validation`**. Local build success does not establish cross-viewer parity, representative-corpus correctness, or certification.
