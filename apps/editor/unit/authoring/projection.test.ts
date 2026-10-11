@@ -150,6 +150,37 @@ describe('canonical authoring projection', () => {
 				expect(faces.every((face) => (face.material as MeshStandardMaterial).polygonOffset)).toBe(true);
 			} finally { disposeProjection(projection.group); }
 		} finally { document.dispose(); }
+		});
+
+	test('renders nested authored topology from both sides so orbiting never makes canonical faces look hollow', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Nested two-sided faces' });
+		try {
+			const baseId = `${DOCUMENT_ID}:rectangle:1`;
+			document.transact(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				baseId,
+				[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]],
+				[0, 1, 0]
+			).forward);
+			document.transact(buildPushPullFaceEdit(document.snapshot().graph, baseId, 1, 2).forward);
+			const topId = `${DOCUMENT_ID}:op:2:cap`;
+			document.transact(buildFaceLoopEdit(
+				document.snapshot().graph,
+				`${DOCUMENT_ID}:face:3`,
+				[[2, 1, 2], [4, 1, 2], [4, 1, 4], [2, 1, 4]],
+				[0, 1, 0],
+				'rectangle'
+			).forward);
+			document.transact(buildPushPullFaceEdit(document.snapshot().graph, `${DOCUMENT_ID}:face:3`, 1.25, 4).forward);
+			document.transact(buildPushPullFaceEdit(document.snapshot().graph, topId, 0.35, 5).forward);
+
+			const projection = projectAuthoringScene(document.snapshot(), DEFAULT_DISPLAY_STATE);
+			try {
+				const faces = projection.group.children.filter((child) => child instanceof Mesh) as Mesh[];
+				expect(faces.length).toBeGreaterThan(6);
+				expect(faces.every((face) => (face.material as MeshStandardMaterial).side === DoubleSide)).toBe(true);
+			} finally { disposeProjection(projection.group); }
+		} finally { document.dispose(); }
 	});
 
 	test('uses the exact canonical empty bounds and rejects unsupported authoring graphs', () => {

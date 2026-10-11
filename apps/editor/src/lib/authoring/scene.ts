@@ -126,24 +126,6 @@ function edgePositionsForEntity(mesh: BomcMesh, faces: readonly Face[]): number[
 	return positions;
 }
 
-function boundaryFaceIds(mesh: BomcMesh): Set<string> {
-	const counts = new Map<string, number>();
-	for (const face of mesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
-		const first = ring[index]!;
-		const second = ring[(index + 1) % ring.length]!;
-		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
-		counts.set(key, (counts.get(key) ?? 0) + 1);
-	}
-	const result = new Set<string>();
-	for (const face of mesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
-		const first = ring[index]!;
-		const second = ring[(index + 1) % ring.length]!;
-		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
-		if (counts.get(key) === 1) { result.add(face.id); break; }
-	}
-	return result;
-}
-
 function disposeUntransferred(group: Group): void {
 	const geometries = new Set<BufferGeometry>();
 	const materials = new Set<Material>();
@@ -167,13 +149,12 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 		try {
 			if (mesh) {
 				const entityForFace = new Map(subset.entities.flatMap((entity) => entity.faces.map((face) => [face.id, entity] as const)));
-				const boundaryFaces = boundaryFaceIds(mesh);
 				for (const face of mesh.faces) {
-				const entity = entityForFace.get(face.id);
-				if (!entity) throw new AuthoringSceneError(`Face ${face.id} has no validated authoring entity.`);
-				const geometry = geometryForFace(mesh, face);
-				let material: Material;
-					try { material = materialForFace(face, snapshot, displayState, boundaryFaces.has(face.id)); }
+					const entity = entityForFace.get(face.id);
+					if (!entity) throw new AuthoringSceneError(`Face ${face.id} has no validated authoring entity.`);
+					const geometry = geometryForFace(mesh, face);
+					let material: Material;
+					try { material = materialForFace(face, snapshot, displayState, true); }
 				catch (error) { geometry.dispose(); throw error; }
 				try {
 					const projected = new Mesh(geometry, material);
