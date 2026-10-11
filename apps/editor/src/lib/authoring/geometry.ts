@@ -1,3 +1,4 @@
+import { ShapeUtils, Vector2 } from 'three';
 import type { BomcGraph, DocumentEdit, Face, Mesh, SolidMaterial } from '@sibambo/bomc-document';
 import type { AuthoringPoint, AuthoringJournalEntry } from './protocol.js';
 import { AuthoringPolygonError, MIN_AUTHORING_EDGE_METRES, preparePolygon, type Point3 } from './polygon.js';
@@ -346,6 +347,46 @@ function projectPoint2(point: Point3, drop: 0 | 1 | 2): Point2 {
 	return drop === 0 ? [point[1], point[2]] : drop === 1 ? [point[0], point[2]] : [point[0], point[1]];
 }
 
+function orientedTriangle(
+	mesh: Mesh,
+	triangle: readonly [number, number, number],
+	normal: Point3
+): [number, number, number] {
+	const a = vectorAt(mesh.positions, triangle[0]);
+	const b = vectorAt(mesh.positions, triangle[1]);
+	const c = vectorAt(mesh.positions, triangle[2]);
+	const ab = subtract3(b, a); const ac = subtract3(c, a);
+	const cross: Point3 = [
+		ab[1] * ac[2] - ab[2] * ac[1],
+		ab[2] * ac[0] - ab[0] * ac[2],
+		ab[0] * ac[1] - ab[1] * ac[0]
+	];
+	const alignment = dot3(cross, normal);
+	if (!Number.isFinite(alignment) || Math.abs(alignment) < 1e-18) invalid('Face triangulation produced a degenerate triangle.');
+	return alignment > 0 ? [...triangle] : [triangle[0], triangle[2], triangle[1]];
+}
+
+function triangulateFaceRings(
+	mesh: Mesh,
+	outer: readonly number[],
+	holes: readonly (readonly number[])[],
+	normal: Point3
+): number[] {
+	const drop = projectionAxis(normal);
+	const rings = [outer, ...holes];
+	const projected = rings.map((ring) => ring.map((vertex) => {
+		const point = projectPoint2(vectorAt(mesh.positions, vertex), drop);
+		return new Vector2(point[0], point[1]);
+	}));
+	const source = rings.flatMap((ring) => [...ring]);
+	const triangles = ShapeUtils.triangulateShape(projected[0] ?? [], projected.slice(1));
+	if (triangles.length === 0) invalid('Face rings could not be triangulated.');
+	return triangles.flatMap((local) => {
+		const triangle = [source[local[0]!]!, source[local[1]!]!, source[local[2]!]!] as const;
+		return orientedTriangle(mesh, triangle, normal);
+	});
+}
+
 function orient2(left: Point2, middle: Point2, right: Point2): number {
 	return (middle[0] - left[0]) * (right[1] - left[1]) - (middle[1] - left[1]) * (right[0] - left[0]);
 }
@@ -391,11 +432,101 @@ function pointInPolygonStrict(point: Point2, polygon: readonly Point2[], toleran
 	return inside;
 }
 
-function rejectUnsupportedFaceIntersections(previousMesh: Mesh, candidatePoints: readonly Point3[], candidateNormal: Point3): void {
-	const existingVertices = [...new Set(previousMesh.faces.flatMap((face) => face.outer))];
+function ringsCrossOrOverlap(first: readonly Point2[], second: readonly Point2[], tolerance: number): boolean {
+	for (let aIndex = 0; aIndex < first.length; aIndex += 1) {
+		const a = first[aIndex]!; const b = first[(aIndex + 1) % first.length]!;
+		for (let cIndex = 0; cIndex < second.length; cIndex += 1) {
+			const c = second[cIndex]!; const d = second[(cIndex + 1) % second.length]!;
+			if (properSegmentsCross(a, b, c, d, tolerance) || collinearOverlapNeedsSplit(a, b, c, d, tolerance)) return true;
+		}
+	}
+	return false;
+}
+
+function pointInsideFaceRegion(point: Point2, outer: readonly Point2[], holes: readonly (readonly Point2[])[], tolerance: number): boolean {
+	if (!pointInPolygonStrict(point, outer, tolerance)) return false;
+	return holes.every((hole) => !pointInPolygonStrict(point, hole, tolerance)
+		&& !hole.some((start, index) => pointOnSegment2(point, start, hole[(index + 1) % hole.length]!, tolerance)));
+}
+
+function projectedFaceRegionsOverlap(mesh: Mesh, first: Face, second: Face, normal: Point3): boolean {
+	const drop = projectionAxis(normal);
+	const projectRing = (ring: readonly number[]) => ring.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop));
+	const firstOuter = projectRing(first.outer);
+	const firstHoles = first.holes.map(projectRing);
+	const secondOuter = projectRing(second.outer);
+	const secondHoles = second.holes.map(projectRing);
+	const allPoints = [...firstOuter, ...firstHoles.flat(), ...secondOuter, ...secondHoles.flat()];
+	const scale = Math.max(1, ...allPoints.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	const ringsTouchOrIntersect = (left: readonly Point2[], right: readonly Point2[]) => {
+		for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+			const a = left[leftIndex]!; const b = left[(leftIndex + 1) % left.length]!;
+			for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+				const c = right[rightIndex]!; const d = right[(rightIndex + 1) % right.length]!;
+				if (properSegmentsCross(a, b, c, d, tolerance)
+					|| pointOnSegment2(a, c, d, tolerance) || pointOnSegment2(b, c, d, tolerance)
+					|| pointOnSegment2(c, a, b, tolerance) || pointOnSegment2(d, a, b, tolerance)) return true;
+			}
+		}
+		return false;
+	};
+	const firstRings = [firstOuter, ...firstHoles];
+	const secondRings = [secondOuter, ...secondHoles];
+	if (firstRings.some((left) => secondRings.some((right) => ringsTouchOrIntersect(left, right)))) return true;
+	if (firstOuter.some((point) => pointInsideFaceRegion(point, secondOuter, secondHoles, tolerance))) return true;
+	return secondOuter.some((point) => pointInsideFaceRegion(point, firstOuter, firstHoles, tolerance));
+}
+
+function candidateStrictlyInsideFace(
+	mesh: Mesh,
+	face: Face,
+	candidatePoints: readonly Point3[],
+	candidateNormal: Point3
+): boolean {
+	if (Math.abs(Math.abs(dot3(face.normal, candidateNormal)) - 1) > 1e-9) return false;
+	const anchor = candidatePoints[0]!;
+	const scale = Math.max(1, ...candidatePoints.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	const facePoints = face.outer.map((vertex) => vectorAt(mesh.positions, vertex) as Point3);
+	if (facePoints.some((point) => Math.abs(dot3(subtract3(point, anchor), candidateNormal)) > tolerance)) return false;
+	const drop = projectionAxis(candidateNormal);
+	const candidate2 = candidatePoints.map((point) => projectPoint2(point, drop));
+	const outer2 = facePoints.map((point) => projectPoint2(point, drop));
+	const holes2 = face.holes.map((ring) => ring.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop)));
+	if (!candidate2.every((point) => pointInsideFaceRegion(point, outer2, holes2, tolerance))) return false;
+	if (ringsCrossOrOverlap(candidate2, outer2, tolerance) || holes2.some((hole) => ringsCrossOrOverlap(candidate2, hole, tolerance))) return false;
+	if (holes2.some((hole) => hole.some((point) => pointInPolygonStrict(point, candidate2, tolerance)))) return false;
+	return true;
+}
+
+function candidateOverlapsFaceRegion(
+	mesh: Mesh,
+	face: Face,
+	candidatePoints: readonly Point3[],
+	candidateNormal: Point3
+): boolean {
+	if (Math.abs(Math.abs(dot3(face.normal, candidateNormal)) - 1) > 1e-9) return false;
+	const anchor = candidatePoints[0]!;
+	const facePoints = face.outer.map((vertex) => vectorAt(mesh.positions, vertex) as Point3);
+	const scale = Math.max(1, ...candidatePoints.flatMap((point) => point.map(Math.abs)), ...facePoints.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	if (facePoints.some((point) => Math.abs(dot3(subtract3(point, anchor), candidateNormal)) > tolerance)) return false;
+	const drop = projectionAxis(candidateNormal);
+	const candidate2 = candidatePoints.map((point) => projectPoint2(point, drop));
+	const outer2 = facePoints.map((point) => projectPoint2(point, drop));
+	const holes2 = face.holes.map((ring) => ring.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop)));
+	if (candidate2.some((point) => pointInsideFaceRegion(point, outer2, holes2, tolerance))) return true;
+	if (outer2.some((point) => pointInPolygonStrict(point, candidate2, tolerance))) return true;
+	if (ringsCrossOrOverlap(candidate2, outer2, tolerance)) return true;
+	return holes2.some((hole) => ringsCrossOrOverlap(candidate2, hole, tolerance));
+}
+
+function insertionHostFace(previousMesh: Mesh, candidatePoints: readonly Point3[], candidateNormal: Point3): Face | null {
+	const existingVertices = [...new Set(previousMesh.faces.flatMap((face) => [face.outer, ...face.holes].flatMap((ring) => [...ring])))];
 	const existingEdges = new Map<string, readonly [number, number]>();
-	for (const face of previousMesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
-		const first = face.outer[index]!; const second = face.outer[(index + 1) % face.outer.length]!;
+	for (const face of previousMesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+		const first = ring[index]!; const second = ring[(index + 1) % ring.length]!;
 		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
 		if (!existingEdges.has(key)) existingEdges.set(key, [first, second]);
 	}
@@ -404,7 +535,7 @@ function rejectUnsupportedFaceIntersections(previousMesh: Mesh, candidatePoints:
 		if (exactVertexIndex(previousMesh.positions, point) !== null) continue;
 		for (const [first, second] of existingEdges.values()) {
 			if (pointOnSegmentInterior3(point, vectorAt(previousMesh.positions, first), vectorAt(previousMesh.positions, second))) {
-				invalid('New face endpoint lies inside an existing edge and would require unsupported topology splitting.');
+					invalid('New face endpoint lies inside an existing edge; edge splitting at a boundary snap is not supported yet.');
 			}
 		}
 	}
@@ -413,38 +544,24 @@ function rejectUnsupportedFaceIntersections(previousMesh: Mesh, candidatePoints:
 		if (candidatePoints.some((candidate) => pointEqual(candidate, point))) continue;
 			for (let index = 0; index < candidatePoints.length; index += 1) {
 				if (pointOnSegmentInterior3(point, candidatePoints[index]!, candidatePoints[(index + 1) % candidatePoints.length]!)) {
-					invalid('New face edge passes through an existing vertex and would require unsupported topology splitting.');
+						invalid('New face edge passes through an existing vertex; boundary splitting is not supported yet.');
 				}
 			}
 		}
 
-		const drop = projectionAxis(candidateNormal);
-	const candidate2 = candidatePoints.map((point) => projectPoint2(point, drop));
-	const candidateAnchor = candidatePoints[0]!;
-	const scale = Math.max(1, ...candidatePoints.flatMap((point) => point.map(Math.abs)));
-	const tolerance = 1e-9 * scale;
+	const hosts = previousMesh.faces.filter((face) => candidateStrictlyInsideFace(previousMesh, face, candidatePoints, candidateNormal));
+	if (hosts.length > 1) invalid('New face is contained by more than one authored surface region.');
+	const host = hosts[0] ?? null;
 	for (const face of previousMesh.faces) {
-		if (Math.abs(Math.abs(dot3(face.normal, candidateNormal)) - 1) > 1e-9) continue;
-		const existingPoints = face.outer.map((vertex) => vectorAt(previousMesh.positions, vertex) as Point3);
-		if (existingPoints.some((point) => Math.abs(dot3(subtract3(point, candidateAnchor), candidateNormal)) > tolerance)) continue;
-		const existing2 = existingPoints.map((point) => projectPoint2(point, drop));
-		for (let first = 0; first < candidate2.length; first += 1) {
-			const a = candidate2[first]!; const b = candidate2[(first + 1) % candidate2.length]!;
-			for (let second = 0; second < existing2.length; second += 1) {
-				const c = existing2[second]!; const d = existing2[(second + 1) % existing2.length]!;
-				if (properSegmentsCross(a, b, c, d, tolerance) || collinearOverlapNeedsSplit(a, b, c, d, tolerance)) {
-					invalid('New coplanar face overlaps existing topology and would require unsupported splitting.');
-				}
-			}
-		}
-		if (candidate2.some((point) => pointInPolygonStrict(point, existing2, tolerance))
-			|| existing2.some((point) => pointInPolygonStrict(point, candidate2, tolerance))) {
-			invalid('New coplanar face overlaps an existing face and would require unsupported splitting.');
+		if (face.id === host?.id) continue;
+		if (candidateOverlapsFaceRegion(previousMesh, face, candidatePoints, candidateNormal)) {
+			invalid('New coplanar face overlaps existing topology outside one containing face and requires unsupported boundary splitting.');
 		}
 	}
+	return host;
 }
 
-function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull', operationId?: string): string {
+function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull' | 'split', operationId?: string): string {
 	return jsonLabel(operationId === undefined
 		? [SHAPE_SCHEMA_V2, operation, faceId]
 		: [SHAPE_SCHEMA_V2, operation, faceId, operationId]);
@@ -462,7 +579,8 @@ function faceFromRing(
 	frontMaterialId: string,
 	backMaterialId: string | null,
 	label: string,
-	preferredNormal?: readonly [number, number, number]
+	preferredNormal?: readonly [number, number, number],
+	holesInput: readonly (readonly number[])[] = []
 ): Face {
 	let ring = [...ringInput];
 	const inputPoints = ring.map((index) => vectorAt(mesh.positions, index) as Point3);
@@ -473,11 +591,14 @@ function faceFromRing(
 		throw error;
 	}
 	if (!pointEqual(prepared.points[0]!, inputPoints[0]!)) ring = [...ring].reverse();
-	const triangles = prepared.triangles.map((local) => ring[local]!);
+	const holes = holesInput.map((hole) => [...hole]);
+	const triangles = holes.length > 0
+		? triangulateFaceRings({ ...mesh, faces: mesh.faces }, ring, holes, prepared.normal)
+		: prepared.triangles.map((local) => ring[local]!);
 	return {
 		id,
 		outer: ring,
-		holes: [],
+		holes,
 		triangles,
 		normal: [prepared.normal[0], prepared.normal[1], prepared.normal[2]],
 		frontMaterialId,
@@ -563,7 +684,7 @@ export function buildFaceLoopEdit(
 		if (error instanceof AuthoringPolygonError) invalid(error.message);
 		throw error;
 	}
-	if (previousMesh) rejectUnsupportedFaceIntersections(previousMesh, prepared.points, prepared.normal);
+	const hostFace = previousMesh ? insertionHostFace(previousMesh, prepared.points, prepared.normal) : null;
 	const materialPolicy = materialForNewGeometry(graph);
 	const positions = previousMesh ? [...previousMesh.positions] : [];
 	const ring: number[] = [];
@@ -591,7 +712,21 @@ export function buildFaceLoopEdit(
 		roleCode: 0,
 		label: v2FaceLabel(faceId, kind)
 	};
-	const nextMesh = withSortedFaces(base, [...base.faces, face]);
+	let nextFaces = [...base.faces, face];
+	if (hostFace) {
+		const splitHost = faceFromRing(
+			base,
+			hostFace.id,
+			hostFace.outer,
+			hostFace.frontMaterialId!,
+			hostFace.backMaterialId,
+			v2FaceLabel(hostFace.id, 'split', faceId),
+			hostFace.normal,
+			[...hostFace.holes, ring]
+		);
+		nextFaces = [...base.faces.filter((existing) => existing.id !== hostFace.id), splitHost, face];
+	}
+	const nextMesh = withSortedFaces(base, nextFaces);
 	const edit = editsForFaceAppend(graph, definitionIndex, previousMesh, nextMesh, materialPolicy.material, materialPolicy.add);
 	const validation = validateEditableSubset(graphAfterEdits(graph, edit.forward));
 	if (!validation.editable) invalid(`Face loop is outside the supported authoring topology: ${validation.reason}`);
@@ -633,7 +768,8 @@ function upgradedFace(mesh: Mesh, face: Face, operationId: string): Face {
 		face.frontMaterialId!,
 		face.backMaterialId,
 		v2FaceLabel(face.id, 'push-pull', operationId),
-		face.normal
+		face.normal,
+		face.holes
 	);
 }
 
@@ -643,6 +779,7 @@ function rejectOppositeBoundaryCrossing(mesh: Mesh, selected: Face, distance: nu
 	for (const face of mesh.faces) {
 		if (face.id === selected.id || face.outer.some((vertex) => selectedVertices.has(vertex))) continue;
 		if (Math.abs(Math.abs(dot3(face.normal, selected.normal)) - 1) > 1e-9) continue;
+		if (!projectedFaceRegionsOverlap(mesh, selected, face, selected.normal)) continue;
 		const offsets = face.outer.map((vertex) => {
 			const point = vectorAt(mesh.positions, vertex);
 			return (point[0] - anchor[0]) * selected.normal[0] + (point[1] - anchor[1]) * selected.normal[1] + (point[2] - anchor[2]) * selected.normal[2];
@@ -650,10 +787,26 @@ function rejectOppositeBoundaryCrossing(mesh: Mesh, selected: Face, distance: nu
 		const min = Math.min(...offsets); const max = Math.max(...offsets);
 		if (max - min > 1e-9 * Math.max(1, Math.abs(min), Math.abs(max))) continue;
 		const boundary = (min + max) / 2;
+		if (Math.abs(boundary) <= MIN_EDGE_METRES) continue;
 		if (boundary * distance > 0 && Math.abs(distance) + MIN_EDGE_METRES >= Math.abs(boundary)) {
 			invalid('Push/Pull would cross or collapse an opposite boundary and requires unsupported topology deletion.');
 		}
 	}
+}
+
+function canonicalRingCycle(ring: readonly number[]): string {
+	const candidates: string[] = [];
+	for (const source of [ring, [...ring].reverse()] as const) for (let offset = 0; offset < source.length; offset += 1) {
+		candidates.push([...source.slice(offset), ...source.slice(0, offset)].join(','));
+	}
+	return candidates.sort(codeUnitCompare)[0] ?? '';
+}
+
+function insetHostForFace(mesh: Mesh, target: Face): Face | null {
+	const cycle = canonicalRingCycle(target.outer);
+	const hosts = mesh.faces.filter((face) => face.id !== target.id && face.holes.some((hole) => canonicalRingCycle(hole) === cycle));
+	if (hosts.length > 1) invalid(`Face ${target.id} is referenced by more than one containing surface region.`);
+	return hosts[0] ?? null;
 }
 
 /** Push/Pull one canonical face. Open standalone faces become prisms; manifold faces move their shared boundary. */
@@ -666,12 +819,61 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	if (!subset.editable) invalid(`Document is outside the editable topology: ${subset.reason}`);
 	const target = mesh.faces.find((face) => face.id === faceId);
 	if (!target) invalid(`Face ${faceId} no longer exists.`);
+	if (target.holes.length > 0) invalid('Push/Pull of a surrounding face that contains inset regions is not supported; target a hole-free face region.');
 	const topology = buildAuthoringTopology(mesh);
 	const incidentCounts = target.outer.map((vertex, index) => topology.edges.get(vertex < target.outer[(index + 1) % target.outer.length]!
 		? `${vertex}:${target.outer[(index + 1) % target.outer.length]!}`
 		: `${target.outer[(index + 1) % target.outer.length]!}:${vertex}`)?.faceIds.length ?? 0);
 	const operationId = `${graph.documentId}:op:${operationSequence}`;
 	const oldMesh = mesh;
+	const insetHost = insetHostForFace(mesh, target);
+
+	if (insetHost) {
+		rejectOppositeBoundaryCrossing(mesh, target, distance);
+		const movingStart = mesh.positions.length / 3;
+		const positions = [...mesh.positions];
+		for (const vertex of target.outer) {
+			const point = vectorAt(mesh.positions, vertex);
+			positions.push(
+				point[0] + target.normal[0] * distance,
+				point[1] + target.normal[1] * distance,
+				point[2] + target.normal[2] * distance
+			);
+		}
+		const moving = target.outer.map((_vertex, index) => movingStart + index);
+		const expanded: Mesh = { ...mesh, positions };
+		const materialId = target.frontMaterialId;
+		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const replacements: Face[] = [
+			faceFromRing(expanded, target.id, moving, materialId, target.backMaterialId, v2FaceLabel(target.id, 'push-pull', operationId), target.normal)
+		];
+		for (let index = 0; index < target.outer.length; index += 1) {
+			const next = (index + 1) % target.outer.length;
+			const start = vectorAt(mesh.positions, target.outer[index]!);
+			const end = vectorAt(mesh.positions, target.outer[next]!);
+			const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+			const outward: Point3 = [
+				edge[1] * target.normal[2] - edge[2] * target.normal[1],
+				edge[2] * target.normal[0] - edge[0] * target.normal[2],
+				edge[0] * target.normal[1] - edge[1] * target.normal[0]
+			];
+			const preferred: Point3 = distance > 0 ? outward : [-outward[0], -outward[1], -outward[2]];
+			const sideId = `${operationId}:side:${index}`;
+			replacements.push(faceFromRing(
+				expanded,
+				sideId,
+				[target.outer[index]!, target.outer[next]!, moving[next]!, moving[index]!],
+				materialId,
+				null,
+				v2FaceLabel(sideId, 'push-pull', operationId),
+				preferred
+			));
+		}
+		const nextMesh = withSortedFaces(expanded, [...mesh.faces.filter((face) => face.id !== target.id), ...replacements]);
+		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+		if (!validation.editable) invalid(`Inset Push/Pull result is outside the supported topology: ${validation.reason}`);
+		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+	}
 
 	if (incidentCounts.every((count) => count === 1)) {
 		const capStart = mesh.positions.length / 3;
@@ -943,36 +1145,50 @@ function validateTopologyEditableSubset(graph: BomcGraph): EditableSubsetResult 
 				return { editable: false, reason: 'Mesh faces are not in canonical code-unit ID order.' };
 			}
 		}
-		const supportedMaterialIds = new Set(graph.materials.map((material) => material.id));
-		const usedVertices = new Set<number>();
-		for (const face of mesh.faces) {
-			if (face.hidden || face.surfaceCode !== 0 || face.roleCode !== 0 || face.holes.length !== 0) {
-				return { editable: false, reason: `Face ${face.id} uses unsupported authoring face attributes.` };
-			}
+			const supportedMaterialIds = new Set(graph.materials.map((material) => material.id));
+			const usedVertices = new Set<number>();
+			for (const face of mesh.faces) {
+				if (face.hidden || face.surfaceCode !== 0 || face.roleCode !== 0) {
+					return { editable: false, reason: `Face ${face.id} uses unsupported authoring face attributes.` };
+				}
 			if (!face.frontMaterialId || !supportedMaterialIds.has(face.frontMaterialId)
 				|| (face.backMaterialId !== null && !supportedMaterialIds.has(face.backMaterialId))) {
 				return { editable: false, reason: `Face ${face.id} references an unsupported authoring material.` };
+				}
+				const label = tupleLabel(face);
+				const v2 = label?.[0] === SHAPE_SCHEMA_V2 && (label.length === 3 || label.length === 4)
+					&& ['rectangle', 'line', 'push-pull', 'split'].includes(String(label[1])) && label[2] === face.id
+					&& (label.length === 3 || (typeof label[3] === 'string' && sequenceForApplicationId(graph.documentId, label[3]) !== null));
+				const legacy = label?.[0] === SHAPE_SCHEMA && (label?.[1] === 'rectangle' || label?.[1] === 'extrusion')
+					&& typeof label?.[2] === 'string' && sequenceForEntity(graph.documentId, label[2]) !== null;
+				if (!v2 && !legacy) return { editable: false, reason: `Face ${face.id} has an unsupported authoring label.` };
+				const rings = [face.outer, ...face.holes];
+				const ringVertices = rings.flatMap((ring) => [...ring]);
+				const expectedTriangleCount = ringVertices.length + 2 * face.holes.length - 2;
+				if (rings.some((ring) => ring.length < 3 || ring.length > 256 || new Set(ring).size !== ring.length)
+					|| new Set(ringVertices).size !== ringVertices.length
+					|| face.triangles.length !== expectedTriangleCount * 3
+					|| face.triangles.some((vertex) => !ringVertices.includes(vertex))) {
+					return { editable: false, reason: `Face ${face.id} has malformed ring or triangle topology.` };
+				}
+				for (const vertex of ringVertices) usedVertices.add(vertex);
+				let prepared;
+				try { prepared = preparePolygon(face.outer.map((vertex) => vectorAt(mesh.positions, vertex)) as Point3[], face.normal as Point3, { canonicalizeStart: false }); }
+				catch (error) { return { editable: false, reason: `Face ${face.id} is not a supported simple planar polygon: ${error instanceof Error ? error.message : 'polygon validation failed'}` }; }
+				if (dot3(rawRingNormal(mesh, face.outer), face.normal) < 1 - 1e-9 || dot3(prepared.normal, face.normal) < 1 - 1e-9) {
+					return { editable: false, reason: `Face ${face.id} normal is inconsistent with its ring.` };
+				}
+				for (const hole of face.holes) {
+					try { preparePolygon(hole.map((vertex) => vectorAt(mesh.positions, vertex)) as Point3[], face.normal as Point3, { canonicalizeStart: false }); }
+					catch (error) { return { editable: false, reason: `Face ${face.id} has an invalid hole ring: ${error instanceof Error ? error.message : 'polygon validation failed'}` }; }
+				}
+				if (face.holes.length > 0) {
+					let expected: number[];
+					try { expected = triangulateFaceRings(mesh, face.outer, face.holes, face.normal as Point3); }
+					catch (error) { return { editable: false, reason: `Face ${face.id} holes could not be triangulated: ${error instanceof Error ? error.message : 'triangulation failed'}` }; }
+					if (!sameTuple(face.triangles, expected)) return { editable: false, reason: `Face ${face.id} hole triangulation is not canonical.` };
+				}
 			}
-			const label = tupleLabel(face);
-			const v2 = label?.[0] === SHAPE_SCHEMA_V2 && (label.length === 3 || label.length === 4)
-				&& ['rectangle', 'line', 'push-pull'].includes(String(label[1])) && label[2] === face.id
-				&& (label.length === 3 || (typeof label[3] === 'string' && sequenceForApplicationId(graph.documentId, label[3]) !== null));
-			const legacy = label?.[0] === SHAPE_SCHEMA && (label?.[1] === 'rectangle' || label?.[1] === 'extrusion')
-				&& typeof label?.[2] === 'string' && sequenceForEntity(graph.documentId, label[2]) !== null;
-			if (!v2 && !legacy) return { editable: false, reason: `Face ${face.id} has an unsupported authoring label.` };
-			if (face.outer.length < 3 || face.outer.length > 256 || new Set(face.outer).size !== face.outer.length
-				|| face.triangles.length !== (face.outer.length - 2) * 3
-				|| face.triangles.some((vertex) => !face.outer.includes(vertex))) {
-				return { editable: false, reason: `Face ${face.id} has malformed ring or triangle topology.` };
-			}
-			for (const vertex of face.outer) usedVertices.add(vertex);
-			let prepared;
-			try { prepared = preparePolygon(face.outer.map((vertex) => vectorAt(mesh.positions, vertex)) as Point3[], face.normal as Point3, { canonicalizeStart: false }); }
-			catch (error) { return { editable: false, reason: `Face ${face.id} is not a supported simple planar polygon: ${error instanceof Error ? error.message : 'polygon validation failed'}` }; }
-			if (dot3(rawRingNormal(mesh, face.outer), face.normal) < 1 - 1e-9 || dot3(prepared.normal, face.normal) < 1 - 1e-9) {
-				return { editable: false, reason: `Face ${face.id} normal is inconsistent with its ring.` };
-			}
-		}
 		if (usedVertices.size !== mesh.positions.length / 3) return { editable: false, reason: 'Mesh contains orphan vertex positions.' };
 		try { buildAuthoringTopology(mesh); }
 		catch (error) {

@@ -151,7 +151,7 @@ describe('authoring topology v2 Push/Pull', () => {
 		} finally { document.dispose(); }
 	});
 
-	test('rejects coplanar overlap and edge-interior T junctions that would require topology splitting', () => {
+	test('subdivides a strictly contained coplanar loop but still rejects boundary T junctions', () => {
 		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Splits' });
 		try {
 			document.transact(buildPlanarRectangleEdit(
@@ -161,19 +161,121 @@ describe('authoring topology v2 Push/Pull', () => {
 				[0, 1, 0]
 			).forward);
 			const before = document.snapshot();
-			expect(() => buildFaceLoopEdit(
+			const contained = buildFaceLoopEdit(
 				before.graph,
 				`${DOCUMENT_ID}:face:2`,
 				[[1, 0, 1], [3, 0, 1], [3, 0, 3], [1, 0, 3]],
 				[0, 1, 0]
-			)).toThrow(/overlap|splitting/i);
+			);
+			document.transact(contained.forward);
+			expect(validateEditableSubset(document.snapshot().graph)).toMatchObject({ editable: true });
+			expect(document.snapshot().graph.meshes[0]!.faces.find((face) => face.id === `${DOCUMENT_ID}:rectangle:1`)?.holes).toHaveLength(1);
+			const afterContained = document.snapshot();
 			expect(() => buildFaceLoopEdit(
-				before.graph,
-				`${DOCUMENT_ID}:face:2`,
+				afterContained.graph,
+				`${DOCUMENT_ID}:face:3`,
 				[[2, 0, 0], [2, 2, 0], [4, 2, 0], [4, 0, 0]],
 				[0, 0, 1]
 			)).toThrow(/existing edge|splitting/i);
-			expect(document.snapshot()).toEqual(before);
+			expect(document.snapshot()).toEqual(afterContained);
 		} finally { document.dispose(); }
 	});
+
+	test('subdivides an authored face for a contained Line/Rectangle loop and can Push/Pull the new inset face', () => {
+		const { document, history, faceId } = createNeutralRectangle();
+		try {
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 2.7, 2)));
+			const box = document.snapshot().graph;
+			const topFaceId = `${DOCUMENT_ID}:op:2:cap`;
+			const top = box.meshes[0]!.faces.find((face) => face.id === topFaceId)!;
+			const topPoints = top.outer.map((vertex) => {
+				const offset = vertex * 3;
+				return [box.meshes[0]!.positions[offset]!, box.meshes[0]!.positions[offset + 1]!, box.meshes[0]!.positions[offset + 2]!] as const;
+			});
+			const center = topPoints.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number], [0, 0, 0] as [number, number, number])
+				.map((value) => value / topPoints.length) as [number, number, number];
+			const inset = topPoints.map((point) => [
+				center[0] + (point[0] - center[0]) * 0.4,
+				center[1] + (point[1] - center[1]) * 0.4,
+				center[2] + (point[2] - center[2]) * 0.4
+			] as [number, number, number]);
+			const insetFaceId = `${DOCUMENT_ID}:face:3`;
+			history.execute(document, journalEntry(buildFaceLoopEdit(document.snapshot().graph, insetFaceId, inset, top.normal)));
+			const split = document.snapshot().graph;
+			const splitMesh = split.meshes[0]!;
+			expect(validateEditableSubset(split)).toMatchObject({ editable: true });
+			expect(splitMesh.faces.find((face) => face.id === topFaceId)?.holes).toHaveLength(1);
+			expect(splitMesh.faces.find((face) => face.id === insetFaceId)).toBeDefined();
+			const insetEdges = [...buildAuthoringTopology(splitMesh).edges.values()].filter((edge) => edge.faceIds.includes(insetFaceId));
+			expect(insetEdges).toHaveLength(4);
+			expect(insetEdges.every((edge) => edge.faceIds.length === 2)).toBe(true);
+
+			history.execute(document, journalEntry(buildPushPullFaceEdit(split, insetFaceId, 0.6, 4)));
+			const pushedInset = document.snapshot().graph;
+			expect(validateEditableSubset(pushedInset)).toMatchObject({ editable: true });
+			expect(pushedInset.meshes[0]!.faces.some((face) => face.id === insetFaceId)).toBe(true);
+			expect(pushedInset.meshes[0]!.faces.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))).toHaveLength(4);
+			expect(pushedInset.meshes[0]!.faces.find((face) => face.id === topFaceId)?.holes).toHaveLength(1);
+		} finally { document.dispose(); }
+	});
+
+	test('pulls a side inset past a disjoint parallel reveal while still respecting the true opposite shell boundary', () => {
+		const { document, history, faceId } = createNeutralRectangle();
+		try {
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 2.7, 2)));
+
+			const box = document.snapshot().graph;
+			const topFaceId = `${DOCUMENT_ID}:op:2:cap`;
+			const top = box.meshes[0]!.faces.find((face) => face.id === topFaceId)!;
+			const topPoints = vertexPositions(box, topFaceId) as [number, number, number][];
+			const topCenter = topPoints.reduce(
+				(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+				[0, 0, 0] as [number, number, number]
+			).map((value) => value / topPoints.length) as [number, number, number];
+			const topInset = topPoints.map((point) => [
+				topCenter[0] + (point[0] - topCenter[0]) * 0.45,
+				topCenter[1] + (point[1] - topCenter[1]) * 0.45,
+				topCenter[2] + (point[2] - topCenter[2]) * 0.45
+			] as [number, number, number]);
+			const topInsetId = `${DOCUMENT_ID}:face:3`;
+			history.execute(document, journalEntry(buildFaceLoopEdit(box, topInsetId, topInset, top.normal)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, topInsetId, 0.35, 4)));
+
+			const withTopReveal = document.snapshot().graph;
+			const frontFaceId = `${DOCUMENT_ID}:op:2:side:1`;
+			const front = withTopReveal.meshes[0]!.faces.find((face) => face.id === frontFaceId)!;
+			const frontPoints = vertexPositions(withTopReveal, frontFaceId) as [number, number, number][];
+			const frontCenter = frontPoints.reduce(
+				(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+				[0, 0, 0] as [number, number, number]
+			).map((value) => value / frontPoints.length) as [number, number, number];
+			const sideInset = frontPoints.map((point) => [
+				frontCenter[0] + (point[0] - frontCenter[0]) * 0.38,
+				frontCenter[1] + (point[1] - frontCenter[1]) * 0.38,
+				frontCenter[2] + (point[2] - frontCenter[2]) * 0.38
+			] as [number, number, number]);
+			const sideInsetId = `${DOCUMENT_ID}:face:5`;
+				history.execute(document, journalEntry(buildFaceLoopEdit(withTopReveal, sideInsetId, sideInset, front.normal)));
+
+				const splitSide = document.snapshot().graph;
+				const splitMesh = splitSide.meshes[0]!;
+				const driftedSplit = {
+					...splitSide,
+					meshes: [{
+						...splitMesh,
+						faces: splitMesh.faces.map((face) => face.id === sideInsetId
+							? { ...face, normal: [0, -4e-15, 1] as [number, number, number] }
+							: face)
+					}]
+				};
+				expect(validateEditableSubset(driftedSplit)).toMatchObject({ editable: true });
+				const validPocket = buildPushPullFaceEdit(driftedSplit, sideInsetId, -1.0, 6);
+				const putMesh = validPocket.forward.find((edit) => edit.type === 'put-mesh');
+				if (!putMesh || putMesh.type !== 'put-mesh') throw new Error('Inset Push/Pull did not publish a canonical mesh replacement.');
+				const recessed = { ...driftedSplit, meshes: [putMesh.value] };
+				expect(validateEditableSubset(recessed)).toMatchObject({ editable: true });
+				expect(recessed.meshes[0]!.faces.find((face) => face.id === sideInsetId)).toBeDefined();
+				expect(() => buildPushPullFaceEdit(driftedSplit, sideInsetId, -3.0, 6)).toThrow(/cross|collapse/i);
+			} finally { document.dispose(); }
+		});
 });

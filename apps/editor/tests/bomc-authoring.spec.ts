@@ -217,8 +217,13 @@ async function drawRectangle(page: Page, cellX: number, cellY: number, cellWidth
 }
 
 async function ensureTopView(page: Page) {
+	await ensureCameraView(page, 'top');
+	await expect(page.locator('.viewport canvas')).toBeVisible();
+}
+
+async function ensureCameraView(page: Page, view: 'top' | 'front' | 'iso') {
 	await openMenu(page, 3);
-	await page.getByRole('button', { name: 'Top', exact: true }).click();
+	await page.getByRole('button', { name: view === 'top' ? 'Top' : view === 'front' ? 'Front' : 'Iso', exact: true }).click();
 	await closeMenu(page, 3);
 	await expect(page.locator('.viewport canvas')).toBeVisible();
 }
@@ -295,7 +300,7 @@ async function selectProjectedRectangle(page: Page, graph: BomcGraph, entityId: 
 	await page.mouse.click(box.x + (projected.x + 1) * box.width / 2, box.y + (1 - projected.y) * box.height / 2);
 }
 
-async function clickProjectedFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'iso' = 'top') {
+async function clickProjectedFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'front' | 'iso' = 'top') {
 	const mesh = graph.meshes[0];
 	const face = mesh?.faces.find((candidate) => candidate.id === faceId);
 	if (!mesh || !face || face.outer.length < 3) throw new Error(`Canonical graph has no projected face ${faceId}.`);
@@ -342,7 +347,49 @@ function sideFaceId(graph: BomcGraph): string {
 	return candidates[0].id;
 }
 
-async function projectWorldPoint(page: Page, graph: BomcGraph, point: readonly [number, number, number], view: 'top' | 'iso' = 'top') {
+function frontFaceId(graph: BomcGraph): string {
+	const mesh = graph.meshes[0];
+	if (!mesh) throw new Error('Canonical graph has no mesh.');
+	const face = mesh.faces
+		.filter((candidate) => candidate.normal[2] > 0.9)
+		.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)[0];
+	if (!face) throw new Error('Canonical graph has no +Z front authored face.');
+	return face.id;
+}
+
+function insetFacePoints(graph: BomcGraph, faceId: string, scale = 0.45): [number, number, number][] {
+	const mesh = graph.meshes[0];
+	const face = mesh?.faces.find((candidate) => candidate.id === faceId);
+	if (!mesh || !face || face.outer.length < 3) throw new Error(`Canonical graph has no inset-capable face ${faceId}.`);
+	const points = face.outer.map((vertex) => [
+		mesh.positions[vertex * 3]!, mesh.positions[vertex * 3 + 1]!, mesh.positions[vertex * 3 + 2]!
+	] as [number, number, number]);
+	const center = points.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number], [0, 0, 0] as [number, number, number])
+		.map((value) => value / points.length) as [number, number, number];
+	return points.map((point) => [
+		center[0] + (point[0] - center[0]) * scale,
+		center[1] + (point[1] - center[1]) * scale,
+		center[2] + (point[2] - center[2]) * scale
+	]);
+}
+
+function safeInwardPullDistance(graph: BomcGraph, faceId: string, fraction = 0.25): number {
+	const mesh = graph.meshes[0];
+	const face = mesh?.faces.find((candidate) => candidate.id === faceId);
+	if (!mesh || !face) throw new Error(`Canonical graph has no face ${faceId} for inward pull sizing.`);
+	const anchorVertex = face.outer[0]!;
+	const anchor = [mesh.positions[anchorVertex * 3]!, mesh.positions[anchorVertex * 3 + 1]!, mesh.positions[anchorVertex * 3 + 2]!] as const;
+	const plane = anchor[0] * face.normal[0] + anchor[1] * face.normal[1] + anchor[2] * face.normal[2];
+	let furthestBehind = 0;
+	for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+		const projection = mesh.positions[offset]! * face.normal[0] + mesh.positions[offset + 1]! * face.normal[1] + mesh.positions[offset + 2]! * face.normal[2];
+		furthestBehind = Math.max(furthestBehind, plane - projection);
+	}
+	if (!Number.isFinite(furthestBehind) || furthestBehind <= 1e-5) throw new Error(`Face ${faceId} has no measurable inward solid extent.`);
+	return -furthestBehind * fraction;
+}
+
+async function projectWorldPoint(page: Page, graph: BomcGraph, point: readonly [number, number, number], view: 'top' | 'front' | 'iso' = 'top') {
 	const mesh = graph.meshes[0];
 	if (!mesh) throw new Error('Canonical graph has no mesh for world-point projection.');
 	const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
@@ -368,13 +415,38 @@ async function projectWorldPoint(page: Page, graph: BomcGraph, point: readonly [
 	return { x: box.x + (projected.x + 1) * box.width / 2, y: box.y + (1 - projected.y) * box.height / 2 };
 }
 
-async function pushPullProjectedFace(page: Page, graph: BomcGraph, faceId: string, distance: number, view: 'top' | 'iso' = 'top') {
-	if (view === 'top') await ensureTopView(page);
-	else {
-		await openMenu(page, 3);
-		await page.getByRole('button', { name: 'Iso', exact: true }).click();
-		await closeMenu(page, 3);
-	}
+async function drawRectangleOnFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'front' | 'iso' = 'top') {
+	await ensureCameraView(page, view);
+	const points = insetFacePoints(graph, faceId);
+	if (points.length < 4) throw new Error(`Rectangle face ${faceId} does not provide four inset corners.`);
+	const first = await projectWorldPoint(page, graph, points[0]!, view);
+	const opposite = await projectWorldPoint(page, graph, points[2]!, view);
+	const commandCount = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length;
+	const revision = (await currentCheckpoint(page)).snapshot.revision;
+	await page.getByRole('button', { name: 'Rectangle', exact: true }).click();
+	await page.mouse.click(first.x, first.y);
+	await page.mouse.click(opposite.x, opposite.y);
+	await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length, { timeout: 15_000 }).toBe(commandCount + 1);
+	await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision, { timeout: 15_000 }).toBe(revision + 1);
+}
+
+async function drawLineLoopOnFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'front' | 'iso' = 'top') {
+	await ensureCameraView(page, view);
+	const points = insetFacePoints(graph, faceId, 0.38);
+	const screens = await Promise.all(points.map((point) => projectWorldPoint(page, graph, point, view)));
+	const commandCount = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP').length;
+	const revision = (await currentCheckpoint(page)).snapshot.revision;
+	await page.getByRole('button', { name: 'Line', exact: true }).click();
+	for (const point of screens) await page.mouse.click(point.x, point.y);
+	await page.mouse.move(screens[0]!.x, screens[0]!.y);
+	await expect(page.locator('.footer-status')).toContainText('Close Loop');
+	await page.mouse.click(screens[0]!.x, screens[0]!.y);
+	await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP').length, { timeout: 15_000 }).toBe(commandCount + 1);
+	await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision, { timeout: 15_000 }).toBe(revision + 1);
+}
+
+async function pushPullProjectedFace(page: Page, graph: BomcGraph, faceId: string, distance: number, view: 'top' | 'front' | 'iso' = 'top') {
+	await ensureCameraView(page, view);
 	const beforeCheckpoint = await currentCheckpoint(page);
 	const before = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length;
 	await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
@@ -550,7 +622,86 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		const secondSave = await saveBomc(page, secondPath);
 		const independentContinued = await readWebBomc(new Uint8Array(secondSave.bytes));
 		try { expect(independentContinued.snapshot().graph).toStrictEqual(continued.snapshot.graph); }
-		finally { independentContinued.dispose(); }
+			finally { independentContinued.dispose(); }
+		});
+
+		test('Rectangle and Line author directly on flat, pushed and pulled faces while box snapping follows the hovered face', async ({ page }, testInfo) => {
+		test.setTimeout(180_000);
+		await createNew(page);
+		await ensureTopView(page);
+		await drawRectangle(page, 0.34, 0.34, 0.30, 0.28);
+
+		const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const baseFaceId = rectangleEntityId(flat, 1);
+		await pushPullProjectedFace(page, flat, baseFaceId, 1.2, 'top');
+		const boxGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const topId = topFaceId(boxGraph);
+		const frontId = frontFaceId(boxGraph);
+
+		await ensureCameraView(page, 'front');
+		const frontMesh = boxGraph.meshes[0]!;
+		const frontFace = frontMesh.faces.find((face) => face.id === frontId)!;
+		const frontPoints = frontFace.outer.map((vertex) => [
+			frontMesh.positions[vertex * 3]!, frontMesh.positions[vertex * 3 + 1]!, frontMesh.positions[vertex * 3 + 2]!
+		] as [number, number, number]);
+		const maxY = Math.max(...frontPoints.map((point) => point[1]));
+		const topEdge = frontPoints.map((point, index) => [point, frontPoints[(index + 1) % frontPoints.length]!] as const)
+			.find(([first, second]) => Math.abs(first[1] - maxY) < 1e-9 && Math.abs(second[1] - maxY) < 1e-9);
+		if (!topEdge) throw new Error('Front box face has no projected top edge.');
+		const edgeMidpoint = [
+			(topEdge[0][0] + topEdge[1][0]) / 2,
+			(topEdge[0][1] + topEdge[1][1]) / 2,
+			(topEdge[0][2] + topEdge[1][2]) / 2
+		] as const;
+		const frontCenter = frontPoints.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number], [0, 0, 0] as [number, number, number])
+			.map((value) => value / frontPoints.length) as [number, number, number];
+		const edgeScreen = await projectWorldPoint(page, boxGraph, edgeMidpoint, 'front');
+		const centerScreen = await projectWorldPoint(page, boxGraph, frontCenter, 'front');
+		const inwardLength = Math.max(1, Math.hypot(centerScreen.x - edgeScreen.x, centerScreen.y - edgeScreen.y));
+		await page.getByRole('button', { name: 'Rectangle', exact: true }).click();
+		await page.mouse.move(
+			edgeScreen.x + (centerScreen.x - edgeScreen.x) / inwardLength * 4,
+			edgeScreen.y + (centerScreen.y - edgeScreen.y) / inwardLength * 4
+		);
+		await expect(page.locator('.footer-status')).toContainText('On Edge');
+		await page.keyboard.press('Escape');
+
+		const beforeTopInsetIds = new Set(boxGraph.meshes[0]!.faces.map((face) => face.id));
+		await drawRectangleOnFace(page, boxGraph, topId, 'top');
+		const topInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const topInset = topInsetGraph.meshes[0]!.faces.find((face) => !beforeTopInsetIds.has(face.id) && face.label?.includes('"rectangle"'));
+		if (!topInset) throw new Error('Rectangle-on-top-face did not create a canonical inset face.');
+		expect(topInsetGraph.meshes[0]!.faces.find((face) => face.id === topId)?.holes).toHaveLength(1);
+
+		await pushPullProjectedFace(page, topInsetGraph, topInset.id, 0.35, 'top');
+		const pushedInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		expect(pushedInsetGraph.meshes[0]!.faces.find((face) => face.id === topInset.id)).toBeDefined();
+
+		const frontAfterTopPush = frontFaceId(pushedInsetGraph);
+		const beforeLineIds = new Set(pushedInsetGraph.meshes[0]!.faces.map((face) => face.id));
+		await drawLineLoopOnFace(page, pushedInsetGraph, frontAfterTopPush, 'front');
+		const lineInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const lineInset = lineInsetGraph.meshes[0]!.faces.find((face) => !beforeLineIds.has(face.id) && face.label?.includes('"line"'));
+		if (!lineInset) throw new Error('Line-on-side-face did not create a canonical inset face.');
+		expect(lineInsetGraph.meshes[0]!.faces.find((face) => face.id === frontAfterTopPush)?.holes).toHaveLength(1);
+
+			await pushPullProjectedFace(page, lineInsetGraph, lineInset.id, safeInwardPullDistance(lineInsetGraph, lineInset.id), 'front');
+		const pulledInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const pulledFace = pulledInsetGraph.meshes[0]!.faces.find((face) => face.id === lineInset.id);
+		if (!pulledFace) throw new Error('Pulled inset face lost its stable face identity.');
+
+		const beforePulledRectangleIds = new Set(pulledInsetGraph.meshes[0]!.faces.map((face) => face.id));
+		await drawRectangleOnFace(page, pulledInsetGraph, pulledFace.id, 'front');
+		const nestedGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const nestedRectangle = nestedGraph.meshes[0]!.faces.find((face) => !beforePulledRectangleIds.has(face.id) && face.label?.includes('"rectangle"'));
+		if (!nestedRectangle) throw new Error('Rectangle-on-pulled-face did not create a canonical inset face.');
+		expect(nestedGraph.meshes[0]!.faces.find((face) => face.id === pulledFace.id)?.holes).toHaveLength(1);
+
+		const path = testInfo.outputPath('face-subdivision-flat-pushed-pulled.bomc');
+		const saved = await saveBomc(page, path);
+		const independent = await readWebBomc(new Uint8Array(saved.bytes));
+		try { expect(independent.snapshot().graph).toStrictEqual(nestedGraph); }
+		finally { independent.dispose(); }
 	});
 
 	test('1,000 real pointer moves keep inference nonmutating and avoid authoring long tasks over 50 ms', async ({ page }) => {

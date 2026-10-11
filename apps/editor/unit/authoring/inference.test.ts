@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3, type Camera } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
-import { buildPlanarRectangleEdit } from '../../src/lib/authoring/geometry.js';
+import { buildPlanarRectangleEdit, buildPushPullFaceEdit } from '../../src/lib/authoring/geometry.js';
 import { resolveAuthoringInference } from '../../src/lib/authoring/inference.js';
 
 const DOCUMENT_ID = '3ed35ead-9640-4e34-b10c-0983190ec99d';
@@ -59,6 +59,12 @@ function authoredRectangle() {
 		[[-2, 0, -2], [2, 0, -2], [2, 0, 2], [-2, 0, 2]],
 		[0, 1, 0]
 	).forward);
+	return { document, id };
+}
+
+function authoredBox() {
+	const { document, id } = authoredRectangle();
+	document.transact(buildPushPullFaceEdit(document.snapshot().graph, id, 2.7, 2).forward);
 	return { document, id };
 }
 
@@ -183,6 +189,32 @@ describe('authoring inference', () => {
 			expect(first?.kind).toBe('endpoint');
 			expect(second?.kind).toBe('endpoint');
 			expect(first?.faceId).toBe(second?.faceId);
+		} finally { document.dispose(); }
+	});
+
+	test('box edge snapping uses the actually hovered incident face plane instead of the first face ID', () => {
+		const { document } = authoredBox();
+		try {
+			const graph = document.snapshot().graph;
+			const mesh = graph.meshes[0]!;
+			const front = mesh.faces.find((face) => Math.abs(face.normal[2] - 1) < 1e-9)!;
+			const viewport = perspectiveViewport([0, 1.35, 10]);
+			const frontPoints = front.outer.map((vertex) => [
+				mesh.positions[vertex * 3]!, mesh.positions[vertex * 3 + 1]!, mesh.positions[vertex * 3 + 2]!
+			] as const);
+			const topY = Math.max(...frontPoints.map((point) => point[1]));
+			const z = frontPoints[0]![2];
+			const nearTopEdge = viewport.projectWorldToScreen([0, topY - 0.03, z]);
+			const hit = resolveAuthoringInference({
+				graph,
+				viewport,
+				clientX: nearTopEdge.x,
+				clientY: nearTopEdge.y,
+				activePlane: { origin: [0, 0, 0], normal: [0, 1, 0] }
+			});
+			expect(hit?.kind).toBe('edge');
+			expect(hit?.faceId).toBe(front.id);
+			expect(hit?.plane.normal).toEqual(front.normal);
 		} finally { document.dispose(); }
 	});
 });

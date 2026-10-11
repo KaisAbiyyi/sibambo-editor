@@ -57,7 +57,7 @@ function vertex(mesh: BomcMesh, index: number): [number, number, number] {
 }
 
 function geometryForFace(mesh: BomcMesh, face: Face): BufferGeometry {
-	const vertexIndices = [...new Set(face.outer)];
+	const vertexIndices = [...new Set([face.outer, ...face.holes].flatMap((ring) => [...ring]))];
 	const localIndex = new Map(vertexIndices.map((sourceIndex, index) => [sourceIndex, index]));
 	const positions = vertexIndices.flatMap((sourceIndex) => vertex(mesh, sourceIndex));
 	const normals = vertexIndices.flatMap(() => [...face.normal]);
@@ -111,9 +111,9 @@ function edgePositionsForEntity(mesh: BomcMesh, faces: readonly Face[]): number[
 	const seen = new Set<string>();
 	const positions: number[] = [];
 	for (const face of faces) {
-		for (let index = 0; index < face.outer.length; index += 1) {
-			const first = face.outer[index]!;
-			const second = face.outer[(index + 1) % face.outer.length]!;
+		for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+			const first = ring[index]!;
+			const second = ring[(index + 1) % ring.length]!;
 			const key = first < second ? `${first}:${second}` : `${second}:${first}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -125,16 +125,16 @@ function edgePositionsForEntity(mesh: BomcMesh, faces: readonly Face[]): number[
 
 function boundaryFaceIds(mesh: BomcMesh): Set<string> {
 	const counts = new Map<string, number>();
-	for (const face of mesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
-		const first = face.outer[index]!;
-		const second = face.outer[(index + 1) % face.outer.length]!;
+	for (const face of mesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+		const first = ring[index]!;
+		const second = ring[(index + 1) % ring.length]!;
 		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
 		counts.set(key, (counts.get(key) ?? 0) + 1);
 	}
 	const result = new Set<string>();
-	for (const face of mesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
-		const first = face.outer[index]!;
-		const second = face.outer[(index + 1) % face.outer.length]!;
+	for (const face of mesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+		const first = ring[index]!;
+		const second = ring[(index + 1) % ring.length]!;
 		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
 		if (counts.get(key) === 1) { result.add(face.id); break; }
 	}

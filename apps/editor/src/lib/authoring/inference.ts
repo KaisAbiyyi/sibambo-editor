@@ -118,7 +118,7 @@ function screenDistance(viewport: InferenceViewport, point: AuthoringPoint, clie
 	return Number.isFinite(distance) ? distance : null;
 }
 
-function endpointCandidate(options: ResolveInferenceOptions, mesh: Mesh): AuthoringInference | null {
+function endpointCandidate(options: ResolveInferenceOptions, mesh: Mesh, preferredFaceId: string | null): AuthoringInference | null {
 	const vertices = [...new Set(mesh.faces.flatMap((face) => face.outer))].sort((a, b) => a - b);
 	let best: AuthoringInference | null = null;
 	for (const vertexIndex of vertices) {
@@ -126,9 +126,10 @@ function endpointCandidate(options: ResolveInferenceOptions, mesh: Mesh): Author
 		if (!pointAllowed(point, options.restrictToPlane)) continue;
 		const distance = screenDistance(options.viewport, point, options.clientX, options.clientY);
 		if (distance === null || distance > AUTHORING_SNAP_RADIUS_CSS_PX) continue;
-		const face = mesh.faces
-			.filter((candidate) => candidate.outer.includes(vertexIndex))
-			.sort((left, right) => codeUnitCompare(left.id, right.id))[0];
+		const incidentFaces = mesh.faces
+			.filter((candidate) => [candidate.outer, ...candidate.holes].some((ring) => ring.includes(vertexIndex)))
+			.sort((left, right) => codeUnitCompare(left.id, right.id));
+		const face = incidentFaces.find((candidate) => candidate.id === preferredFaceId) ?? incidentFaces[0];
 		const plane = face ? planeForFace(mesh, face) : options.activePlane ?? { origin: point, normal: [0, 1, 0] };
 		if (!best || distance < best.screenDistancePx - 1e-9
 			|| Math.abs(distance - best.screenDistancePx) <= 1e-9 && vertexIndex < (best.vertexIndex ?? Number.MAX_SAFE_INTEGER)) {
@@ -138,7 +139,7 @@ function endpointCandidate(options: ResolveInferenceOptions, mesh: Mesh): Author
 	return best;
 }
 
-function edgeCandidate(options: ResolveInferenceOptions, mesh: Mesh): AuthoringInference | null {
+function edgeCandidate(options: ResolveInferenceOptions, mesh: Mesh, preferredFaceId: string | null): AuthoringInference | null {
 	const topology = buildAuthoringTopology(mesh);
 	let best: AuthoringInference | null = null;
 	for (const edge of [...topology.edges.values()].sort((a, b) => a.a - b.a || a.b - b.b)) {
@@ -155,7 +156,7 @@ function edgeCandidate(options: ResolveInferenceOptions, mesh: Mesh): AuthoringI
 		if (!pointAllowed(point, options.restrictToPlane)) continue;
 		const distance = screenDistance(options.viewport, point, options.clientX, options.clientY);
 		if (distance === null || distance > AUTHORING_SNAP_RADIUS_CSS_PX) continue;
-		const faceId = edge.faceIds[0];
+		const faceId = preferredFaceId && edge.faceIds.includes(preferredFaceId) ? preferredFaceId : edge.faceIds[0];
 		const face = faceId ? topology.faceById.get(faceId) : undefined;
 		const plane = face ? planeForFace(mesh, face) : options.activePlane ?? { origin: point, normal: [0, 1, 0] };
 		if (!best || distance < best.screenDistancePx - 1e-9
@@ -175,8 +176,7 @@ function closureCandidate(options: ResolveInferenceOptions): AuthoringInference 
 	return Object.freeze({ point, kind: 'closure', plane, screenDistancePx: distance });
 }
 
-function faceCandidate(options: ResolveInferenceOptions, mesh: Mesh, ray: Ray): AuthoringInference | null {
-	const hit = nearestAuthoringFaceHit(options.graph, ray);
+function faceCandidate(options: ResolveInferenceOptions, mesh: Mesh, hit: FaceRayHit | null): AuthoringInference | null {
 	if (!hit || !pointAllowed(hit.point, options.restrictToPlane)) return null;
 	return Object.freeze({ point: hit.point, kind: 'face', faceId: hit.face.id, plane: planeForFace(mesh, hit.face), screenDistancePx: 0 });
 }
@@ -239,13 +239,14 @@ export function resolveAuthoringInference(options: ResolveInferenceOptions): Aut
 	const ray = options.viewport.rayFromScreen(options.clientX, options.clientY);
 	if (!ray) return null;
 	const mesh = options.graph.meshes[0];
+	const faceHit = mesh ? nearestAuthoringFaceHit(options.graph, ray) : null;
 	if (mesh) {
-		const endpoint = endpointCandidate(options, mesh); if (endpoint) return endpoint;
-		const edge = edgeCandidate(options, mesh); if (edge) return edge;
+		const endpoint = endpointCandidate(options, mesh, faceHit?.face.id ?? null); if (endpoint) return endpoint;
+		const edge = edgeCandidate(options, mesh, faceHit?.face.id ?? null); if (edge) return edge;
 	}
 	const closure = closureCandidate(options); if (closure) return closure;
 	if (mesh) {
-		const face = faceCandidate(options, mesh, ray); if (face) return face;
+		const face = faceCandidate(options, mesh, faceHit); if (face) return face;
 	}
 	const plane = activePlaneCandidate(options, ray); if (plane) return plane;
 	return axisCandidate(options, ray);

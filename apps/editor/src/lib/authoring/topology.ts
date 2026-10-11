@@ -40,17 +40,21 @@ export function buildAuthoringTopology(mesh: Mesh): AuthoringTopology {
 	const cycles = new Map<string, string>();
 	for (const face of mesh.faces) {
 		if (!face.id || faceById.has(face.id)) throw new AuthoringTopologyError(`Face identity ${face.id || '<empty>'} is duplicated.`);
-		if (face.outer.length < 3 || new Set(face.outer).size !== face.outer.length) throw new AuthoringTopologyError(`Face ${face.id} has an invalid outer ring.`);
-		if (face.outer.some((vertex) => !Number.isSafeInteger(vertex) || vertex < 0 || vertex >= vertexCount)) throw new AuthoringTopologyError(`Face ${face.id} references an invalid vertex.`);
+		const rings = [face.outer, ...face.holes];
+		for (const [ringIndex, ring] of rings.entries()) {
+			if (ring.length < 3 || new Set(ring).size !== ring.length) throw new AuthoringTopologyError(`Face ${face.id} has an invalid ${ringIndex === 0 ? 'outer' : 'hole'} ring.`);
+			if (ring.some((vertex) => !Number.isSafeInteger(vertex) || vertex < 0 || vertex >= vertexCount)) throw new AuthoringTopologyError(`Face ${face.id} references an invalid vertex.`);
+		}
 		const cycle = canonicalCycle(face.outer);
 		const duplicate = cycles.get(cycle);
 		if (duplicate) throw new AuthoringTopologyError(`Faces ${duplicate} and ${face.id} duplicate the same vertex cycle.`);
 		cycles.set(cycle, face.id);
 		faceById.set(face.id, face);
-		for (let index = 0; index < face.outer.length; index += 1) {
-			const a = face.outer[index]!; const b = face.outer[(index + 1) % face.outer.length]!;
+		for (const ring of rings) for (let index = 0; index < ring.length; index += 1) {
+			const a = ring[index]!; const b = ring[(index + 1) % ring.length]!;
 			const key = edgeKey(a, b);
 			const entry = edgeFaces.get(key) ?? { a: Math.min(a, b), b: Math.max(a, b), faceIds: [] };
+			if (entry.faceIds.includes(face.id)) throw new AuthoringTopologyError(`Face ${face.id} reuses edge ${key} across its rings.`);
 			entry.faceIds.push(face.id);
 			if (entry.faceIds.length > 2) throw new AuthoringTopologyError(`Edge ${key} is non-manifold with more than two incident faces.`);
 			edgeFaces.set(key, entry);
@@ -72,9 +76,9 @@ export function buildAuthoringTopology(mesh: Mesh): AuthoringTopology {
 }
 
 export function faceBoundaryEdges(face: Face): readonly (readonly [number, number])[] {
-	return Object.freeze(face.outer.map((vertex, index) => Object.freeze([vertex, face.outer[(index + 1) % face.outer.length]!] as [number, number])));
+	return Object.freeze([face.outer, ...face.holes].flatMap((ring) => ring.map((vertex, index) => Object.freeze([vertex, ring[(index + 1) % ring.length]!] as [number, number]))));
 }
 
 export function uniqueBoundaryVertices(face: Face): readonly number[] {
-	return Object.freeze([...new Set(face.outer)]);
+	return Object.freeze([...new Set([face.outer, ...face.holes].flatMap((ring) => [...ring]))]);
 }
