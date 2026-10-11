@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { DoubleSide, LineBasicMaterial, LineSegments, Mesh, MeshStandardMaterial } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { DEFAULT_DISPLAY_STATE, sourceEdgeMaterialDescriptor, type DisplayState } from '@sibambo/viewport';
-import { buildExtrusionEdit, buildRectangleEdit } from '../../src/lib/authoring/geometry.js';
+import { buildExtrusionEdit, buildPlanarRectangleEdit, buildRectangleEdit } from '../../src/lib/authoring/geometry.js';
 import { projectAuthoringScene } from '../../src/lib/authoring/scene.js';
 
 const DOCUMENT_ID = 'a4f2d141-64e1-4c62-8d0d-53623f71a220';
@@ -66,6 +66,27 @@ describe('canonical authoring projection', () => {
 				expect(new Set(faces.map((face) => face.material)).size).toBe(6);
 				expect(faces.find((face) => face.name === `${entityId}:side:0`)?.userData.authoringEntityId).toBe(entityId);
 				expect(projection.bounds).toEqual({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2.7, z: 3 } });
+			} finally { disposeProjection(projection.group); }
+		} finally { document.dispose(); }
+	});
+
+	test('projects new v2 faces with neutral material while preserving legacy maroon v1 faces', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Untitled' });
+		try {
+			document.transact(buildRectangleEdit(document.snapshot().graph, `${DOCUMENT_ID}:rectangle:1`, [0, 0, 0], [2, 0, 2]).forward);
+			document.transact(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				`${DOCUMENT_ID}:rectangle:2`,
+				[[4, 0, 0], [6, 0, 0], [6, 0, 2], [4, 0, 2]],
+				[0, 1, 0]
+			).forward);
+			const projection = projectAuthoringScene(document.snapshot(), DEFAULT_DISPLAY_STATE);
+			try {
+				const faces = projection.group.children.filter((child) => child instanceof Mesh) as Mesh[];
+				const legacy = faces.find((face) => face.name === `${DOCUMENT_ID}:rectangle:1`)!;
+				const neutral = faces.find((face) => face.name === `${DOCUMENT_ID}:rectangle:2`)!;
+				expect((legacy.material as MeshStandardMaterial).color.getHexString()).toBe('9b1c31');
+				expect((neutral.material as MeshStandardMaterial).color.getHexString()).toBe('e2e2e2');
 			} finally { disposeProjection(projection.group); }
 		} finally { document.dispose(); }
 	});

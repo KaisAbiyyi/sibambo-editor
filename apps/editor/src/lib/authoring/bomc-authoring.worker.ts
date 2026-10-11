@@ -3,7 +3,18 @@ import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import type { BomcGraph } from '@sibambo/bomc-document';
 import { BomcContainer } from '@sibambo/e4-import';
-import { AuthoringGeometryError, buildExtrusionEdit, buildRectangleEdit, nextRectangleSequence, validateEditableSubset, validateRectangleInput } from './geometry.js';
+import {
+	AuthoringGeometryError,
+	buildExtrusionEdit,
+	buildFaceLoopEdit,
+	buildPlanarRectangleEdit,
+	buildPushPullFaceEdit,
+	buildRectangleEdit,
+	nextAuthoringSequence,
+	validateEditableSubset,
+	validateRectangleInput,
+	type GeometryEdit
+} from './geometry.js';
 import { AuthoringHistory, AuthoringHistoryError, validateAuthoringCheckpoint } from './history.js';
 import {
 	AUTHORING_PROTOCOL_VERSION,
@@ -235,7 +246,7 @@ export class AuthoringWorkerDispatcher {
 				document.dispose();
 				return { kind: 'viewer', reason: subset.reason, authoringValidationPerformed: true };
 			}
-			this.attachDocument(document, new AuthoringHistory(snapshot.graph), nextRectangleSequence(snapshot.graph));
+				this.attachDocument(document, new AuthoringHistory(snapshot.graph), nextAuthoringSequence(snapshot.graph));
 			return this.authoringResult();
 		} finally {
 			container.release(241);
@@ -257,20 +268,40 @@ export class AuthoringWorkerDispatcher {
 		this.requireActiveDocument();
 		const graph = this.document!.snapshot().graph;
 		let entityId: string;
-		let pair: ReturnType<typeof buildRectangleEdit>;
+		let pair: GeometryEdit;
+		let consumesSequence = false;
 		if (request.data.kind === 'CREATE_RECTANGLE') {
-			validateRectangleInput(request.data.first, request.data.opposite);
 			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
-				throw new AuthoringGeometryError('Rectangle ID sequence is exhausted.');
+				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
 			}
 			entityId = `${graph.documentId}:rectangle:${this.sequence}`;
-			pair = buildRectangleEdit(graph, entityId, request.data.first, request.data.opposite);
+			if ('points' in request.data) {
+				pair = buildPlanarRectangleEdit(graph, entityId, request.data.points, request.data.normal);
+			} else {
+				validateRectangleInput(request.data.first, request.data.opposite);
+				pair = buildRectangleEdit(graph, entityId, request.data.first, request.data.opposite);
+			}
+			consumesSequence = true;
+		} else if (request.data.kind === 'CREATE_FACE_LOOP') {
+			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
+				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
+			}
+			entityId = `${graph.documentId}:face:${this.sequence}`;
+			pair = buildFaceLoopEdit(graph, entityId, request.data.points, request.data.normal, 'line');
+			consumesSequence = true;
+		} else if (request.data.kind === 'PUSH_PULL_FACE') {
+			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
+				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
+			}
+			entityId = request.data.faceId;
+			pair = buildPushPullFaceEdit(graph, request.data.faceId, request.data.distance, this.sequence);
+			consumesSequence = true;
 		} else {
 			entityId = request.data.entityId;
 			pair = buildExtrusionEdit(graph, entityId, request.data.distance);
 		}
 		const changed = this.history!.execute(this.document!, pair);
-		if (changed && request.data.kind === 'CREATE_RECTANGLE') this.sequence += 1;
+		if (changed && consumesSequence) this.sequence += 1;
 		const result = this.authoringResult();
 		if (changed) result.commandResult = { entityId };
 		return result;

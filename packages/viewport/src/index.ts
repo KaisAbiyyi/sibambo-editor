@@ -36,7 +36,7 @@ export type {
 	PreparedSurfaceWorldBounds
 } from './prepared-surface.js';
 export { PreparedSceneViewport } from './prepared-scene-viewport.js';
-export type { PreparedSceneViewportInput, ViewportBounds, ViewportPick, ViewportSourceFaceReference } from './prepared-scene-viewport.js';
+export type { PreparedSceneViewportInput, ViewportBounds, ViewportPick, ViewportScreenProjection, ViewportSourceFaceReference } from './prepared-scene-viewport.js';
 export { addRendererSceneLighting, applyRendererColorDefaults, SIBAMBO_CAMERA_DEFAULTS } from './renderer-defaults.js';
 export { createFallbackTextMaterial } from './fallback-text.js';
 export { filterTrianglesBySourceFaces } from './source-face-filter.js';

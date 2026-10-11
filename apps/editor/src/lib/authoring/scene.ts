@@ -123,6 +123,24 @@ function edgePositionsForEntity(mesh: BomcMesh, faces: readonly Face[]): number[
 	return positions;
 }
 
+function boundaryFaceIds(mesh: BomcMesh): Set<string> {
+	const counts = new Map<string, number>();
+	for (const face of mesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
+		const first = face.outer[index]!;
+		const second = face.outer[(index + 1) % face.outer.length]!;
+		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const result = new Set<string>();
+	for (const face of mesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
+		const first = face.outer[index]!;
+		const second = face.outer[(index + 1) % face.outer.length]!;
+		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
+		if (counts.get(key) === 1) { result.add(face.id); break; }
+	}
+	return result;
+}
+
 function disposeUntransferred(group: Group): void {
 	const geometries = new Set<BufferGeometry>();
 	const materials = new Set<Material>();
@@ -143,15 +161,16 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 	const group = new Group();
 	group.name = 'editor-authoring-content';
 	const mesh = snapshot.graph.meshes[0];
-	try {
-		if (mesh) {
-			const entityForFace = new Map(subset.entities.flatMap((entity) => entity.faces.map((face) => [face.id, entity] as const)));
-			for (const face of mesh.faces) {
+		try {
+			if (mesh) {
+				const entityForFace = new Map(subset.entities.flatMap((entity) => entity.faces.map((face) => [face.id, entity] as const)));
+				const boundaryFaces = boundaryFaceIds(mesh);
+				for (const face of mesh.faces) {
 				const entity = entityForFace.get(face.id);
 				if (!entity) throw new AuthoringSceneError(`Face ${face.id} has no validated authoring entity.`);
 				const geometry = geometryForFace(mesh, face);
 				let material: Material;
-				try { material = materialForFace(face, snapshot, displayState, entity.kind === 'rectangle'); }
+					try { material = materialForFace(face, snapshot, displayState, boundaryFaces.has(face.id)); }
 				catch (error) { geometry.dispose(); throw error; }
 				try {
 					const projected = new Mesh(geometry, material);
@@ -170,7 +189,7 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 					throw error;
 				}
 			}
-			const edgePositions = subset.entities.flatMap((entity) => edgePositionsForEntity(mesh, entity.faces));
+				const edgePositions = edgePositionsForEntity(mesh, mesh.faces);
 			if (edgePositions.length > 0) {
 				const geometry = new BufferGeometry();
 				let material: LineBasicMaterial | null = null;

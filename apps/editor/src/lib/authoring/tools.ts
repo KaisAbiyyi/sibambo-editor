@@ -6,28 +6,38 @@ import {
 	LineBasicMaterial,
 	LineSegments,
 	Mesh,
-	MeshStandardMaterial,
-	Ray,
-	Vector3
+	MeshStandardMaterial
 } from 'three';
 import type { BomcGraph, BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
-import { buildExtrusionEdit, hasEntityId, validateEditableSubset, validateRectangleInput, type AuthoringEntity } from './geometry.js';
-import type { AuthoringCheckpoint, AuthoringCommand, AuthoringResult } from './protocol.js';
+import { buildPushPullFaceEdit, hasEntityId, validateEditableSubset, type AuthoringEntity } from './geometry.js';
+import { captureAxisDrag, solveAxisDrag, type AxisDragCapture } from './axis-drag.js';
+import {
+	constructionBasis,
+	inferenceLabel,
+	nearestAuthoringFaceHit,
+	rectangleCorners,
+	resolveAuthoringInference,
+	type AuthoringInference,
+	type AuthoringPlane
+} from './inference.js';
+import { AuthoringPolygonError, preparePolygon } from './polygon.js';
+import type { AuthoringCheckpoint, AuthoringCommand, AuthoringPoint, AuthoringResult } from './protocol.js';
 
 const PREVIEW_OVERLAY_KEY = 'editor-authoring-preview';
 const SELECTION_OVERLAY_KEY = 'editor-authoring-selection';
 const POINTER_DRAG_THRESHOLD_CSS_PX = 4;
-const POINTER_EXTRUSION_METRES_PER_CSS_PX = 0.02;
 const MIN_EXTRUSION_METRES = 1e-6;
 const SHAPE_SCHEMA = 'sibambo-editor-shape-v1';
+const GROUND_PLANE: AuthoringPlane = Object.freeze({ origin: [0, 0, 0], normal: [0, 1, 0] });
 
-export type AuthoringTool = 'select' | 'rectangle' | 'extrude';
+export type AuthoringTool = 'select' | 'rectangle' | 'line' | 'extrude';
 export type AuthoringToolControllerOptions = {
-	viewport: Pick<PreparedSceneViewport, 'rayFromScreen' | 'setDomainOverlay'>;
+	viewport: Pick<PreparedSceneViewport, 'rayFromScreen' | 'projectWorldToScreen' | 'worldUnitsPerPixelAt' | 'setDomainOverlay'>;
 	getCheckpoint: () => AuthoringCheckpoint | null;
 	submitCommand: (command: AuthoringCommand) => Promise<AuthoringResult>;
 	onSelectionChange: (entityId: string | null) => void;
+	onInferenceChange?: (label: string) => void;
 	onError: (message: string) => void;
 };
 
@@ -43,6 +53,17 @@ type PointerGesture = {
 
 type EntityHit = { entityId: string; faceId: string; distance: number };
 type ParsedDistance = { value: number } | { error: string };
+type RectangleGesture = Readonly<{
+	first: AuthoringPoint;
+	plane: AuthoringPlane;
+	basis: readonly [AuthoringPoint, AuthoringPoint];
+}>;
+type PushPullGesture = Readonly<{
+	faceId: string;
+	checkpoint: AuthoringCheckpoint;
+	drag: AxisDragCapture;
+	distance: number | null;
+}>;
 
 function codeUnitCompare(left: string, right: string) { return left < right ? -1 : left > right ? 1 : 0; }
 
@@ -53,11 +74,11 @@ function pointAt(mesh: BomcMesh, vertexIndex: number): [number, number, number] 
 function parseDistance(text: string): ParsedDistance {
 	const valueText = text.trim();
 	if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(valueText)) {
-		return { error: 'Enter a complete finite extrusion distance in metres.' };
+		return { error: 'Enter a complete finite Push/Pull distance in metres.' };
 	}
 	const value = Number(valueText);
-	if (!Number.isFinite(value)) return { error: 'Extrusion distance must be finite.' };
-	if (Math.abs(value) < MIN_EXTRUSION_METRES) return { error: 'Extrusion distance must be at least 0.000001 m from zero.' };
+	if (!Number.isFinite(value)) return { error: 'Push/Pull distance must be finite.' };
+	if (Math.abs(value) < MIN_EXTRUSION_METRES) return { error: 'Push/Pull distance must be at least 0.000001 m from zero.' };
 	return { value };
 }
 
@@ -102,7 +123,7 @@ function addFaceMesh(group: Group, mesh: BomcMesh, face: Face, entityId: string,
 		geometry.setIndex(indices);
 		geometry.computeBoundingSphere();
 		material = new MeshStandardMaterial({
-			color: '#9b1c31',
+			color: '#e2e2e2',
 			side: DoubleSide,
 			transparent: true,
 			opacity,
@@ -119,7 +140,7 @@ function addFaceMesh(group: Group, mesh: BomcMesh, face: Face, entityId: string,
 	}
 }
 
-function addBoundaryLines(group: Group, positions: readonly number[], color: '#125dff' | '#9b1c31', opacity: number, selected: boolean): void {
+function addBoundaryLines(group: Group, positions: readonly number[], color: string, opacity: number, selected: boolean): void {
 	if (positions.length === 0) return;
 	const geometry = new BufferGeometry();
 	let material: LineBasicMaterial | null = null;
@@ -177,26 +198,12 @@ function makeSelectionGroup(snapshot: BomcSnapshot, entityId: string): Group | n
 	}
 }
 
-function makeRectanglePreview(first: readonly [number, number, number], opposite: readonly [number, number, number]): Group {
-	const xmin = Math.min(first[0], opposite[0]);
-	const xmax = Math.max(first[0], opposite[0]);
-	const zmin = Math.min(first[2], opposite[2]);
-	const zmax = Math.max(first[2], opposite[2]);
+function makeFaceGroup(mesh: BomcMesh, faces: readonly Face[], name: string, opacity = 0.34): Group {
 	const group = new Group();
-	group.name = PREVIEW_OVERLAY_KEY;
-	const mesh: BomcMesh = {
-		id: 'preview:rectangle', definitionId: 'preview:root',
-		positions: [xmin, 0, zmin, xmin, 0, zmax, xmax, 0, zmax, xmax, 0, zmin],
-		faces: []
-	};
-	const face: Face = {
-		id: 'preview:rectangle:face', outer: [0, 1, 2, 3], holes: [], triangles: [0, 1, 2, 0, 2, 3],
-		normal: [0, 1, 0], frontMaterialId: null, backMaterialId: null,
-		hidden: false, surfaceCode: 0, roleCode: 0, label: null
-	};
+	group.name = name;
 	try {
-		addFaceMesh(group, mesh, face, 'preview:rectangle', 0.35);
-		addBoundaryLines(group, uniqueBoundaryPositions(mesh, [face]), '#9b1c31', 0.35, false);
+		for (const face of faces) addFaceMesh(group, mesh, face, face.id, opacity);
+		addBoundaryLines(group, uniqueBoundaryPositions(mesh, faces), '#125dff', Math.min(1, opacity + 0.3), false);
 		return group;
 	} catch (error) {
 		disposeUntransferred(group);
@@ -204,18 +211,46 @@ function makeRectanglePreview(first: readonly [number, number, number], opposite
 	}
 }
 
-function makeExtrusionPreview(graph: BomcGraph, entityId: string, distance: number): Group {
-	const edit = buildExtrusionEdit(graph, entityId, distance);
-	const replacement = edit.forward.find((item) => item.type === 'put-mesh');
-	if (!replacement || replacement.type !== 'put-mesh') throw new Error('Extrusion preview did not produce a root mesh replacement.');
-	const previewMesh = replacement.value;
-	const previewFaces = previewMesh.faces.filter((face) => face.id === entityId || face.id.startsWith(`${entityId}:`));
-	if (previewFaces.length !== 6) throw new Error('Extrusion preview did not produce the six canonical prism faces.');
+function faceFromPoints(points: readonly AuthoringPoint[], normal: AuthoringPoint): { mesh: BomcMesh; face: Face } {
+	const prepared = preparePolygon(points, normal, { canonicalizeStart: false });
+	const positions = prepared.points.flatMap((point) => [...point]);
+	const ring = prepared.points.map((_point, index) => index);
+	return {
+		mesh: { id: 'preview:mesh', definitionId: 'preview:root', positions, faces: [] },
+		face: {
+			id: 'preview:face', outer: ring, holes: [], triangles: prepared.triangles,
+			normal: prepared.normal, frontMaterialId: null, backMaterialId: null,
+			hidden: false, surfaceCode: 0, roleCode: 0, label: null
+		}
+	};
+}
+
+function addInferenceMarker(group: Group, viewport: AuthoringToolControllerOptions['viewport'], inference: AuthoringInference | null): void {
+	if (!inference) return;
+	const scale = viewport.worldUnitsPerPixelAt(inference.point);
+	if (scale === null || !Number.isFinite(scale) || scale <= 0) return;
+	const radius = scale * 6;
+	const [x, y, z] = inference.point;
+	addBoundaryLines(group, [
+		x - radius, y, z, x + radius, y, z,
+		x, y - radius, z, x, y + radius, z,
+		x, y, z - radius, x, y, z + radius
+	], '#125dff', 1, true);
+}
+
+function makeRectanglePreview(
+	viewport: AuthoringToolControllerOptions['viewport'],
+	points: readonly AuthoringPoint[],
+	normal: AuthoringPoint,
+	inference: AuthoringInference | null
+): Group {
+	const { mesh, face } = faceFromPoints(points, normal);
 	const group = new Group();
 	group.name = PREVIEW_OVERLAY_KEY;
 	try {
-		for (const face of previewFaces) addFaceMesh(group, previewMesh, face, entityId, 0.35);
-		addBoundaryLines(group, uniqueBoundaryPositions(previewMesh, previewFaces), '#9b1c31', 0.35, false);
+		addFaceMesh(group, mesh, face, 'preview:rectangle', 0.30);
+		addBoundaryLines(group, uniqueBoundaryPositions(mesh, [face]), '#125dff', 0.72, false);
+		addInferenceMarker(group, viewport, inference);
 		return group;
 	} catch (error) {
 		disposeUntransferred(group);
@@ -223,63 +258,88 @@ function makeExtrusionPreview(graph: BomcGraph, entityId: string, distance: numb
 	}
 }
 
-function groundIntersection(ray: Ray): [number, number, number] | null {
-	if (ray.direction.y === 0) return null;
-	const distance = -ray.origin.y / ray.direction.y;
-	if (!Number.isFinite(distance) || distance < 0) return null;
-	const point = ray.at(distance, new Vector3());
-	if (!point.toArray().every(Number.isFinite)) return null;
-	return [point.x, 0, point.z];
+function makeInferenceOnlyPreview(viewport: AuthoringToolControllerOptions['viewport'], inference: AuthoringInference | null): Group | null {
+	if (!inference) return null;
+	const group = new Group();
+	group.name = PREVIEW_OVERLAY_KEY;
+	try { addInferenceMarker(group, viewport, inference); return group; }
+	catch (error) { disposeUntransferred(group); throw error; }
 }
 
-function nearestEntityHit(graph: BomcGraph, ray: Ray): EntityHit | null {
-	const subset = validateEditableSubset(graph);
-	if (!subset.editable) return null;
-	const mesh = graph.meshes[0];
-	if (!mesh) return null;
-	const validEntityIds = new Set(subset.entities.map((entity) => entity.entityId));
-	let best: EntityHit | null = null;
-	for (const face of mesh.faces) {
-		const entityId = parseEntityId(face);
-		if (!entityId || !validEntityIds.has(entityId)) continue;
-		for (let index = 0; index < face.triangles.length; index += 3) {
-			const a = new Vector3(...pointAt(mesh, face.triangles[index]!));
-			const b = new Vector3(...pointAt(mesh, face.triangles[index + 1]!));
-			const c = new Vector3(...pointAt(mesh, face.triangles[index + 2]!));
-			const hit = ray.intersectTriangle(a, b, c, false, new Vector3());
-			if (!hit) continue;
-			const distance = hit.distanceTo(ray.origin);
-			const alongRay = hit.clone().sub(ray.origin).dot(ray.direction);
-			if (!Number.isFinite(distance) || alongRay < 0) continue;
-			if (!best || distance < best.distance - 1e-9
-				|| (Math.abs(distance - best.distance) <= 1e-9 && codeUnitCompare(face.id, best.faceId) < 0)) {
-				best = { entityId, faceId: face.id, distance };
+function makeLinePreview(
+	viewport: AuthoringToolControllerOptions['viewport'],
+	points: readonly AuthoringPoint[],
+	inference: AuthoringInference | null
+): Group | null {
+	if (points.length === 0 && !inference) return null;
+	const group = new Group();
+	group.name = PREVIEW_OVERLAY_KEY;
+	try {
+		const segments: number[] = [];
+		for (let index = 1; index < points.length; index += 1) segments.push(...points[index - 1]!, ...points[index]!);
+		if (points.length > 0 && inference) segments.push(...points.at(-1)!, ...inference.point);
+		addBoundaryLines(group, segments, '#125dff', 0.9, false);
+		addInferenceMarker(group, viewport, inference);
+		if (inference?.kind === 'closure' && points.length >= 3) {
+			try {
+				const prepared = preparePolygon(points, inference.plane.normal, { canonicalizeStart: false });
+				const { mesh, face } = faceFromPoints(prepared.points, prepared.normal);
+				addFaceMesh(group, mesh, face, 'preview:line-loop', 0.20);
+			} catch (error) {
+				if (!(error instanceof AuthoringPolygonError)) throw error;
 			}
 		}
+		return group;
+	} catch (error) {
+		disposeUntransferred(group);
+		throw error;
 	}
-	return best;
+}
+
+function makePushPullPreview(checkpoint: AuthoringCheckpoint, faceId: string, distance: number): Group {
+	const edit = buildPushPullFaceEdit(checkpoint.snapshot.graph, faceId, distance, checkpoint.sequence);
+	const replacement = edit.forward.find((item) => item.type === 'put-mesh');
+	if (!replacement || replacement.type !== 'put-mesh') throw new Error('Push/Pull preview did not produce a root mesh replacement.');
+	const operationId = `${checkpoint.snapshot.graph.documentId}:op:${checkpoint.sequence}`;
+	const faces = replacement.value.faces.filter((face) => face.id === faceId || face.label?.includes(operationId));
+	if (faces.length === 0) throw new Error('Push/Pull preview contains no changed faces.');
+	return makeFaceGroup(replacement.value, faces, PREVIEW_OVERLAY_KEY, 0.34);
+}
+
+function nearestEntityHit(graph: BomcGraph, clientX: number, clientY: number, viewport: AuthoringToolControllerOptions['viewport']): EntityHit | null {
+	const ray = viewport.rayFromScreen(clientX, clientY);
+	if (!ray) return null;
+	const hit = nearestAuthoringFaceHit(graph, ray);
+	if (!hit) return null;
+	const entityId = parseEntityId(hit.face) ?? hit.face.id;
+	return { entityId, faceId: hit.face.id, distance: hit.distance };
 }
 
 function parseEntityId(face: Face): string | null {
 	if (face.label === null) return null;
 	try {
 		const label: unknown = JSON.parse(face.label);
-		return Array.isArray(label) && label[0] === SHAPE_SCHEMA && typeof label[2] === 'string' ? label[2] : null;
+		return Array.isArray(label) && label[0] === SHAPE_SCHEMA && typeof label[2] === 'string' ? label[2] : face.id;
 	} catch { return null; }
 }
 
-/** Pointer and transient overlay owner for the supported canonical authoring tools. */
+/** Pointer, inference and transient overlay owner for canonical authoring tools. */
 export class AuthoringToolController {
 	private readonly options: AuthoringToolControllerOptions;
 	private checkpoint: AuthoringCheckpoint | null;
 	private activeTool: AuthoringTool = 'select';
 	private pointer: PointerGesture | null = null;
-	private rectangleFirst: [number, number, number] | null = null;
-	private extrusionStartY: number | null = null;
+	private rectangle: RectangleGesture | null = null;
+	private linePoints: AuthoringPoint[] = [];
+	private linePlane: AuthoringPlane | null = null;
+	private pushPull: PushPullGesture | null = null;
 	private extrusionText = '';
 	private selectedEntity: string | null = null;
 	private commandPending = false;
 	private disposed = false;
+	private inference = '';
+	private previewFrame: number | null = null;
+	private pendingPreview: { x: number; y: number } | null = null;
 
 	constructor(options: AuthoringToolControllerOptions) {
 		this.options = options;
@@ -288,6 +348,7 @@ export class AuthoringToolController {
 
 	get tool(): AuthoringTool { return this.activeTool; }
 	get selectedEntityId(): string | null { return this.selectedEntity; }
+	get inferenceLabel(): string { return this.inference; }
 
 	setTool(tool: AuthoringTool): void {
 		if (this.disposed || tool === this.activeTool) return;
@@ -297,7 +358,11 @@ export class AuthoringToolController {
 	}
 
 	handlePointerDown(event: PointerEvent, cameraHandled: boolean): void {
-		if (this.disposed || this.commandPending || cameraHandled || event.button !== 0 || event.isPrimary === false || this.pointer) return;
+		if (this.disposed || this.commandPending || event.button !== 0 || event.isPrimary === false || this.pointer) return;
+		if (cameraHandled) {
+			this.cancelForCameraMove();
+			return;
+		}
 		this.pointer = {
 			pointerId: event.pointerId,
 			startX: event.clientX,
@@ -311,22 +376,15 @@ export class AuthoringToolController {
 
 	handlePointerMove(event: PointerEvent, cameraHandled: boolean): void {
 		if (this.disposed || this.commandPending) return;
-		if (this.pointer && event.pointerId === this.pointer.pointerId) {
-			this.pointer.moved ||= Math.hypot(event.clientX - this.pointer.startX, event.clientY - this.pointer.startY) > POINTER_DRAG_THRESHOLD_CSS_PX;
-			this.pointer.cameraHandled ||= cameraHandled;
-			if (this.activeTool === 'extrude' && this.extrusionStartY !== null && !cameraHandled) {
-				this.updateExtrusionPreview((this.extrusionStartY - event.clientY) * POINTER_EXTRUSION_METRES_PER_CSS_PX);
-			}
+		if (cameraHandled) {
+			if (this.pointer && event.pointerId === this.pointer.pointerId) this.pointer.cameraHandled = true;
+			this.cancelForCameraMove();
 			return;
 		}
-		if (cameraHandled) return;
-		if (this.activeTool === 'rectangle' && this.rectangleFirst) {
-			const point = this.groundPoint(event.clientX, event.clientY);
-			if (point) this.updateRectanglePreview(this.rectangleFirst, point);
+		if (this.pointer && event.pointerId === this.pointer.pointerId) {
+			this.pointer.moved ||= Math.hypot(event.clientX - this.pointer.startX, event.clientY - this.pointer.startY) > POINTER_DRAG_THRESHOLD_CSS_PX;
 		}
-		if (this.activeTool === 'extrude' && this.extrusionStartY !== null) {
-			this.updateExtrusionPreview((this.extrusionStartY - event.clientY) * POINTER_EXTRUSION_METRES_PER_CSS_PX);
-		}
+		this.queuePreview(event.clientX, event.clientY);
 	}
 
 	handlePointerUp(event: PointerEvent, cameraHandled: boolean): void {
@@ -335,29 +393,37 @@ export class AuthoringToolController {
 		this.pointer = null;
 		const current = this.options.getCheckpoint();
 		if (this.disposed || this.commandPending || pointer.cameraHandled || cameraHandled || pointer.moved || pointer.checkpoint !== current) return;
-		if (pointer.tool === 'select') {
-			this.selectAt(event.clientX, event.clientY, current);
-			return;
-		}
-		if (pointer.tool === 'rectangle') {
-			this.rectangleClick(event.clientX, event.clientY, current);
-			return;
-		}
-		if (pointer.tool === 'extrude') {
-			this.extrusionClick(event.clientY, current);
-		}
+		if (pointer.tool === 'select') this.selectAt(event.clientX, event.clientY, current);
+		else if (pointer.tool === 'rectangle') this.rectangleClick(event.clientX, event.clientY, current);
+		else if (pointer.tool === 'line') this.lineClick(event.clientX, event.clientY, current);
+		else this.pushPullClick(event.clientX, event.clientY, current);
 	}
 
 	handlePointerCancel(): void {
 		this.pointer = null;
-		this.cancelPreview();
+		if (this.activeTool !== 'line') this.cancelPreview();
+	}
+
+	/** Notify transient tools after a camera change that did not travel through pointer camera handling. */
+	handleCameraChange(): void {
+		if (this.disposed) return;
+		this.pointer = null;
+		this.cancelQueuedPreview();
+		this.cancelForCameraMove();
 	}
 
 	setCheckpoint(checkpoint: AuthoringCheckpoint | null): void {
 		if (this.disposed || checkpoint === this.checkpoint) return;
 		this.checkpoint = checkpoint;
 		this.pointer = null;
-		this.cancelPreview();
+		this.rectangle = null;
+		this.linePoints = [];
+		this.linePlane = null;
+		this.pushPull = null;
+		this.extrusionText = '';
+		this.cancelQueuedPreview();
+		this.clearPreviewOverlay();
+		this.setInference(null);
 		if (this.selectedEntity && (!checkpoint || !hasEntityId(checkpoint.snapshot.graph, this.selectedEntity))) {
 			this.setSelection(null, checkpoint);
 		} else if (this.selectedEntity && checkpoint) {
@@ -368,16 +434,12 @@ export class AuthoringToolController {
 	setExtrusionDistance(text: string): void {
 		this.extrusionText = text;
 		const parsed = parseDistance(text);
-		if ('error' in parsed) {
+		if ('error' in parsed || !this.pushPull) {
+			if (!this.pushPull) return;
 			this.clearPreviewOverlay();
 			return;
 		}
-		const checkpoint = this.options.getCheckpoint();
-		if (!checkpoint || !this.isSelectedFlatRectangle(checkpoint)) {
-			this.clearPreviewOverlay();
-			return;
-		}
-		this.updateExtrusionPreview(parsed.value);
+		this.updatePushPullPreview(parsed.value);
 	}
 
 	commitExtrusionDistance(): Promise<AuthoringResult | null> {
@@ -387,112 +449,295 @@ export class AuthoringToolController {
 			return Promise.resolve(null);
 		}
 		const checkpoint = this.options.getCheckpoint();
-		if (!checkpoint || !this.selectedEntity || !this.isSelectedFlatRectangle(checkpoint)) {
-			this.options.onError('Select an unextruded authored rectangle before using Push/Pull.');
+		if (!checkpoint || !this.pushPull || checkpoint !== this.pushPull.checkpoint) {
+			this.options.onError('Hover and click an authored face before entering a Push/Pull distance.');
 			return Promise.resolve(null);
 		}
-		const entityId = this.selectedEntity;
-		this.cancelPreview();
-		return this.submit({ kind: 'EXTRUDE_RECTANGLE', entityId, distance: parsed.value }, checkpoint);
+		const faceId = this.pushPull.faceId;
+		this.cancelPushPull();
+		return this.submit({ kind: 'PUSH_PULL_FACE', faceId, distance: parsed.value }, checkpoint);
 	}
 
 	cancelPreview(): void {
-		this.rectangleFirst = null;
-		this.extrusionStartY = null;
+		this.rectangle = null;
+		this.linePoints = [];
+		this.linePlane = null;
+		this.pushPull = null;
 		this.extrusionText = '';
 		this.clearPreviewOverlay();
+		this.setInference(null);
 	}
 
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.pointer = null;
-		this.rectangleFirst = null;
-		this.extrusionStartY = null;
+		this.rectangle = null;
+		this.linePoints = [];
+		this.linePlane = null;
+		this.pushPull = null;
 		this.extrusionText = '';
+		this.cancelQueuedPreview();
 		this.options.viewport.setDomainOverlay(PREVIEW_OVERLAY_KEY, null);
 		this.options.viewport.setDomainOverlay(SELECTION_OVERLAY_KEY, null);
 		this.selectedEntity = null;
 		this.checkpoint = null;
+		this.setInference(null);
+	}
+
+	private cancelForCameraMove(): void {
+		if (this.pushPull) this.cancelPushPull();
+		if (this.rectangle) {
+			this.rectangle = null;
+			this.clearPreviewOverlay();
+			this.setInference(null);
+		}
 	}
 
 	private selectAt(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
 		if (!checkpoint) return;
-		const ray = this.screenRay(clientX, clientY);
-		const hit = ray ? nearestEntityHit(checkpoint.snapshot.graph, ray) : null;
+		const hit = nearestEntityHit(checkpoint.snapshot.graph, clientX, clientY, this.options.viewport);
 		this.setSelection(hit?.entityId ?? null, checkpoint);
+	}
+
+	private rectangleInference(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint): AuthoringInference | null {
+		if (!this.rectangle) {
+			return resolveAuthoringInference({
+				graph: checkpoint.snapshot.graph,
+				viewport: this.options.viewport,
+				clientX,
+				clientY,
+				activePlane: GROUND_PLANE
+			});
+		}
+		const preferred = resolveAuthoringInference({
+			graph: checkpoint.snapshot.graph,
+			viewport: this.options.viewport,
+			clientX,
+			clientY,
+			anchor: this.rectangle.first,
+			restrictToPlane: this.rectangle.plane
+		});
+		return preferred ?? resolveAuthoringInference({
+			graph: checkpoint.snapshot.graph,
+			viewport: this.options.viewport,
+			clientX,
+			clientY,
+			activePlane: this.rectangle.plane,
+			anchor: this.rectangle.first,
+			restrictToPlane: this.rectangle.plane
+		});
+	}
+
+	private previewRectangleAt(clientX: number, clientY: number): void {
+		const checkpoint = this.options.getCheckpoint();
+		if (!checkpoint) return;
+		const inference = this.rectangleInference(clientX, clientY, checkpoint);
+		this.setInference(inference);
+		if (!this.rectangle) {
+			try { this.publishPreview(makeInferenceOnlyPreview(this.options.viewport, inference)); }
+			catch { this.clearPreviewOverlay(); }
+			return;
+		}
+		if (!inference) { this.clearPreviewOverlay(); return; }
+		try {
+			const points = rectangleCorners(this.rectangle.first, inference.point, this.rectangle.basis);
+			this.publishPreview(makeRectanglePreview(this.options.viewport, points, this.rectangle.plane.normal, inference));
+		} catch { this.clearPreviewOverlay(); }
 	}
 
 	private rectangleClick(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
 		if (!checkpoint) return;
-		const point = this.groundPoint(clientX, clientY);
-		if (!point) return;
-		if (!this.rectangleFirst) {
-			this.rectangleFirst = point;
+		const inference = this.rectangleInference(clientX, clientY, checkpoint);
+		if (!inference) return;
+		if (!this.rectangle) {
+			this.rectangle = Object.freeze({
+				first: inference.point,
+				plane: inference.plane,
+				basis: constructionBasis(inference.plane.normal, inference.point, this.options.viewport)
+			});
+			this.previewRectangleAt(clientX, clientY);
 			return;
 		}
-		const first = this.rectangleFirst;
-		try { validateRectangleInput(first, point); }
+		const rectangle = this.rectangle;
+		const points = rectangleCorners(rectangle.first, inference.point, rectangle.basis);
+		try { preparePolygon(points, rectangle.plane.normal); }
 		catch (error) {
-			this.cancelPreview();
 			this.options.onError(error instanceof Error ? error.message : 'Rectangle dimensions are invalid.');
 			return;
 		}
-		this.cancelPreview();
-		void this.submit({ kind: 'CREATE_RECTANGLE', first, opposite: point }, checkpoint);
+		this.rectangle = null;
+		this.clearPreviewOverlay();
+		this.setInference(null);
+		void this.submit({ kind: 'CREATE_RECTANGLE', points, normal: rectangle.plane.normal }, checkpoint);
 	}
 
-	private extrusionClick(clientY: number, checkpoint: AuthoringCheckpoint | null): void {
-		if (!checkpoint || !this.isSelectedFlatRectangle(checkpoint) || !this.selectedEntity) {
-			this.options.onError('Select an unextruded authored rectangle before using Push/Pull.');
-			return;
+	private lineInference(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint): AuthoringInference | null {
+		if (this.linePoints.length === 0) {
+			return resolveAuthoringInference({
+				graph: checkpoint.snapshot.graph,
+				viewport: this.options.viewport,
+				clientX,
+				clientY,
+				activePlane: GROUND_PLANE
+			});
 		}
-		if (this.extrusionStartY === null) {
-			this.extrusionStartY = clientY;
-			return;
-		}
-		const distance = (this.extrusionStartY - clientY) * POINTER_EXTRUSION_METRES_PER_CSS_PX;
-		if (!Number.isFinite(distance) || Math.abs(distance) < MIN_EXTRUSION_METRES) {
-			this.cancelPreview();
-			this.options.onError('Extrusion distance must be at least 0.000001 m from zero.');
-			return;
-		}
-		const entityId = this.selectedEntity;
-		this.cancelPreview();
-		void this.submit({ kind: 'EXTRUDE_RECTANGLE', entityId, distance }, checkpoint);
+		const anchor = this.linePoints.at(-1)!;
+		const closurePoint = this.linePoints.length >= 3 ? this.linePoints[0]! : null;
+		const preferred = resolveAuthoringInference({
+			graph: checkpoint.snapshot.graph,
+			viewport: this.options.viewport,
+			clientX,
+			clientY,
+			anchor,
+			closurePoint
+		});
+		return preferred ?? resolveAuthoringInference({
+			graph: checkpoint.snapshot.graph,
+			viewport: this.options.viewport,
+			clientX,
+			clientY,
+			activePlane: this.linePlane,
+			anchor,
+			closurePoint
+		});
 	}
 
-	private screenRay(clientX: number, clientY: number): Ray | null {
-		return this.options.viewport.rayFromScreen(clientX, clientY);
-	}
-
-	private groundPoint(clientX: number, clientY: number): [number, number, number] | null {
-		const ray = this.screenRay(clientX, clientY);
-		return ray ? groundIntersection(ray) : null;
-	}
-
-	private updateRectanglePreview(first: readonly [number, number, number], opposite: readonly [number, number, number]): void {
-		try { this.publishPreview(makeRectanglePreview(first, opposite)); }
-		catch { this.clearPreviewOverlay(); }
-	}
-
-	private updateExtrusionPreview(distance: number): void {
-		if (!Number.isFinite(distance) || Math.abs(distance) < MIN_EXTRUSION_METRES) {
-			this.clearPreviewOverlay();
-			return;
-		}
+	private previewLineAt(clientX: number, clientY: number): void {
 		const checkpoint = this.options.getCheckpoint();
-		if (!checkpoint || !this.selectedEntity || !this.isSelectedFlatRectangle(checkpoint)) {
-			this.clearPreviewOverlay();
-			return;
-		}
-		try { this.publishPreview(makeExtrusionPreview(checkpoint.snapshot.graph, this.selectedEntity, distance)); }
+		if (!checkpoint) return;
+		const inference = this.lineInference(clientX, clientY, checkpoint);
+		this.setInference(inference);
+		try { this.publishPreview(makeLinePreview(this.options.viewport, this.linePoints, inference)); }
 		catch { this.clearPreviewOverlay(); }
 	}
 
-	private publishPreview(group: Group): void {
+	private lineClick(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
+		if (!checkpoint) return;
+		const inference = this.lineInference(clientX, clientY, checkpoint);
+		if (!inference) return;
+		if (this.linePoints.length === 0) {
+			this.linePoints = [inference.point];
+			this.linePlane = inference.plane;
+			this.previewLineAt(clientX, clientY);
+			return;
+		}
+		if (inference.kind === 'closure' && this.linePoints.length >= 3 && this.linePlane) {
+			let prepared;
+			try { prepared = preparePolygon(this.linePoints); }
+			catch (error) {
+				this.options.onError(error instanceof Error ? error.message : 'Line loop is invalid.');
+				return;
+			}
+			const points = [...prepared.points] as AuthoringPoint[];
+			const normal = prepared.normal as AuthoringPoint;
+			this.linePoints = [];
+			this.linePlane = null;
+			this.clearPreviewOverlay();
+			this.setInference(null);
+			void this.submit({ kind: 'CREATE_FACE_LOOP', points, normal }, checkpoint);
+			return;
+		}
+		const previous = this.linePoints.at(-1)!;
+		if (Math.hypot(inference.point[0] - previous[0], inference.point[1] - previous[1], inference.point[2] - previous[2]) < 1e-6) return;
+		this.linePoints = [...this.linePoints, inference.point];
+		this.linePlane = inference.plane;
+		this.previewLineAt(clientX, clientY);
+	}
+
+	private previewPushPullAt(clientX: number, clientY: number): void {
+		const checkpoint = this.options.getCheckpoint();
+		if (!checkpoint) return;
+		if (this.pushPull) {
+			if (checkpoint !== this.pushPull.checkpoint) { this.cancelPushPull(); return; }
+			const distance = solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY);
+			this.pushPull = Object.freeze({ ...this.pushPull, distance });
+			if (distance === null || Math.abs(distance) < MIN_EXTRUSION_METRES) { this.clearPreviewOverlay(); return; }
+			this.updatePushPullPreview(distance);
+			return;
+		}
+		const ray = this.options.viewport.rayFromScreen(clientX, clientY);
+		const hit = ray ? nearestAuthoringFaceHit(checkpoint.snapshot.graph, ray) : null;
+		this.setInference(hit ? Object.freeze({ point: hit.point, kind: 'face', faceId: hit.face.id, plane: { origin: pointAt(checkpoint.snapshot.graph.meshes[0]!, hit.face.outer[0]!), normal: hit.face.normal }, screenDistancePx: 0 }) : null);
+		if (!hit) { this.clearPreviewOverlay(); return; }
+		try { this.publishPreview(makeFaceGroup(checkpoint.snapshot.graph.meshes[0]!, [hit.face], PREVIEW_OVERLAY_KEY, 0.22)); }
+		catch { this.clearPreviewOverlay(); }
+	}
+
+	private pushPullClick(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
+		if (!checkpoint) return;
+		if (!this.pushPull) {
+			const ray = this.options.viewport.rayFromScreen(clientX, clientY);
+			const hit = ray ? nearestAuthoringFaceHit(checkpoint.snapshot.graph, ray) : null;
+			if (!hit) return;
+			const drag = captureAxisDrag(this.options.viewport, hit.point, hit.face.normal, clientX, clientY);
+			if (!drag) {
+				this.options.onError('Push/Pull could not establish a stable face-normal drag from this camera view.');
+				return;
+			}
+			this.pushPull = Object.freeze({ faceId: hit.face.id, checkpoint, drag, distance: null });
+			this.extrusionText = '';
+			this.previewPushPullAt(clientX, clientY);
+			return;
+		}
+		if (checkpoint !== this.pushPull.checkpoint) { this.cancelPushPull(); return; }
+		const distance = solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY) ?? this.pushPull.distance;
+		if (distance === null || !Number.isFinite(distance) || Math.abs(distance) < MIN_EXTRUSION_METRES) {
+			this.options.onError('Move along the face normal by at least 0.000001 m before committing Push/Pull.');
+			return;
+		}
+		const faceId = this.pushPull.faceId;
+		this.cancelPushPull();
+		void this.submit({ kind: 'PUSH_PULL_FACE', faceId, distance }, checkpoint);
+	}
+
+	private updatePushPullPreview(distance: number): void {
+		const checkpoint = this.options.getCheckpoint();
+		if (!checkpoint || !this.pushPull || checkpoint !== this.pushPull.checkpoint) return;
+		try { this.publishPreview(makePushPullPreview(checkpoint, this.pushPull.faceId, distance)); }
+		catch (error) {
+			this.clearPreviewOverlay();
+			this.options.onError(error instanceof Error ? error.message : 'Push/Pull preview is invalid.');
+		}
+	}
+
+	private cancelPushPull(): void {
+		this.pushPull = null;
+		this.extrusionText = '';
+		this.clearPreviewOverlay();
+		this.setInference(null);
+	}
+
+	private queuePreview(clientX: number, clientY: number): void {
+		this.pendingPreview = { x: clientX, y: clientY };
+		const raf = globalThis.requestAnimationFrame;
+		if (typeof raf !== 'function') { this.flushPreview(); return; }
+		if (this.previewFrame !== null) return;
+		this.previewFrame = raf(() => {
+			this.previewFrame = null;
+			this.flushPreview();
+		});
+	}
+
+	private flushPreview(): void {
+		const pending = this.pendingPreview;
+		this.pendingPreview = null;
+		if (!pending || this.disposed || this.commandPending) return;
+		if (this.activeTool === 'rectangle') this.previewRectangleAt(pending.x, pending.y);
+		else if (this.activeTool === 'line') this.previewLineAt(pending.x, pending.y);
+		else if (this.activeTool === 'extrude') this.previewPushPullAt(pending.x, pending.y);
+	}
+
+	private cancelQueuedPreview(): void {
+		this.pendingPreview = null;
+		if (this.previewFrame === null) return;
+		if (typeof globalThis.cancelAnimationFrame === 'function') globalThis.cancelAnimationFrame(this.previewFrame);
+		this.previewFrame = null;
+	}
+
+	private publishPreview(group: Group | null): void {
 		if (this.disposed) {
-			disposeUntransferred(group);
+			if (group) disposeUntransferred(group);
 			return;
 		}
 		this.options.viewport.setDomainOverlay(PREVIEW_OVERLAY_KEY, group);
@@ -519,8 +764,11 @@ export class AuthoringToolController {
 		}
 	}
 
-	private isSelectedFlatRectangle(checkpoint: AuthoringCheckpoint): boolean {
-		return entityForId(checkpoint.snapshot.graph, this.selectedEntity)?.kind === 'rectangle';
+	private setInference(inference: AuthoringInference | null): void {
+		const next = inferenceLabel(inference);
+		if (next === this.inference) return;
+		this.inference = next;
+		this.options.onInferenceChange?.(next);
 	}
 
 	private async submit(command: AuthoringCommand, checkpoint: AuthoringCheckpoint): Promise<AuthoringResult | null> {

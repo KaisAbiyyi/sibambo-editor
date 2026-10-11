@@ -12,6 +12,9 @@ export type AuthoringPoint = readonly [number, number, number];
 
 export type AuthoringCommand =
 	| { kind: 'CREATE_RECTANGLE'; first: AuthoringPoint; opposite: AuthoringPoint }
+	| { kind: 'CREATE_RECTANGLE'; points: readonly AuthoringPoint[]; normal: AuthoringPoint }
+	| { kind: 'CREATE_FACE_LOOP'; points: readonly AuthoringPoint[]; normal: AuthoringPoint }
+	| { kind: 'PUSH_PULL_FACE'; faceId: string; distance: number }
 	| { kind: 'EXTRUDE_RECTANGLE'; entityId: string; distance: number };
 
 export type AuthoringJournalEntry = {
@@ -190,14 +193,29 @@ export function isPositiveRequestId(value: unknown): value is number {
 
 function isPoint(value: unknown): value is AuthoringPoint {
 	return Array.isArray(value) && value.length === 3
-		&& value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate))
-		&& Object.is(value[1], 0);
+			&& value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate));
+}
+
+function isPointLoop(value: unknown): value is readonly AuthoringPoint[] {
+	return Array.isArray(value) && value.length >= 3 && value.length <= 256 && value.every(isPoint);
 }
 
 export function isAuthoringCommand(value: unknown): value is AuthoringCommand {
 	if (!isRecord(value) || typeof value.kind !== 'string') return false;
 	if (value.kind === 'CREATE_RECTANGLE') {
-		return hasExactKeys(value, ['kind', 'first', 'opposite']) && isPoint(value.first) && isPoint(value.opposite);
+		if (hasExactKeys(value, ['kind', 'first', 'opposite'])) {
+			return isPoint(value.first) && isPoint(value.opposite) && Object.is(value.first[1], 0) && Object.is(value.opposite[1], 0);
+		}
+		return hasExactKeys(value, ['kind', 'points', 'normal']) && Array.isArray(value.points) && value.points.length === 4
+			&& value.points.every(isPoint) && isPoint(value.normal);
+	}
+	if (value.kind === 'CREATE_FACE_LOOP') {
+		return hasExactKeys(value, ['kind', 'points', 'normal']) && isPointLoop(value.points) && isPoint(value.normal);
+	}
+	if (value.kind === 'PUSH_PULL_FACE') {
+		return hasExactKeys(value, ['kind', 'faceId', 'distance'])
+			&& typeof value.faceId === 'string' && value.faceId.length > 0
+			&& typeof value.distance === 'number' && Number.isFinite(value.distance);
 	}
 	if (value.kind === 'EXTRUDE_RECTANGLE') {
 		return hasExactKeys(value, ['kind', 'entityId', 'distance'])

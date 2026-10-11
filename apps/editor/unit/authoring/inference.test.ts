@@ -1,0 +1,188 @@
+import { describe, expect, test } from 'bun:test';
+import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3, type Camera } from 'three';
+import { BomcDocument } from '@sibambo/bomc-document/document';
+import { buildPlanarRectangleEdit } from '../../src/lib/authoring/geometry.js';
+import { resolveAuthoringInference } from '../../src/lib/authoring/inference.js';
+
+const DOCUMENT_ID = '3ed35ead-9640-4e34-b10c-0983190ec99d';
+const WIDTH = 1000;
+const HEIGHT = 1000;
+
+function cameraViewport(camera: Camera) {
+	const raycaster = new Raycaster();
+	camera.updateMatrixWorld(true);
+	return {
+		rayFromScreen(clientX: number, clientY: number) {
+			const ndc = new Vector2(clientX / WIDTH * 2 - 1, -(clientY / HEIGHT) * 2 + 1);
+			raycaster.setFromCamera(ndc, camera);
+			return raycaster.ray.clone();
+		},
+		projectWorldToScreen(point: readonly [number, number, number]) {
+			const cameraSpace = new Vector3(...point).applyMatrix4(camera.matrixWorldInverse);
+			const projected = new Vector3(...point).project(camera);
+			const x = (projected.x + 1) * 0.5 * WIDTH;
+			const y = (1 - projected.y) * 0.5 * HEIGHT;
+			return {
+				x,
+				y,
+				inFront: cameraSpace.z < 0,
+				visible: cameraSpace.z < 0 && projected.z >= -1 && projected.z <= 1 && x >= 0 && x <= WIDTH && y >= 0 && y <= HEIGHT
+			};
+		}
+	};
+}
+
+function topViewport(halfHeight: number) {
+	const camera = new OrthographicCamera(-halfHeight, halfHeight, halfHeight, -halfHeight, 0.1, 100);
+	camera.position.set(0, 10, 0);
+	camera.up.set(0, 0, -1);
+	camera.lookAt(0, 0, 0);
+	camera.updateProjectionMatrix();
+	return cameraViewport(camera);
+}
+
+function perspectiveViewport(position: [number, number, number], up: [number, number, number] = [0, 1, 0]) {
+	const camera = new PerspectiveCamera(50, 1, 0.1, 100);
+	camera.position.set(...position);
+	camera.up.set(...up);
+	camera.lookAt(0, 0, 0);
+	camera.updateProjectionMatrix();
+	return cameraViewport(camera);
+}
+
+function authoredRectangle() {
+	const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Inference' });
+	const id = `${DOCUMENT_ID}:rectangle:1`;
+	document.transact(buildPlanarRectangleEdit(
+		document.snapshot().graph,
+		id,
+		[[-2, 0, -2], [2, 0, -2], [2, 0, 2], [-2, 0, 2]],
+		[0, 1, 0]
+	).forward);
+	return { document, id };
+}
+
+function offsetPerpendicular(
+	viewport: ReturnType<typeof topViewport>,
+	start: readonly [number, number, number],
+	end: readonly [number, number, number],
+	pixels: number
+) {
+	const a = viewport.projectWorldToScreen(start);
+	const b = viewport.projectWorldToScreen(end);
+	const mx = (a.x + b.x) / 2;
+	const my = (a.y + b.y) / 2;
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	const length = Math.hypot(dx, dy);
+	return { x: mx - dy / length * pixels, y: my + dx / length * pixels, midpoint: [0, 0, -2] as const };
+}
+
+describe('authoring inference', () => {
+	test('endpoint wins over the same edge and edge snap returns the exact segment point', () => {
+		const { document } = authoredRectangle();
+		try {
+			const viewport = topViewport(10);
+			const endpoint = viewport.projectWorldToScreen([-2, 0, -2]);
+			const endpointHit = resolveAuthoringInference({
+				graph: document.snapshot().graph,
+				viewport,
+				clientX: endpoint.x + 3,
+				clientY: endpoint.y
+			});
+			expect(endpointHit).toMatchObject({ kind: 'endpoint', point: [-2, 0, -2] });
+
+			const edge = offsetPerpendicular(viewport, [-2, 0, -2], [2, 0, -2], 5);
+			const edgeHit = resolveAuthoringInference({
+				graph: document.snapshot().graph,
+				viewport,
+				clientX: edge.x,
+				clientY: edge.y
+			});
+			expect(edgeHit).toMatchObject({ kind: 'edge', point: edge.midpoint });
+		} finally { document.dispose(); }
+	});
+
+	test('keeps the 10 CSS px edge tolerance stable across zoom while world tolerance changes', () => {
+		const { document } = authoredRectangle();
+		try {
+			for (const halfHeight of [10, 2]) {
+				const viewport = topViewport(halfHeight);
+				const inside = offsetPerpendicular(viewport, [-2, 0, -2], [2, 0, -2], 9);
+				const outside = offsetPerpendicular(viewport, [-2, 0, -2], [2, 0, -2], 11);
+				expect(resolveAuthoringInference({ graph: document.snapshot().graph, viewport, clientX: inside.x, clientY: inside.y })?.kind).toBe('edge');
+				expect(resolveAuthoringInference({ graph: document.snapshot().graph, viewport, clientX: outside.x, clientY: outside.y })?.kind).not.toBe('edge');
+			}
+		} finally { document.dispose(); }
+	});
+
+	test('returns the exact canonical face and plane for an interior hit without mutating the graph', () => {
+		const { document, id } = authoredRectangle();
+		try {
+			const viewport = topViewport(10);
+			const before = JSON.stringify(document.snapshot().graph);
+			const center = viewport.projectWorldToScreen([0, 0, 0]);
+			const hit = resolveAuthoringInference({ graph: document.snapshot().graph, viewport, clientX: center.x, clientY: center.y });
+			expect(hit).toMatchObject({ kind: 'face', faceId: id, plane: { normal: [0, 1, 0] } });
+			expect(hit?.point[0]).toBeCloseTo(0, 12);
+			expect(hit?.point[1]).toBeCloseTo(0, 12);
+			expect(hit?.point[2]).toBeCloseTo(0, 12);
+			expect(JSON.stringify(document.snapshot().graph)).toBe(before);
+		} finally { document.dispose(); }
+	});
+
+	test('top and side cameras choose visible world axes and ignore a projection-degenerate axis', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Axes' });
+		try {
+			const anchor = [0, 0, 0] as const;
+			const top = perspectiveViewport([0, 10, 0], [0, 0, -1]);
+			const topAnchor = top.projectWorldToScreen(anchor);
+			const topX = top.projectWorldToScreen([1, 0, 0]);
+			const topDx = topX.x - topAnchor.x;
+			const topDy = topX.y - topAnchor.y;
+			const topLength = Math.hypot(topDx, topDy);
+			const xHit = resolveAuthoringInference({
+				graph: document.snapshot().graph,
+				viewport: top,
+				anchor,
+				clientX: topAnchor.x + topDx / topLength * 80,
+				clientY: topAnchor.y + topDy / topLength * 80
+			});
+			expect(xHit).toMatchObject({ kind: 'axis', axis: 'x' });
+
+			const side = perspectiveViewport([0, 0, 10]);
+			const sideAnchor = side.projectWorldToScreen(anchor);
+			const sideY = side.projectWorldToScreen([0, 1, 0]);
+			const sideDx = sideY.x - sideAnchor.x;
+			const sideDy = sideY.y - sideAnchor.y;
+			const sideLength = Math.hypot(sideDx, sideDy);
+			const yHit = resolveAuthoringInference({
+				graph: document.snapshot().graph,
+				viewport: side,
+				anchor,
+				clientX: sideAnchor.x + sideDx / sideLength * 80,
+				clientY: sideAnchor.y + sideDy / sideLength * 80
+			});
+			expect(yHit).toMatchObject({ kind: 'axis', axis: 'y' });
+		} finally { document.dispose(); }
+	});
+
+	test('uses deterministic face tie breaks even when incident face array order changes', () => {
+		const { document } = authoredRectangle();
+		try {
+			const graph = document.snapshot().graph;
+			const mesh = graph.meshes[0]!;
+			const original = mesh.faces[0]!;
+			const duplicate = { ...original, id: `${DOCUMENT_ID}:face:2`, label: JSON.stringify(['sibambo-editor-shape-v2', 'line', `${DOCUMENT_ID}:face:2`]) };
+			const viewport = topViewport(10);
+			const target = viewport.projectWorldToScreen([-2, 0, -2]);
+			const forward = { ...graph, meshes: [{ ...mesh, faces: [original, duplicate] }] };
+			const reversed = { ...graph, meshes: [{ ...mesh, faces: [duplicate, original] }] };
+			const first = resolveAuthoringInference({ graph: forward, viewport, clientX: target.x, clientY: target.y });
+			const second = resolveAuthoringInference({ graph: reversed, viewport, clientX: target.x, clientY: target.y });
+			expect(first?.kind).toBe('endpoint');
+			expect(second?.kind).toBe('endpoint');
+			expect(first?.faceId).toBe(second?.faceId);
+		} finally { document.dispose(); }
+	});
+});

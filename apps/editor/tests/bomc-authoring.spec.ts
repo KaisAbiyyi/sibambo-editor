@@ -208,10 +208,12 @@ async function drawRectangle(page: Page, cellX: number, cellY: number, cellWidth
 	const box = await canvas.boundingBox();
 	if (!box) throw new Error('The production viewport canvas has no browser layout box.');
 	const before = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length;
+	const revisionBefore = (await currentCheckpoint(page)).snapshot.revision;
 	await page.getByRole('button', { name: 'Rectangle', exact: true }).click();
 	await page.mouse.click(box.x + box.width * cellX, box.y + box.height * cellY);
 	await page.mouse.click(box.x + box.width * (cellX + cellWidth), box.y + box.height * (cellY + cellHeight));
 	await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length, { timeout: 15_000 }).toBe(before + 1);
+	await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision, { timeout: 15_000 }).toBe(revisionBefore + 1);
 }
 
 async function ensureTopView(page: Page) {
@@ -232,9 +234,11 @@ function rectangleEntityId(graph: BomcGraph, sequence: number) {
 	const entityId = `${graph.documentId}:rectangle:${sequence}`;
 	const mesh = graph.meshes[0];
 	if (!mesh?.faces.some((face) => {
+		if (face.id === entityId) return true;
 		try {
 			const label = JSON.parse(face.label ?? 'null');
-			return label[0] === 'sibambo-editor-shape-v1' && label[1] === 'rectangle' && label[2] === entityId;
+			return (label[0] === 'sibambo-editor-shape-v1' || label[0] === 'sibambo-editor-shape-v2')
+				&& label[1] === 'rectangle' && label[2] === entityId;
 		} catch { return false; }
 	})) throw new Error(`Canonical graph does not contain expected authored rectangle ${entityId}.`);
 	return entityId;
@@ -246,7 +250,8 @@ function authoredRectangleEntityIds(graph: BomcGraph): string[] {
 		for (const face of mesh.faces) {
 			try {
 				const label = JSON.parse(face.label ?? 'null');
-				if (label[0] === 'sibambo-editor-shape-v1' && label[1] === 'rectangle' && typeof label[2] === 'string') ids.add(label[2]);
+				if ((label[0] === 'sibambo-editor-shape-v1' || label[0] === 'sibambo-editor-shape-v2')
+					&& label[1] === 'rectangle' && typeof label[2] === 'string') ids.add(label[2]);
 			} catch { /* non-authoring labels are outside this helper */ }
 		}
 	}
@@ -257,9 +262,11 @@ async function selectProjectedRectangle(page: Page, graph: BomcGraph, entityId: 
 	const mesh = graph.meshes[0];
 	if (!mesh) throw new Error('The actual reopened canonical graph has no root mesh.');
 	const face = mesh.faces.find((candidate) => {
+		if (candidate.id === entityId) return true;
 		try {
 			const label = JSON.parse(candidate.label ?? 'null');
-			return label[0] === 'sibambo-editor-shape-v1' && label[1] === 'rectangle' && label[2] === entityId;
+			return (label[0] === 'sibambo-editor-shape-v1' || label[0] === 'sibambo-editor-shape-v2')
+				&& label[1] === 'rectangle' && label[2] === entityId;
 		} catch { return false; }
 	});
 	if (!face || face.outer.length < 3) throw new Error(`The actual reopened canonical graph has no rectangle face for ${entityId}.`);
@@ -286,6 +293,96 @@ async function selectProjectedRectangle(page: Page, graph: BomcGraph, entityId: 
 	}
 	await page.getByRole('button', { name: 'Select', exact: true }).click();
 	await page.mouse.click(box.x + (projected.x + 1) * box.width / 2, box.y + (1 - projected.y) * box.height / 2);
+}
+
+async function clickProjectedFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'iso' = 'top') {
+	const mesh = graph.meshes[0];
+	const face = mesh?.faces.find((candidate) => candidate.id === faceId);
+	if (!mesh || !face || face.outer.length < 3) throw new Error(`Canonical graph has no projected face ${faceId}.`);
+	const center = [0, 1, 2].map((axis) => face.outer.reduce((sum, vertex) => sum + mesh.positions[vertex * 3 + axis]!, 0) / face.outer.length) as [number, number, number];
+	const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+	for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+		const [x, y, z] = mesh.positions.slice(offset, offset + 3);
+		bounds.min.x = Math.min(bounds.min.x, x!); bounds.max.x = Math.max(bounds.max.x, x!);
+		bounds.min.y = Math.min(bounds.min.y, y!); bounds.max.y = Math.max(bounds.max.y, y!);
+		bounds.min.z = Math.min(bounds.min.z, z!); bounds.max.z = Math.max(bounds.max.z, z!);
+	}
+	const box = await page.locator('.viewport canvas').boundingBox();
+	if (!box) throw new Error('The production viewport canvas has no browser layout box.');
+	const pose = cameraPresetPose(bounds, view);
+	const camera = new PerspectiveCamera(SIBAMBO_CAMERA_DEFAULTS.fov, box.width / box.height, SIBAMBO_CAMERA_DEFAULTS.near, SIBAMBO_CAMERA_DEFAULTS.far);
+	camera.position.copy(pose.position);
+	camera.up.copy(uprightCameraUp(pose));
+	camera.lookAt(pose.target);
+	camera.updateProjectionMatrix();
+	camera.updateMatrixWorld(true);
+	const projected = new Vector3(...center).project(camera);
+	await page.mouse.click(box.x + (projected.x + 1) * box.width / 2, box.y + (1 - projected.y) * box.height / 2);
+}
+
+function topFaceId(graph: BomcGraph): string {
+	const mesh = graph.meshes[0];
+	if (!mesh) throw new Error('Canonical graph has no mesh.');
+	const candidates = mesh.faces.filter((face) => face.normal[1] > 0.9).map((face) => ({
+		id: face.id,
+		y: face.outer.reduce((sum, vertex) => sum + mesh.positions[vertex * 3 + 1]!, 0) / face.outer.length
+	})).sort((left, right) => right.y - left.y || (left.id < right.id ? -1 : 1));
+	if (!candidates[0]) throw new Error('Canonical graph has no upward-facing authored face.');
+	return candidates[0].id;
+}
+
+function sideFaceId(graph: BomcGraph): string {
+	const mesh = graph.meshes[0];
+	if (!mesh) throw new Error('Canonical graph has no mesh.');
+	const candidates = mesh.faces
+		.filter((face) => Math.abs(face.normal[0]) > 0.9 || Math.abs(face.normal[2]) > 0.9)
+		.map((face) => ({ id: face.id, score: Math.max(Math.abs(face.normal[0]), Math.abs(face.normal[2])) }))
+		.sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : 1));
+	if (!candidates[0]) throw new Error('Canonical graph has no authored side face.');
+	return candidates[0].id;
+}
+
+async function projectWorldPoint(page: Page, graph: BomcGraph, point: readonly [number, number, number], view: 'top' | 'iso' = 'top') {
+	const mesh = graph.meshes[0];
+	if (!mesh) throw new Error('Canonical graph has no mesh for world-point projection.');
+	const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+	for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+		const [x, y, z] = mesh.positions.slice(offset, offset + 3);
+		bounds.min.x = Math.min(bounds.min.x, x!); bounds.max.x = Math.max(bounds.max.x, x!);
+		bounds.min.y = Math.min(bounds.min.y, y!); bounds.max.y = Math.max(bounds.max.y, y!);
+		bounds.min.z = Math.min(bounds.min.z, z!); bounds.max.z = Math.max(bounds.max.z, z!);
+	}
+	const box = await page.locator('.viewport canvas').boundingBox();
+	if (!box) throw new Error('The production viewport canvas has no browser layout box.');
+	const pose = cameraPresetPose(bounds, view);
+	const camera = new PerspectiveCamera(SIBAMBO_CAMERA_DEFAULTS.fov, box.width / box.height, SIBAMBO_CAMERA_DEFAULTS.near, SIBAMBO_CAMERA_DEFAULTS.far);
+	camera.position.copy(pose.position);
+	camera.up.copy(uprightCameraUp(pose));
+	camera.lookAt(pose.target);
+	camera.updateProjectionMatrix();
+	camera.updateMatrixWorld(true);
+	const projected = new Vector3(...point).project(camera);
+	if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || Math.abs(projected.x) >= 1 || Math.abs(projected.y) >= 1) {
+		throw new Error(`Projected world point ${point.join(',')} is outside the fitted ${view} view.`);
+	}
+	return { x: box.x + (projected.x + 1) * box.width / 2, y: box.y + (1 - projected.y) * box.height / 2 };
+}
+
+async function pushPullProjectedFace(page: Page, graph: BomcGraph, faceId: string, distance: number, view: 'top' | 'iso' = 'top') {
+	if (view === 'top') await ensureTopView(page);
+	else {
+		await openMenu(page, 3);
+		await page.getByRole('button', { name: 'Iso', exact: true }).click();
+		await closeMenu(page, 3);
+	}
+	const beforeCheckpoint = await currentCheckpoint(page);
+	const before = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length;
+	await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+	await clickProjectedFace(page, graph, faceId, view);
+	await page.getByLabel('Distance (m)').fill(String(distance));
+	await page.getByRole('button', { name: 'Commit', exact: true }).click();
+	await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length).toBe(before + 1);
+	await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(beforeCheckpoint.snapshot.revision + 1);
 }
 
 async function uploadBytes(page: Page, bytes: Uint8Array, name: string) {
@@ -363,6 +460,131 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		expect(followupReopen.result.checkpoint.history.undo).toEqual([]);
 		expect(followupReopen.result.checkpoint.history.redo).toEqual([]);
 		await verifyInterop(testInfo, 'reopened-edited', followupPath, followup, followupBeforeSave, expected, { sourceReopen: reopenedEvidence, downloadReopen: followupReopen });
+	});
+
+	test('Line closes a neutral face, repeated face Push/Pull survives save and reopen, and transient Line cancel stays noncanonical', async ({ page }, testInfo) => {
+		test.setTimeout(180_000);
+		await createNew(page);
+		await ensureTopView(page);
+		const canvas = page.locator('.viewport canvas');
+		const box = await canvas.boundingBox();
+		if (!box) throw new Error('The production viewport canvas has no browser layout box.');
+
+		const revisionBeforeLine = (await currentCheckpoint(page)).snapshot.revision;
+		const lineCommandsBefore = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP').length;
+		await page.getByRole('button', { name: 'Line', exact: true }).click();
+		const p1 = { x: box.x + box.width * 0.36, y: box.y + box.height * 0.36 };
+		const p2 = { x: box.x + box.width * 0.58, y: box.y + box.height * 0.36 };
+		const p3 = { x: box.x + box.width * 0.58, y: box.y + box.height * 0.58 };
+		await page.mouse.move(p1.x, p1.y);
+		await expect(page.locator('.footer-status')).toContainText(/Ground|On Face/);
+		await page.mouse.click(p1.x, p1.y);
+		await page.mouse.move(p2.x, p2.y);
+		await expect(page.locator('.footer-status')).toContainText(/[XZ] Axis|Ground|On Plane/);
+		await page.mouse.click(p2.x, p2.y);
+		await page.mouse.move(p3.x, p3.y);
+		await page.mouse.click(p3.x, p3.y);
+		await page.mouse.move(p1.x, p1.y);
+		await expect(page.locator('.footer-status')).toContainText('Close Loop');
+		await page.mouse.click(p1.x, p1.y);
+		await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP').length).toBe(lineCommandsBefore + 1);
+		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(revisionBeforeLine + 1);
+
+		const faceCheckpoint = await currentCheckpoint(page);
+		const faceGraph = faceCheckpoint.snapshot.graph as BomcGraph;
+		expect(faceGraph.meshes[0]?.faces).toHaveLength(1);
+		expect(faceGraph.materials.some((material) => material.rgba[0] === 226 && material.rgba[1] === 226 && material.rgba[2] === 226 && material.rgba[3] === 255)).toBe(true);
+
+		await page.getByRole('button', { name: 'Rectangle', exact: true }).click();
+		const face = faceGraph.meshes[0]!.faces[0]!;
+		const a = face.outer[0]!;
+		const b = face.outer[1]!;
+		const mesh = faceGraph.meshes[0]!;
+		const midpoint = [
+			(mesh.positions[a * 3]! + mesh.positions[b * 3]!) / 2,
+			(mesh.positions[a * 3 + 1]! + mesh.positions[b * 3 + 1]!) / 2,
+			(mesh.positions[a * 3 + 2]! + mesh.positions[b * 3 + 2]!) / 2
+		] as const;
+		const edgeScreen = await projectWorldPoint(page, faceGraph, midpoint, 'top');
+		await page.mouse.move(edgeScreen.x, edgeScreen.y);
+		await expect(page.locator('.footer-status')).toContainText('On Edge');
+
+		await pushPullProjectedFace(page, faceGraph, face.id, 1.2);
+		const boxCheckpoint = await currentCheckpoint(page);
+		const boxGraph = boxCheckpoint.snapshot.graph as BomcGraph;
+		await pushPullProjectedFace(page, boxGraph, topFaceId(boxGraph), 0.6, 'iso');
+		const tallerCheckpoint = await currentCheckpoint(page);
+		const tallerGraph = tallerCheckpoint.snapshot.graph as BomcGraph;
+		await pushPullProjectedFace(page, tallerGraph, sideFaceId(tallerGraph), 0.4, 'iso');
+
+		const edited = await currentCheckpoint(page);
+		const firstPath = testInfo.outputPath('line-push-pull-v2.bomc');
+		const firstSave = await saveBomc(page, firstPath);
+		const independent = await readWebBomc(new Uint8Array(firstSave.bytes));
+		try { expect(independent.snapshot().graph).toStrictEqual(edited.snapshot.graph); }
+		finally { independent.dispose(); }
+
+		await openFileMenu(page);
+		await page.getByRole('button', { name: 'Close Model' }).click();
+		await expect(page.locator('.empty-workspace')).toBeVisible();
+		await uploadBytes(page, firstSave.bytes, 'line-push-pull-v2-reopen.bomc');
+		await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+		const reopened = await currentCheckpoint(page);
+		expect(reopened.snapshot.graph).toStrictEqual(edited.snapshot.graph);
+		const reopenedGraph = reopened.snapshot.graph as BomcGraph;
+		await pushPullProjectedFace(page, reopenedGraph, topFaceId(reopenedGraph), 0.25, 'iso');
+
+		const beforeTransient = await currentCheckpoint(page);
+		const lineCommandsAtCancel = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP').length;
+		await ensureTopView(page);
+		await page.getByRole('button', { name: 'Line', exact: true }).click();
+		await page.mouse.click(box.x + box.width * 0.30, box.y + box.height * 0.30);
+		await page.mouse.click(box.x + box.width * 0.42, box.y + box.height * 0.30);
+		await page.keyboard.press('Escape');
+		await expect(page.getByRole('button', { name: 'Select', exact: true })).toHaveClass(/active/);
+		expect((await authoringCommands(page)).filter((command) => command.kind === 'CREATE_FACE_LOOP')).toHaveLength(lineCommandsAtCancel);
+		expect((await currentCheckpoint(page)).snapshot.revision).toBe(beforeTransient.snapshot.revision);
+
+		const continued = await currentCheckpoint(page);
+		const secondPath = testInfo.outputPath('line-push-pull-v2-continued.bomc');
+		const secondSave = await saveBomc(page, secondPath);
+		const independentContinued = await readWebBomc(new Uint8Array(secondSave.bytes));
+		try { expect(independentContinued.snapshot().graph).toStrictEqual(continued.snapshot.graph); }
+		finally { independentContinued.dispose(); }
+	});
+
+	test('1,000 real pointer moves keep inference nonmutating and avoid authoring long tasks over 50 ms', async ({ page }) => {
+		test.setTimeout(120_000);
+		await createNew(page);
+		await ensureTopView(page);
+		await drawRectangle(page, 0.38, 0.38, 0.18, 0.16);
+		const before = await currentCheckpoint(page);
+		const commandsBefore = (await authoringCommands(page)).length;
+		await page.getByRole('button', { name: 'Rectangle', exact: true }).click();
+		const box = await page.locator('.viewport canvas').boundingBox();
+		if (!box) throw new Error('The production viewport canvas has no browser layout box.');
+		await page.evaluate(() => {
+			const scope = window as unknown as { __authoringInferenceLongTasks?: Array<{ startTime: number; duration: number }>; __authoringInferenceObserver?: PerformanceObserver };
+			scope.__authoringInferenceLongTasks = [];
+			scope.__authoringInferenceObserver?.disconnect();
+			const observer = new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) scope.__authoringInferenceLongTasks!.push({ startTime: entry.startTime, duration: entry.duration });
+			});
+			observer.observe({ type: 'longtask', buffered: false });
+			scope.__authoringInferenceObserver = observer;
+		});
+		await page.mouse.move(box.x + box.width * 0.22, box.y + box.height * 0.22);
+		await page.mouse.move(box.x + box.width * 0.78, box.y + box.height * 0.72, { steps: 1000 });
+		await page.waitForTimeout(100);
+		const longTasks = await page.evaluate(() => {
+			const scope = window as unknown as { __authoringInferenceLongTasks?: Array<{ startTime: number; duration: number }>; __authoringInferenceObserver?: PerformanceObserver };
+			scope.__authoringInferenceObserver?.disconnect();
+			return scope.__authoringInferenceLongTasks ?? [];
+		});
+		expect(longTasks.filter((entry) => entry.duration > 50)).toEqual([]);
+		expect((await authoringCommands(page))).toHaveLength(commandsBefore);
+		expect((await currentCheckpoint(page)).snapshot.revision).toBe(before.snapshot.revision);
+		await expect(page.locator('.footer-status')).not.toHaveText('');
 	});
 
 	test('failed download dispatch preserves the dirty checkpoint and allows a fresh save', async ({ page }, testInfo) => {
@@ -455,25 +677,17 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		expect(planarReopen.result.checkpoint.history.redo).toEqual([]);
 		await verifyInterop(testInfo, 'twelve-rectangles-planar', planarPath, planar, planarBeforeSave, planarAfterSave, planarReopen);
 
-		const planarGraph = planarReopen.result.checkpoint.snapshot.graph as BomcGraph;
-		const firstEntityId = rectangleEntityId(planarGraph, 1);
-		const secondEntityId = rectangleEntityId(planarGraph, 2);
-		await ensureTopView(page);
-		await selectProjectedRectangle(page, planarGraph, firstEntityId);
-		await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
-		await page.getByLabel('Extrusion (m)').fill('2.7');
-		await page.getByRole('button', { name: 'Commit', exact: true }).click();
-		await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length).toBe(1);
-		const firstExtrusion = (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE')[0]!;
-		expect(firstExtrusion).toMatchObject({ entityId: firstEntityId, distance: 2.7 });
+			const planarGraph = planarReopen.result.checkpoint.snapshot.graph as BomcGraph;
+			const firstEntityId = rectangleEntityId(planarGraph, 1);
+			const secondEntityId = rectangleEntityId(planarGraph, 2);
+			await pushPullProjectedFace(page, planarGraph, firstEntityId, 2.7);
+			const firstPushPull = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE')[0]!;
+			expect(firstPushPull).toMatchObject({ faceId: firstEntityId, distance: 2.7 });
 
-		await selectProjectedRectangle(page, planarGraph, secondEntityId);
-		await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
-		await page.getByLabel('Extrusion (m)').fill('-2.7');
-		await page.getByRole('button', { name: 'Commit', exact: true }).click();
-		await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length).toBe(2);
-		const extrudedCommands = (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE');
-		expect(extrudedCommands[1]).toMatchObject({ entityId: secondEntityId, distance: -2.7 });
+			const afterFirstPush = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			await pushPullProjectedFace(page, afterFirstPush, secondEntityId, -2.7);
+			const pushedCommands = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE');
+			expect(pushedCommands[1]).toMatchObject({ faceId: secondEntityId, distance: -2.7 });
 
 		await page.keyboard.press('Control+z');
 		await expect.poll(async () => latestAuthoringWorker(await probe(page)).requests.filter((request) => request.type === 'UNDO').length).toBe(1);
@@ -517,7 +731,7 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await closeMenu(page, 2);
 		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(editedRevision);
 		const commandCountAfterNavigation = (await authoringCommands(page)).length;
-		expect(commandCountAfterNavigation).toBe(commandsBeforeExtrusion.length + 2);
+			expect(commandCountAfterNavigation).toBe(commandsBeforeExtrusion.length + 2);
 		for (const shot of navigationShots) expect(shot.equals(drawnPixels)).toBe(false);
 
 		const outputPath = testInfo.outputPath('twelve-rectangles-signed-extrusions.bomc');
@@ -645,15 +859,9 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 				const beforeEntityIds = new Set(authoredRectangleEntityIds(exactDirtyBeforeOpen.snapshot.graph as BomcGraph));
 				const addedEntityIds = authoredRectangleEntityIds(postRollbackDraw.snapshot.graph as BomcGraph).filter((entityId) => !beforeEntityIds.has(entityId));
 				expect(addedEntityIds).toHaveLength(1);
-				const newEntityId = addedEntityIds[0]!;
-				await ensureTopView(page);
-				await selectProjectedRectangle(page, postRollbackDraw.snapshot.graph as BomcGraph, newEntityId);
-				const extrudeCountBefore = (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length;
-				await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
-				await page.getByLabel('Extrusion (m)').fill(String(0.6 + candidateIndex * 0.2));
-				await page.getByRole('button', { name: 'Commit', exact: true }).click();
-				await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'EXTRUDE_RECTANGLE').length).toBe(extrudeCountBefore + 1);
-				await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(postRollbackDraw.snapshot.revision + 1);
+					const newEntityId = addedEntityIds[0]!;
+					await pushPullProjectedFace(page, postRollbackDraw.snapshot.graph as BomcGraph, newEntityId, 0.6 + candidateIndex * 0.2);
+					await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(postRollbackDraw.snapshot.revision + 1);
 				const expectedAfterRollbackEdit = await currentCheckpoint(page);
 				const savedAfterRollback = await saveBomc(page, testInfo.outputPath(`${candidate.id}-rollback-edit.bomc`));
 				const independentlyRead = await readWebBomc(new Uint8Array(savedAfterRollback.bytes));
@@ -677,15 +885,15 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 
 	test('keeps the active authoring controller usable after an in-flight replacement is cancelled', async ({ page }, testInfo) => {
 		test.setTimeout(180_000);
-		await createNew(page);
-		await ensureTopView(page);
-		await drawRectangle(page, 0.40, 0.40, 0.10, 0.10);
-		const seed = await saveBomc(page, testInfo.outputPath('cancelled-replacement-seed.bomc'));
-		await ensureTopView(page);
-		await drawRectangle(page, 0.60, 0.40, 0.09, 0.09);
-		const retained = await currentCheckpoint(page);
-		const retainedTitle = await page.title();
-		const commandsBeforeCancel = (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length;
+			await createNew(page);
+			await ensureTopView(page);
+			await drawRectangle(page, 0.40, 0.40, 0.10, 0.10);
+			const seed = await saveBomc(page, testInfo.outputPath('cancelled-replacement-seed.bomc'));
+			const seedCheckpoint = await currentCheckpoint(page);
+			await pushPullProjectedFace(page, seedCheckpoint.snapshot.graph as BomcGraph, rectangleEntityId(seedCheckpoint.snapshot.graph as BomcGraph, 1), 0.5);
+			const retained = await currentCheckpoint(page);
+			const retainedTitle = await page.title();
+			const commandsBeforeCancel = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length;
 
 		await page.evaluate(() => window.__editorAuthoringWorkerFaultControl?.pauseNextRequest('OPEN'));
 		await uploadBytes(page, seed.bytes, 'cancelled-in-flight-open.bomc');
@@ -699,9 +907,9 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		expect(await page.title()).toBe(retainedTitle);
 		expect(await currentCheckpoint(page)).toStrictEqual(retained);
 
-		await ensureTopView(page);
-		await drawRectangle(page, 0.28, 0.64, 0.08, 0.07);
-		await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'CREATE_RECTANGLE').length).toBe(commandsBeforeCancel + 1);
+			const retainedGraph = retained.snapshot.graph as BomcGraph;
+			await pushPullProjectedFace(page, retainedGraph, topFaceId(retainedGraph), 0.35);
+			await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length).toBe(commandsBeforeCancel + 1);
 		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(retained.snapshot.revision + 1);
 		const expected = await currentCheckpoint(page);
 		const saved = await saveBomc(page, testInfo.outputPath('cancelled-replacement-continued.bomc'));
@@ -749,9 +957,9 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		expect(restored.history).toStrictEqual(retained.history);
 		expect(restored.sequence).toBe(retained.sequence);
 
-		await ensureTopView(page);
-		await drawRectangle(page, 0.62, 0.40, 0.09, 0.08);
-		await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(retained.snapshot.revision + 1);
+			const restoredGraph = restored.snapshot.graph as BomcGraph;
+			await pushPullProjectedFace(page, restoredGraph, rectangleEntityId(restoredGraph, 1), 0.45);
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(retained.snapshot.revision + 1);
 		const edited = await currentCheckpoint(page);
 		const saved = await saveBomc(page, testInfo.outputPath('recovery-retry-save.bomc'));
 		const independent = await readWebBomc(new Uint8Array(saved.bytes));
@@ -764,8 +972,8 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible({ timeout: 180_000 });
 		expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(edited.snapshot.graph);
 
-		await ensureTopView(page);
-		await drawRectangle(page, 0.30, 0.65, 0.07, 0.06);
+			const reopenedGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			await pushPullProjectedFace(page, reopenedGraph, topFaceId(reopenedGraph), 0.25);
 		await page.evaluate(() => {
 			const control = window.__editorAuthoringWorkerFaultControl;
 			if (!control) throw new Error('Authoring worker fault control is unavailable.');

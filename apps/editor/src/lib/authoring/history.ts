@@ -63,13 +63,18 @@ function assertJournalEntryShape(value: unknown): asserts value is AuthoringJour
 		|| (value.forward.length === 0) !== (value.inverse.length === 0)) {
 		throw new AuthoringHistoryError('History entry must contain paired forward and inverse edit arrays.');
 	}
-	if (value.forward.length !== value.inverse.length || (value.forward.length !== 1 && value.forward.length !== 3)) {
-		throw new AuthoringHistoryError('History entries must use one mesh replacement or the three ordered first-rectangle edits.');
+	if (value.forward.length !== value.inverse.length || ![1, 2, 3].includes(value.forward.length)) {
+		throw new AuthoringHistoryError('History entries must use a supported authoring mesh/material/root transaction shape.');
 	}
 	for (const edit of [...value.forward, ...value.inverse]) assertSupportedJournalEdit(edit);
 	if (value.forward.length === 1) {
 		if (value.forward[0]?.type !== 'put-mesh' || value.inverse[0]?.type !== 'put-mesh') {
 			throw new AuthoringHistoryError('Single-edit history entries must replace the root mesh in both directions.');
+		}
+	} else if (value.forward.length === 2) {
+		if (value.forward[0]?.type !== 'put-material' || value.forward[1]?.type !== 'put-mesh'
+			|| value.inverse[0]?.type !== 'put-mesh' || value.inverse[1]?.type !== 'delete-material') {
+			throw new AuthoringHistoryError('Two-edit history entries must add the neutral material with the mesh and remove it after restoring the prior mesh.');
 		}
 	} else if (value.forward[0]?.type !== 'put-material' || value.forward[1]?.type !== 'put-definition'
 		|| value.forward[2]?.type !== 'put-mesh' || value.inverse[0]?.type !== 'delete-mesh'
@@ -118,23 +123,31 @@ function checkEditable(graph: BomcGraph) {
 	if (!result.editable) throw new AuthoringHistoryError(`Checkpoint graph is outside the authoring subset: ${result.reason}`);
 }
 
+function sequenceFromOwnedValue(documentId: string, value: string): number | null {
+	for (const kind of ['rectangle', 'face', 'op']) {
+		const prefix = `${documentId}:${kind}:`;
+		if (!value.startsWith(prefix)) continue;
+		const suffix = value.slice(prefix.length).split(':', 1)[0]!;
+		if (!/^[1-9]\d*$/.test(suffix)) return null;
+		const sequence = Number(suffix);
+		return Number.isSafeInteger(sequence) ? sequence : null;
+	}
+	return null;
+}
+
 function maxSequenceInGraph(graph: BomcGraph): number {
-	const prefix = `${graph.documentId}:rectangle:`;
 	let max = 0;
 	for (const mesh of graph.meshes) for (const face of mesh.faces) {
 		const candidates = [face.id];
 		if (face.label) {
 			try {
 				const label: unknown = JSON.parse(face.label);
-				if (Array.isArray(label) && typeof label[2] === 'string') candidates.push(label[2]);
+				if (Array.isArray(label)) for (const item of label) if (typeof item === 'string') candidates.push(item);
 			} catch { /* The subset validator reports malformed labels. */ }
 		}
 		for (const candidate of candidates) {
-			if (!candidate.startsWith(prefix)) continue;
-			const suffix = candidate.slice(prefix.length);
-			if (!/^[1-9]\d*$/.test(suffix)) continue;
-			const sequence = Number(suffix);
-			if (Number.isSafeInteger(sequence)) max = Math.max(max, sequence);
+			const sequence = sequenceFromOwnedValue(graph.documentId, candidate);
+			if (sequence !== null) max = Math.max(max, sequence);
 		}
 	}
 	return max;
@@ -144,21 +157,17 @@ function maxSequenceInEdits(edits: readonly DocumentEdit[], documentId: string):
 	let max = 0;
 	for (const edit of edits) {
 		if (edit.type !== 'put-mesh') continue;
-		const prefix = `${documentId}:rectangle:`;
 		for (const face of edit.value.faces) {
 			const candidates = [face.id];
 			if (face.label) {
 				try {
 					const label: unknown = JSON.parse(face.label);
-					if (Array.isArray(label) && typeof label[2] === 'string') candidates.push(label[2]);
+					if (Array.isArray(label)) for (const item of label) if (typeof item === 'string') candidates.push(item);
 				} catch { /* Canonical graph validation/replay reports malformed labels. */ }
 			}
 			for (const candidate of candidates) {
-				if (!candidate.startsWith(prefix)) continue;
-				const suffix = candidate.slice(prefix.length);
-				if (!/^[1-9]\d*$/.test(suffix)) continue;
-				const sequence = Number(suffix);
-				if (Number.isSafeInteger(sequence)) max = Math.max(max, sequence);
+				const sequence = sequenceFromOwnedValue(documentId, candidate);
+				if (sequence !== null) max = Math.max(max, sequence);
 			}
 		}
 	}
@@ -229,7 +238,7 @@ export function validateAuthoringCheckpoint(
 		// then frozen in the worker, so replaying/scanning them again is redundant.
 		checkEditable(snapshot.graph);
 		if (maxSequenceInGraph(snapshot.graph) >= sequence) {
-			throw new AuthoringHistoryError('Checkpoint sequence would reuse a retained rectangle ID.');
+				throw new AuthoringHistoryError('Checkpoint sequence would reuse a retained authoring face/operation ID.');
 		}
 		return checkpoint;
 	}
@@ -254,7 +263,7 @@ export function validateAuthoringCheckpoint(
 			maxSequence = Math.max(maxSequence, maxSequenceInEdits(entry.forward, snapshot.graph.documentId));
 			maxSequence = Math.max(maxSequence, maxSequenceInEdits(entry.inverse, snapshot.graph.documentId));
 		}
-		if (maxSequence >= sequence) throw new AuthoringHistoryError('Checkpoint sequence would reuse a retained rectangle ID.');
+			if (maxSequence >= sequence) throw new AuthoringHistoryError('Checkpoint sequence would reuse a retained authoring face/operation ID.');
 		return checkpoint;
 	} finally { document.dispose(); }
 }

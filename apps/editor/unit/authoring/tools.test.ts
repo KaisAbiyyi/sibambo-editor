@@ -2,7 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import { Mesh, Object3D, Ray, Vector3 } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
-import { buildExtrusionEdit, buildRectangleEdit, journalEntry, validateEditableSubset } from '../../src/lib/authoring/geometry.js';
+import {
+	buildExtrusionEdit,
+	buildFaceLoopEdit,
+	buildPlanarRectangleEdit,
+	buildPushPullFaceEdit,
+	buildRectangleEdit,
+	journalEntry,
+	validateEditableSubset
+} from '../../src/lib/authoring/geometry.js';
 import { AuthoringHistory } from '../../src/lib/authoring/history.js';
 import type { AuthoringCheckpoint, AuthoringCommand, AuthoringResult } from '../../src/lib/authoring/protocol.js';
 import { AuthoringToolController } from '../../src/lib/authoring/tools.js';
@@ -49,26 +57,50 @@ function createHarness(rectangles: readonly { first: [number, number, number]; o
 	let controller: AuthoringToolController;
 	let rayFactory: (clientX: number, clientY: number) => Ray | null = (clientX, clientY) =>
 		new Ray(new Vector3(clientX, 10, clientY), new Vector3(0, -1, 0));
-	const viewport = {
+		const viewport = {
 		rayFromScreen(clientX: number, clientY: number) {
 			return rayFactory(clientX, clientY);
 		},
-		setDomainOverlay(key: string, overlay: object | null) {
+			setDomainOverlay(key: string, overlay: object | null) {
 			const previous = overlays.get(key);
 			if (previous) disposeOverlay(previous);
 			overlays.delete(key);
-			if (overlay) overlays.set(key, overlay);
-		}
-	} as unknown as Pick<PreparedSceneViewport, 'rayFromScreen' | 'setDomainOverlay'>;
-	const submitCommand = async (command: AuthoringCommand): Promise<AuthoringResult> => {
-		submitted.push(command);
-		const entityId = command.kind === 'CREATE_RECTANGLE' ? `${DOCUMENT_ID}:rectangle:${sequence}` : command.entityId;
-		const edit = command.kind === 'CREATE_RECTANGLE'
-			? buildRectangleEdit(document.snapshot().graph, entityId, command.first, command.opposite)
-			: buildExtrusionEdit(document.snapshot().graph, entityId, command.distance);
-		const changed = history.execute(document, journalEntry(edit));
-		if (!changed) throw new Error('Test dispatcher did not commit the authoring command.');
-		if (command.kind === 'CREATE_RECTANGLE') sequence += 1;
+				if (overlay) overlays.set(key, overlay);
+			},
+			projectWorldToScreen(point: readonly [number, number, number]) {
+				return { x: point[0], y: point[2], inFront: true, visible: true };
+			},
+			worldUnitsPerPixelAt() {
+				return 1;
+			}
+		} as unknown as Pick<PreparedSceneViewport, 'rayFromScreen' | 'projectWorldToScreen' | 'worldUnitsPerPixelAt' | 'setDomainOverlay'>;
+		const submitCommand = async (command: AuthoringCommand): Promise<AuthoringResult> => {
+			submitted.push(command);
+			const graph = document.snapshot().graph;
+			let entityId: string;
+			let edit;
+			let consumesSequence = false;
+			if (command.kind === 'CREATE_RECTANGLE') {
+				entityId = `${DOCUMENT_ID}:rectangle:${sequence}`;
+				edit = 'points' in command
+					? buildPlanarRectangleEdit(graph, entityId, command.points, command.normal)
+					: buildRectangleEdit(graph, entityId, command.first, command.opposite);
+				consumesSequence = true;
+			} else if (command.kind === 'CREATE_FACE_LOOP') {
+				entityId = `${DOCUMENT_ID}:face:${sequence}`;
+				edit = buildFaceLoopEdit(graph, entityId, command.points, command.normal);
+				consumesSequence = true;
+			} else if (command.kind === 'PUSH_PULL_FACE') {
+				entityId = command.faceId;
+				edit = buildPushPullFaceEdit(graph, command.faceId, command.distance, sequence);
+				consumesSequence = true;
+			} else {
+				entityId = command.entityId;
+				edit = buildExtrusionEdit(graph, entityId, command.distance);
+			}
+			const changed = history.execute(document, journalEntry(edit));
+			if (!changed) throw new Error('Test dispatcher did not commit the authoring command.');
+			if (consumesSequence) sequence += 1;
 		checkpoint = { snapshot: document.snapshot(), sequence, history: history.checkpoint() };
 		controller.setCheckpoint(checkpoint);
 		return {
@@ -101,19 +133,22 @@ function click(controller: AuthoringToolController, x: number, y: number, pointe
 async function flush() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
 describe('canonical authoring tools', () => {
-	test('uses two ground-plane clicks, transfers previews, and selects only after command ACK', async () => {
+	test('uses inferred rectangle points, transfers previews, and selects only after command ACK', async () => {
 		const harness = createHarness();
 		try {
 			harness.controller.setTool('rectangle');
 			click(harness.controller, 1, 1);
-			harness.controller.handlePointerMove(pointer(3, 4), false);
+			harness.controller.handlePointerMove(pointer(30, 40), false);
+			await flush();
 			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
 			expect(preview.children.filter((child) => child instanceof Mesh)).toHaveLength(1);
 			expect(harness.getCheckpoint().snapshot.graph.meshes).toHaveLength(0);
-			click(harness.controller, 3, 4);
+			click(harness.controller, 30, 40);
 			await flush();
 			expect(harness.submitted).toEqual([{
-				kind: 'CREATE_RECTANGLE', first: [1, 0, 1], opposite: [3, 0, 4]
+				kind: 'CREATE_RECTANGLE',
+				points: [[1, 0, 1], [30, 0, 1], [30, 0, 40], [1, 0, 40]],
+				normal: [0, 1, 0]
 			}]);
 			const subset = validateEditableSubset(harness.getCheckpoint().snapshot.graph);
 			expect(subset.editable).toBe(true);
@@ -140,23 +175,24 @@ describe('canonical authoring tools', () => {
 		} finally { harness.close(); }
 	});
 
-	test('previews and commits signed extrusion from two clicks without changing canonical state optimistically', async () => {
+	test('previews and commits direct face Push/Pull without changing canonical state optimistically', async () => {
 		const entityId = `${DOCUMENT_ID}:rectangle:1`;
 		const harness = createHarness([{ first: [0, 0, 0], opposite: [2, 0, 3] }]);
 		try {
 			click(harness.controller, 1, 1);
 			harness.controller.setTool('extrude');
-			click(harness.controller, 1, 100);
-			harness.controller.handlePointerMove(pointer(1, -35), false);
+			click(harness.controller, 1, 1);
+			harness.controller.handlePointerMove(pointer(1, -1), false);
+			await flush();
 			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
 			expect(preview.children.filter((child) => child instanceof Mesh)).toHaveLength(6);
 			expect(validateEditableSubset(harness.getCheckpoint().snapshot.graph)).toMatchObject({ editable: true });
-			click(harness.controller, 1, -35);
+			click(harness.controller, 1, -1);
 			await flush();
-			expect(harness.submitted.at(-1)).toEqual({ kind: 'EXTRUDE_RECTANGLE', entityId, distance: 2.7 });
+			expect(harness.submitted.at(-1)).toEqual({ kind: 'PUSH_PULL_FACE', faceId: entityId, distance: 2 });
 			const subset = validateEditableSubset(harness.getCheckpoint().snapshot.graph);
 			expect(subset.editable).toBe(true);
-			if (subset.editable) expect(subset.entities[0]).toMatchObject({ kind: 'extrusion', distance: 2.7 });
+			if (subset.editable) expect(subset.entities).toHaveLength(6);
 			expect(harness.overlays.has('editor-authoring-preview')).toBe(false);
 		} finally { harness.close(); }
 	});
@@ -164,11 +200,11 @@ describe('canonical authoring tools', () => {
 	test('commits the exact finite numeric distance and sends no command for invalid input', async () => {
 		const harness = createHarness([{ first: [0, 0, 0], opposite: [2, 0, 3] }]);
 		try {
-			click(harness.controller, 1, 1);
 			harness.controller.setTool('extrude');
+			click(harness.controller, 1, 1);
 			harness.controller.setExtrusionDistance('-2.700000000000001');
 			await harness.controller.commitExtrusionDistance();
-			expect(harness.submitted.at(-1)).toMatchObject({ kind: 'EXTRUDE_RECTANGLE', distance: -2.700000000000001 });
+			expect(harness.submitted.at(-1)).toMatchObject({ kind: 'PUSH_PULL_FACE', faceId: `${DOCUMENT_ID}:rectangle:1`, distance: -2.700000000000001 });
 			harness.controller.setExtrusionDistance('1 metre');
 			expect(await harness.controller.commitExtrusionDistance()).toBeNull();
 			expect(harness.submitted).toHaveLength(1);
@@ -212,11 +248,13 @@ describe('canonical authoring tools', () => {
 			harness.controller.handlePointerDown(pointer(1, 1), false);
 			harness.controller.handlePointerMove(pointer(5, 1), false);
 			harness.controller.handlePointerUp(pointer(5, 1), false);
-			harness.controller.handlePointerDown(pointer(7, 4), false);
-			harness.controller.handlePointerUp(pointer(7, 4), false);
+			harness.controller.handlePointerDown(pointer(25, 40), false);
+			harness.controller.handlePointerUp(pointer(25, 40), false);
 			await flush();
 			expect(harness.submitted).toEqual([{
-				kind: 'CREATE_RECTANGLE', first: [5, 0, 1], opposite: [7, 0, 4]
+				kind: 'CREATE_RECTANGLE',
+				points: [[5, 0, 1], [25, 0, 1], [25, 0, 40], [5, 0, 40]],
+				normal: [0, 1, 0]
 			}]);
 
 			harness.controller.setTool('rectangle');
@@ -224,8 +262,9 @@ describe('canonical authoring tools', () => {
 			harness.controller.handlePointerMove(pointer(5, 0), false);
 			harness.controller.handlePointerUp(pointer(5, 0), false);
 			expect(harness.submitted).toHaveLength(1);
-			click(harness.controller, 2, 2);
-			harness.controller.handlePointerMove(pointer(3, 4), false);
+				click(harness.controller, 50, 50);
+				harness.controller.handlePointerMove(pointer(80, 90), false);
+			await flush();
 			expect(harness.overlays.has('editor-authoring-preview')).toBe(true);
 			harness.controller.cancelPreview();
 			expect(harness.overlays.has('editor-authoring-preview')).toBe(false);

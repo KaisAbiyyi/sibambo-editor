@@ -126,6 +126,50 @@ describe('canonical authoring worker and client', () => {
 		}
 	});
 
+	test('persists v2 rectangle and repeated face Push/Pull across write, ACK and reopen with monotonic operation IDs', async () => {
+		const first = makeClient();
+		try {
+			const created = await first.client.create();
+			const documentId = created.checkpoint.snapshot.graph.documentId;
+			const rectangle = await first.client.command({
+				kind: 'CREATE_RECTANGLE',
+				points: [[0, 0, 0], [4, 0, 0], [4, 0, 3], [0, 0, 3]],
+				normal: [0, 1, 0]
+			});
+			expect(rectangle.checkpoint.sequence).toBe(2);
+			expect(rectangle.commandResult?.entityId).toBe(`${documentId}:rectangle:1`);
+
+			const firstPush = await first.client.command({
+				kind: 'PUSH_PULL_FACE',
+				faceId: `${documentId}:rectangle:1`,
+				distance: 2.7
+			});
+			expect(firstPush.checkpoint.sequence).toBe(3);
+			expect(firstPush.checkpoint.snapshot.graph.meshes[0]?.faces).toHaveLength(6);
+			expect(firstPush.checkpoint.history.undo).toHaveLength(2);
+
+			const write = await first.client.write();
+			const bytes = write.ownedBuffer.slice(0);
+			await first.client.acknowledgeDownload(write.writeId, write.revision);
+
+			const reopened = makeClient();
+			try {
+				const open = await reopened.client.open(bytes);
+				expect(open.kind).toBe('authoring');
+				if (open.kind !== 'authoring') return;
+				expect(open.checkpoint.sequence).toBe(3);
+				expect(open.dirty).toBe(false);
+				const topFaceId = `${documentId}:op:2:cap`;
+				const secondPush = await reopened.client.command({ kind: 'PUSH_PULL_FACE', faceId: topFaceId, distance: 1.1 });
+				expect(secondPush.checkpoint.sequence).toBe(4);
+				expect(secondPush.commandResult?.entityId).toBe(topFaceId);
+				expect(secondPush.checkpoint.snapshot.graph.meshes[0]?.faces.find((face) => face.id === topFaceId)?.label).toContain(`${documentId}:op:3`);
+			} finally { await reopened.client.close(); }
+		} finally {
+			if (!first.client.isClosed) await first.client.close();
+		}
+	});
+
 	test('reuses only previously acknowledged immutable history across worker transitions', async () => {
 		const { client } = makeClient();
 		try {

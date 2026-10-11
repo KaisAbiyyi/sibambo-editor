@@ -42,6 +42,7 @@ type RequestEntry = {
 	type: AuthoringRequest['type'];
 	build: () => AuthoringRequest;
 	sequenceIncrement?: number;
+	command?: AuthoringCommand;
 	transfer?: Transferable[];
 	signal?: AbortSignal;
 	onProgress?: ProgressHandler;
@@ -249,17 +250,24 @@ export class AuthoringClient {
 
 	command(command: AuthoringCommand, options: { signal?: AbortSignal } = {}): Promise<AuthoringResult> {
 		if (!isAuthoringCommand(command)) return Promise.reject(new AuthoringClientError('INVALID_COMMAND', 'Authoring command is malformed.'));
-		const ownedCommand: AuthoringCommand = command.kind === 'CREATE_RECTANGLE'
-			? {
-				kind: 'CREATE_RECTANGLE',
-				first: [command.first[0], command.first[1], command.first[2]],
-				opposite: [command.opposite[0], command.opposite[1], command.opposite[2]]
-			}
-			: { kind: 'EXTRUDE_RECTANGLE', entityId: command.entityId, distance: command.distance };
+		const clonePoint = (point: readonly [number, number, number]) => [point[0], point[1], point[2]] as const;
+		let ownedCommand: AuthoringCommand;
+		if (command.kind === 'CREATE_RECTANGLE') {
+			ownedCommand = 'points' in command
+				? { kind: 'CREATE_RECTANGLE', points: command.points.map(clonePoint), normal: clonePoint(command.normal) }
+				: { kind: 'CREATE_RECTANGLE', first: clonePoint(command.first), opposite: clonePoint(command.opposite) };
+		} else if (command.kind === 'CREATE_FACE_LOOP') {
+			ownedCommand = { kind: 'CREATE_FACE_LOOP', points: command.points.map(clonePoint), normal: clonePoint(command.normal) };
+		} else if (command.kind === 'PUSH_PULL_FACE') {
+			ownedCommand = { kind: 'PUSH_PULL_FACE', faceId: command.faceId, distance: command.distance };
+		} else {
+			ownedCommand = { kind: 'EXTRUDE_RECTANGLE', entityId: command.entityId, distance: command.distance };
+		}
+		const sequenceIncrement = ownedCommand.kind === 'EXTRUDE_RECTANGLE' ? 0 : 1;
 		return this.enqueue<AuthoringResult>('COMMAND', (requestId) => {
 			const revision = this.requireCheckpoint().snapshot.revision;
 			return { protocolVersion: AUTHORING_PROTOCOL_VERSION, sessionId: this.sessionId, requestId, type: 'COMMAND', expectedRevision: revision, data: ownedCommand };
-		}, { ...options, sequenceIncrement: ownedCommand.kind === 'CREATE_RECTANGLE' ? 1 : 0 });
+		}, { ...options, sequenceIncrement, command: ownedCommand });
 	}
 
 	undo(options: { signal?: AbortSignal } = {}): Promise<AuthoringResult> {
@@ -372,7 +380,7 @@ export class AuthoringClient {
 		return this.closePromise;
 	}
 
-	private enqueue<T>(type: AuthoringRequest['type'], build: (requestId: number) => AuthoringRequest, options: { signal?: AbortSignal; transfer?: Transferable[]; onProgress?: ProgressHandler; acknowledges?: { writeId: string; revision: number }; sequenceIncrement?: number } = {}): Promise<T> {
+	private enqueue<T>(type: AuthoringRequest['type'], build: (requestId: number) => AuthoringRequest, options: { signal?: AbortSignal; transfer?: Transferable[]; onProgress?: ProgressHandler; acknowledges?: { writeId: string; revision: number }; sequenceIncrement?: number; command?: AuthoringCommand } = {}): Promise<T> {
 		if (this.closed || this.closing) return Promise.reject(new AuthoringClientError('CLOSED', 'Authoring client is closed.'));
 		if (this.restoreErrorValue || this.recoveryPending) return Promise.reject(new AuthoringClientError('BUSY', 'Authoring worker is recovering; retry restore before editing.'));
 		if (options.signal?.aborted) return Promise.reject(new AuthoringClientError('ABORTED', 'Authoring request was aborted before it was queued.'));
@@ -387,7 +395,8 @@ export class AuthoringClient {
 			signal: options.signal,
 			onProgress: options.onProgress,
 			acknowledges: options.acknowledges,
-			sequenceIncrement: options.sequenceIncrement,
+				sequenceIncrement: options.sequenceIncrement,
+				command: options.command,
 			resolve: resolvePromise as (value: unknown) => void,
 			reject: rejectPromise
 		});
@@ -407,7 +416,7 @@ export class AuthoringClient {
 		type: AuthoringRequest['type'],
 		build: (requestId: number) => AuthoringRequest,
 		requestId: number,
-		options: Partial<Pick<RequestEntry, 'transfer' | 'signal' | 'onProgress' | 'acknowledges' | 'sequenceIncrement' | 'resolve' | 'reject' | 'internalRestore' | 'closeHandshake'>> = {}
+		options: Partial<Pick<RequestEntry, 'transfer' | 'signal' | 'onProgress' | 'acknowledges' | 'sequenceIncrement' | 'command' | 'resolve' | 'reject' | 'internalRestore' | 'closeHandshake'>> = {}
 	): RequestEntry {
 		return {
 			requestId,
@@ -417,7 +426,8 @@ export class AuthoringClient {
 			signal: options.signal,
 			onProgress: options.onProgress,
 			acknowledges: options.acknowledges,
-			sequenceIncrement: options.sequenceIncrement,
+				sequenceIncrement: options.sequenceIncrement,
+				command: options.command,
 			resolve: options.resolve ?? (() => undefined),
 			reject: options.reject ?? (() => undefined),
 			internalRestore: options.internalRestore,
@@ -630,11 +640,17 @@ export class AuthoringClient {
 		if (entry.type === 'COMMAND') {
 			if (!result.commandResult || !hasEntityId(checkpoint.snapshot.graph, result.commandResult.entityId)) return false;
 			if (!previous || checkpoint.snapshot.revision !== previous.snapshot.revision + 1
-				|| checkpoint.sequence !== previous.sequence + (entry.sequenceIncrement ?? 0)
-				|| checkpoint.history.undo.length !== previous.history.undo.length + 1 || checkpoint.history.redo.length !== 0) return false;
-			if (entry.sequenceIncrement === 1) {
+					|| checkpoint.sequence !== previous.sequence + (entry.sequenceIncrement ?? 0)
+					|| checkpoint.history.undo.length !== previous.history.undo.length + 1 || checkpoint.history.redo.length !== 0) return false;
+			const command = entry.command;
+			if (!command) return false;
+			if (command.kind === 'CREATE_RECTANGLE') {
 				if (result.commandResult.entityId !== `${previous.snapshot.graph.documentId}:rectangle:${previous.sequence}`) return false;
-			} else if (entry.sequenceIncrement === 0 && !hasEntityId(previous.snapshot.graph, result.commandResult.entityId)) return false;
+			} else if (command.kind === 'CREATE_FACE_LOOP') {
+				if (result.commandResult.entityId !== `${previous.snapshot.graph.documentId}:face:${previous.sequence}`) return false;
+			} else if (command.kind === 'PUSH_PULL_FACE') {
+				if (result.commandResult.entityId !== command.faceId || !hasEntityId(previous.snapshot.graph, command.faceId)) return false;
+			} else if (result.commandResult.entityId !== command.entityId || !hasEntityId(previous.snapshot.graph, command.entityId)) return false;
 		} else if (result.commandResult !== undefined) return false;
 		if (entry.type === 'UNDO' || entry.type === 'REDO') {
 			if (!previous || checkpoint.sequence !== previous.sequence) return false;

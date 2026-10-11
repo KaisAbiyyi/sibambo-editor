@@ -118,6 +118,13 @@ type EdgeRecord = {
 	segmentStartsByOccurrence: Map<string, number[]>;
 };
 
+export type ViewportScreenProjection = Readonly<{
+	x: number;
+	y: number;
+	inFront: boolean;
+	visible: boolean;
+}>;
+
 /** App-neutral prepared-scene viewport. Domain overlays and mutable editor tools remain caller-owned. */
 export class PreparedSceneViewport {
 	private readonly scene3d: Scene;
@@ -434,6 +441,41 @@ export class PreparedSceneViewport {
 		this.camera.updateMatrixWorld(true);
 		this.raycaster.setFromCamera(this.pointer, this.camera);
 		return this.raycaster.ray.clone();
+	}
+	projectWorldToScreen(point: readonly [number, number, number]): ViewportScreenProjection | null {
+		if (this.disposed || point.length !== 3 || point.some((value) => !Number.isFinite(value))) return null;
+		const rect = this.canvas.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) return null;
+		this.camera.updateMatrixWorld(true);
+		const world = new Vector3(point[0], point[1], point[2]);
+		const cameraSpace = world.clone().applyMatrix4(this.camera.matrixWorldInverse);
+		const projected = world.clone().project(this.camera);
+		if (![cameraSpace.x, cameraSpace.y, cameraSpace.z, projected.x, projected.y, projected.z].every(Number.isFinite)) return null;
+		const x = rect.left + (projected.x + 1) * 0.5 * rect.width;
+		const y = rect.top + (1 - projected.y) * 0.5 * rect.height;
+		const inFront = cameraSpace.z < 0;
+		return {
+			x,
+			y,
+			inFront,
+			visible: inFront && projected.z >= -1 && projected.z <= 1 && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+		};
+	}
+	worldUnitsPerPixelAt(point: readonly [number, number, number]): number | null {
+		if (this.disposed || point.length !== 3 || point.some((value) => !Number.isFinite(value))) return null;
+		const rect = this.canvas.getBoundingClientRect();
+		if (rect.height <= 0) return null;
+		this.camera.updateMatrixWorld(true);
+		if (this.camera instanceof PerspectiveCamera) {
+			const cameraSpace = new Vector3(point[0], point[1], point[2]).applyMatrix4(this.camera.matrixWorldInverse);
+			const depth = Math.abs(cameraSpace.z);
+			if (!Number.isFinite(depth) || depth <= 1e-12) return null;
+			return 2 * Math.tan(this.camera.fov * Math.PI / 360) * depth / rect.height;
+		}
+		if (this.camera instanceof OrthographicCamera) {
+			return Math.abs(this.camera.top - this.camera.bottom) / Math.max(this.camera.zoom, 1e-12) / rect.height;
+		}
+		return null;
 	}
 
 	pickAt(clientX: number, clientY: number): ViewportPick | null {

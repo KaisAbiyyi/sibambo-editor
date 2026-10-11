@@ -1,13 +1,19 @@
 import type { BomcGraph, DocumentEdit, Face, Mesh, SolidMaterial } from '@sibambo/bomc-document';
 import type { AuthoringPoint, AuthoringJournalEntry } from './protocol.js';
+import { AuthoringPolygonError, MIN_AUTHORING_EDGE_METRES, preparePolygon, type Point3 } from './polygon.js';
+import { AuthoringTopologyError, buildAuthoringTopology } from './topology.js';
 
 const SHAPE_SCHEMA = 'sibambo-editor-shape-v1';
+const SHAPE_SCHEMA_V2 = 'sibambo-editor-shape-v2';
 const ROOT_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 const DEFAULT_RGBA = [155, 28, 49, 255] as const;
+const NEUTRAL_RGBA = [226, 226, 226, 255] as const;
 const MIN_EDGE_METRES = 1e-6;
 const NORMAL_TOLERANCE = 1e-12;
 
 export const DEFAULT_AUTHORING_MATERIAL_NAME = 'Default';
+export const NEUTRAL_AUTHORING_RGBA = NEUTRAL_RGBA;
+export const AUTHORING_SHAPE_SCHEMA_V2 = SHAPE_SCHEMA_V2;
 
 export class AuthoringGeometryError extends Error {
 	readonly code = 'INVALID_COMMAND' as const;
@@ -17,7 +23,7 @@ export class AuthoringGeometryError extends Error {
 export type AuthoringEntity = {
 	entityId: string;
 	sequence: number;
-	kind: 'rectangle' | 'extrusion';
+	kind: 'rectangle' | 'extrusion' | 'face';
 	faces: readonly Face[];
 	baseFace: Face;
 	outer: readonly number[];
@@ -52,7 +58,19 @@ function sequenceForEntity(documentId: string, entityId: string): number | null 
 	const sequence = Number(suffix);
 	return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
 }
+function sequenceForApplicationId(documentId: string, value: string): number | null {
+	for (const kind of ['rectangle', 'face', 'op'] as const) {
+		const prefix = `${documentId}:${kind}:`;
+		if (!value.startsWith(prefix)) continue;
+		const suffix = value.slice(prefix.length).split(':', 1)[0]!;
+		if (!/^[1-9]\d*$/.test(suffix)) return null;
+		const sequence = Number(suffix);
+		return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
+	}
+	return null;
+}
 function defaultMaterialId(graph: BomcGraph) { return `${graph.documentId}:material:default`; }
+function neutralMaterialId(graph: BomcGraph) { return `${graph.documentId}:material:authoring-neutral`; }
 function rootMeshId(graph: BomcGraph) { return `${graph.documentId}:mesh:root`; }
 
 function validateRectanglePoints(first: AuthoringPoint, opposite: AuthoringPoint) {
@@ -80,6 +98,77 @@ function defaultMaterial(graph: BomcGraph): SolidMaterial {
 		rgba: [DEFAULT_RGBA[0], DEFAULT_RGBA[1], DEFAULT_RGBA[2], DEFAULT_RGBA[3]],
 		opacityU16: 65535
 	};
+}
+
+function neutralMaterial(graph: BomcGraph, useDefaultId = graph.materials.length === 0): SolidMaterial {
+	return {
+		id: useDefaultId ? defaultMaterialId(graph) : neutralMaterialId(graph),
+		name: DEFAULT_AUTHORING_MATERIAL_NAME,
+		displayName: null,
+		rgba: [NEUTRAL_RGBA[0], NEUTRAL_RGBA[1], NEUTRAL_RGBA[2], NEUTRAL_RGBA[3]],
+		opacityU16: 65535
+	};
+}
+
+function isNeutralMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
+	return (material.id === defaultMaterialId(graph) || material.id === neutralMaterialId(graph))
+		&& material.name === DEFAULT_AUTHORING_MATERIAL_NAME && material.displayName === null
+		&& sameTuple(material.rgba, NEUTRAL_RGBA) && material.opacityU16 === 65535;
+}
+
+function isLegacyMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
+	return material.id === defaultMaterialId(graph) && sameMaterial(material, defaultMaterial(graph));
+}
+
+function currentNeutralMaterial(graph: BomcGraph): SolidMaterial | null {
+	return graph.materials.find((material) => isNeutralMaterial(graph, material)) ?? null;
+}
+
+function materialForNewGeometry(graph: BomcGraph): { material: SolidMaterial; add: boolean } {
+	const existing = currentNeutralMaterial(graph);
+	if (existing) return { material: existing, add: false };
+	const material = neutralMaterial(graph, graph.materials.length === 0);
+	return { material, add: true };
+}
+
+function validateFlatRootIdentity(graph: BomcGraph): { definitionIndex: number; mesh: Mesh | null } {
+	const definitionId = `${graph.documentId}:definition:root`;
+	const instanceId = `${graph.documentId}:instance:root`;
+	if (graph.rootDefinitionId !== definitionId || graph.rootInstanceId !== instanceId
+		|| graph.definitions.length !== 1 || graph.instances.length !== 1) {
+		invalid('Only the flat BOMC root definition and root instance can be edited.');
+	}
+	const definitionIndex = graph.definitions.findIndex((definition) => definition.id === definitionId);
+	const definition = graph.definitions[definitionIndex];
+	const root = graph.instances[0];
+	if (!definition || definition.name !== 'Document Root' || definition.kind !== 'model'
+		|| !root || root.id !== instanceId || root.name !== 'Root' || root.kind !== 'root'
+		|| root.ownerDefinitionId !== null || root.definitionId !== definitionId
+		|| !sameTuple(root.matrix, ROOT_MATRIX) || root.materialId !== null || root.visible !== true
+		|| root.roleCode !== 0 || root.label !== null) {
+		invalid('The canonical flat root identity is unsupported.');
+	}
+	if (graph.meshes.length === 0) {
+		if (definition.meshId !== null || graph.materials.length !== 0) invalid('An empty authoring graph must have no mesh or material.');
+		return { definitionIndex, mesh: null };
+	}
+	if (graph.meshes.length !== 1) invalid('Authoring supports exactly one root mesh.');
+	const mesh = graph.meshes[0];
+	if (!mesh || mesh.id !== rootMeshId(graph) || mesh.definitionId !== definitionId || definition.meshId !== mesh.id) {
+		invalid('The root mesh identity is unsupported.');
+	}
+	return { definitionIndex, mesh };
+}
+
+function validateRootForTopologyEditing(graph: BomcGraph): { definitionIndex: number; mesh: Mesh | null } {
+	const root = validateFlatRootIdentity(graph);
+	if (!root.mesh) return root;
+	if (graph.materials.length < 1 || graph.materials.length > 2
+		|| graph.materials.some((material) => !isLegacyMaterial(graph, material) && !isNeutralMaterial(graph, material))) {
+		invalid('Authoring topology supports only the legacy and neutral application materials.');
+	}
+	if (new Set(graph.materials.map((material) => material.id)).size !== graph.materials.length) invalid('Authoring material IDs must be unique.');
+	return root;
 }
 
 function validateRootForEditing(graph: BomcGraph): { definitionIndex: number; mesh: Mesh | null } {
@@ -202,6 +291,450 @@ function normalizedCross(a: readonly number[], b: readonly number[], c: readonly
 	const length = Math.hypot(nx, ny, nz);
 	if (!Number.isFinite(length) || length === 0) invalid('Extrusion side produced a degenerate face.');
 	return [nx / length, ny / length, nz / length];
+}
+
+function pointEqual(left: readonly number[], right: readonly number[]): boolean {
+	return left.length === 3 && right.length === 3 && left.every((value, index) => Object.is(value, right[index]));
+}
+
+function rawRingNormal(mesh: Mesh, ring: readonly number[]): [number, number, number] {
+	for (let index = 1; index + 1 < ring.length; index += 1) {
+		const a = vectorAt(mesh.positions, ring[0]!);
+		const b = vectorAt(mesh.positions, ring[index]!);
+		const c = vectorAt(mesh.positions, ring[index + 1]!);
+		const ux = b[0] - a[0]; const uy = b[1] - a[1]; const uz = b[2] - a[2];
+		const vx = c[0] - a[0]; const vy = c[1] - a[1]; const vz = c[2] - a[2];
+		const nx = uy * vz - uz * vy; const ny = uz * vx - ux * vz; const nz = ux * vy - uy * vx;
+		const magnitude = Math.hypot(nx, ny, nz);
+		if (magnitude >= 1e-15 && Number.isFinite(magnitude)) return [nx / magnitude, ny / magnitude, nz / magnitude];
+	}
+	invalid('Face ring is degenerate.');
+}
+
+function dot3(left: readonly number[], right: readonly number[]) {
+	return left[0]! * right[0]! + left[1]! * right[1]! + left[2]! * right[2]!;
+}
+
+function subtract3(left: readonly number[], right: readonly number[]): Point3 {
+	return [left[0]! - right[0]!, left[1]! - right[1]!, left[2]! - right[2]!];
+}
+
+function pointOnSegmentInterior3(point: Point3, start: Point3, end: Point3): boolean {
+	const edge = subtract3(end, start);
+	const relative = subtract3(point, start);
+	const lengthSquared = dot3(edge, edge);
+	if (!Number.isFinite(lengthSquared) || lengthSquared < MIN_AUTHORING_EDGE_METRES * MIN_AUTHORING_EDGE_METRES) return false;
+	const parameter = dot3(relative, edge) / lengthSquared;
+	if (parameter <= 1e-9 || parameter >= 1 - 1e-9) return false;
+	const closest: Point3 = [
+		start[0] + edge[0] * parameter,
+		start[1] + edge[1] * parameter,
+		start[2] + edge[2] * parameter
+	];
+	const tolerance = 1e-9 * Math.max(1, Math.sqrt(lengthSquared));
+	return Math.hypot(point[0] - closest[0], point[1] - closest[1], point[2] - closest[2]) <= tolerance;
+}
+
+type Point2 = readonly [number, number];
+
+function projectionAxis(normal: Point3): 0 | 1 | 2 {
+	const absolute = normal.map(Math.abs);
+	return absolute[0]! >= absolute[1]! && absolute[0]! >= absolute[2]! ? 0 : absolute[1]! >= absolute[2]! ? 1 : 2;
+}
+
+function projectPoint2(point: Point3, drop: 0 | 1 | 2): Point2 {
+	return drop === 0 ? [point[1], point[2]] : drop === 1 ? [point[0], point[2]] : [point[0], point[1]];
+}
+
+function orient2(left: Point2, middle: Point2, right: Point2): number {
+	return (middle[0] - left[0]) * (right[1] - left[1]) - (middle[1] - left[1]) * (right[0] - left[0]);
+}
+
+function samePoint2(left: Point2, right: Point2, tolerance: number): boolean {
+	return Math.hypot(left[0] - right[0], left[1] - right[1]) <= tolerance;
+}
+
+function pointOnSegment2(point: Point2, start: Point2, end: Point2, tolerance: number): boolean {
+	return Math.abs(orient2(start, end, point)) <= tolerance
+		&& point[0] >= Math.min(start[0], end[0]) - tolerance && point[0] <= Math.max(start[0], end[0]) + tolerance
+		&& point[1] >= Math.min(start[1], end[1]) - tolerance && point[1] <= Math.max(start[1], end[1]) + tolerance;
+}
+
+function properSegmentsCross(a: Point2, b: Point2, c: Point2, d: Point2, tolerance: number): boolean {
+	const abC = orient2(a, b, c); const abD = orient2(a, b, d);
+	const cdA = orient2(c, d, a); const cdB = orient2(c, d, b);
+	return ((abC > tolerance && abD < -tolerance) || (abC < -tolerance && abD > tolerance))
+		&& ((cdA > tolerance && cdB < -tolerance) || (cdA < -tolerance && cdB > tolerance));
+}
+
+function collinearOverlapNeedsSplit(a: Point2, b: Point2, c: Point2, d: Point2, tolerance: number): boolean {
+	if (Math.abs(orient2(a, b, c)) > tolerance || Math.abs(orient2(a, b, d)) > tolerance) return false;
+	const exactShared = (samePoint2(a, c, tolerance) && samePoint2(b, d, tolerance))
+		|| (samePoint2(a, d, tolerance) && samePoint2(b, c, tolerance));
+	if (exactShared) return false;
+	const axis = Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1]) ? 0 : 1;
+	const [a0, a1] = [Math.min(a[axis], b[axis]), Math.max(a[axis], b[axis])];
+	const [c0, c1] = [Math.min(c[axis], d[axis]), Math.max(c[axis], d[axis])];
+	return Math.min(a1, c1) - Math.max(a0, c0) > tolerance;
+}
+
+function pointInPolygonStrict(point: Point2, polygon: readonly Point2[], tolerance: number): boolean {
+	for (let index = 0; index < polygon.length; index += 1) {
+		if (pointOnSegment2(point, polygon[index]!, polygon[(index + 1) % polygon.length]!, tolerance)) return false;
+	}
+	let inside = false;
+	for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+		const a = polygon[index]!; const b = polygon[previous]!;
+		const crosses = (a[1] > point[1]) !== (b[1] > point[1]);
+		if (crosses && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
+	}
+	return inside;
+}
+
+function rejectUnsupportedFaceIntersections(previousMesh: Mesh, candidatePoints: readonly Point3[], candidateNormal: Point3): void {
+	const existingVertices = [...new Set(previousMesh.faces.flatMap((face) => face.outer))];
+	const existingEdges = new Map<string, readonly [number, number]>();
+	for (const face of previousMesh.faces) for (let index = 0; index < face.outer.length; index += 1) {
+		const first = face.outer[index]!; const second = face.outer[(index + 1) % face.outer.length]!;
+		const key = first < second ? `${first}:${second}` : `${second}:${first}`;
+		if (!existingEdges.has(key)) existingEdges.set(key, [first, second]);
+	}
+
+	for (const point of candidatePoints) {
+		if (exactVertexIndex(previousMesh.positions, point) !== null) continue;
+		for (const [first, second] of existingEdges.values()) {
+			if (pointOnSegmentInterior3(point, vectorAt(previousMesh.positions, first), vectorAt(previousMesh.positions, second))) {
+				invalid('New face endpoint lies inside an existing edge and would require unsupported topology splitting.');
+			}
+		}
+	}
+	for (const vertex of existingVertices) {
+		const point = vectorAt(previousMesh.positions, vertex) as Point3;
+		if (candidatePoints.some((candidate) => pointEqual(candidate, point))) continue;
+			for (let index = 0; index < candidatePoints.length; index += 1) {
+				if (pointOnSegmentInterior3(point, candidatePoints[index]!, candidatePoints[(index + 1) % candidatePoints.length]!)) {
+					invalid('New face edge passes through an existing vertex and would require unsupported topology splitting.');
+				}
+			}
+		}
+
+		const drop = projectionAxis(candidateNormal);
+	const candidate2 = candidatePoints.map((point) => projectPoint2(point, drop));
+	const candidateAnchor = candidatePoints[0]!;
+	const scale = Math.max(1, ...candidatePoints.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	for (const face of previousMesh.faces) {
+		if (Math.abs(Math.abs(dot3(face.normal, candidateNormal)) - 1) > 1e-9) continue;
+		const existingPoints = face.outer.map((vertex) => vectorAt(previousMesh.positions, vertex) as Point3);
+		if (existingPoints.some((point) => Math.abs(dot3(subtract3(point, candidateAnchor), candidateNormal)) > tolerance)) continue;
+		const existing2 = existingPoints.map((point) => projectPoint2(point, drop));
+		for (let first = 0; first < candidate2.length; first += 1) {
+			const a = candidate2[first]!; const b = candidate2[(first + 1) % candidate2.length]!;
+			for (let second = 0; second < existing2.length; second += 1) {
+				const c = existing2[second]!; const d = existing2[(second + 1) % existing2.length]!;
+				if (properSegmentsCross(a, b, c, d, tolerance) || collinearOverlapNeedsSplit(a, b, c, d, tolerance)) {
+					invalid('New coplanar face overlaps existing topology and would require unsupported splitting.');
+				}
+			}
+		}
+		if (candidate2.some((point) => pointInPolygonStrict(point, existing2, tolerance))
+			|| existing2.some((point) => pointInPolygonStrict(point, candidate2, tolerance))) {
+			invalid('New coplanar face overlaps an existing face and would require unsupported splitting.');
+		}
+	}
+}
+
+function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull', operationId?: string): string {
+	return jsonLabel(operationId === undefined
+		? [SHAPE_SCHEMA_V2, operation, faceId]
+		: [SHAPE_SCHEMA_V2, operation, faceId, operationId]);
+}
+
+function isV2Face(face: Face): boolean {
+	const label = tupleLabel(face);
+	return !!label && label[0] === SHAPE_SCHEMA_V2 && typeof label[2] === 'string';
+}
+
+function faceFromRing(
+	mesh: Mesh,
+	id: string,
+	ringInput: readonly number[],
+	frontMaterialId: string,
+	backMaterialId: string | null,
+	label: string,
+	preferredNormal?: readonly [number, number, number]
+): Face {
+	let ring = [...ringInput];
+	const inputPoints = ring.map((index) => vectorAt(mesh.positions, index) as Point3);
+	let prepared;
+	try { prepared = preparePolygon(inputPoints, preferredNormal as Point3 | undefined, { canonicalizeStart: false }); }
+	catch (error) {
+		if (error instanceof AuthoringPolygonError) invalid(error.message);
+		throw error;
+	}
+	if (!pointEqual(prepared.points[0]!, inputPoints[0]!)) ring = [...ring].reverse();
+	const triangles = prepared.triangles.map((local) => ring[local]!);
+	return {
+		id,
+		outer: ring,
+		holes: [],
+		triangles,
+		normal: [prepared.normal[0], prepared.normal[1], prepared.normal[2]],
+		frontMaterialId,
+		backMaterialId,
+		hidden: false,
+		surfaceCode: 0,
+		roleCode: 0,
+		label
+	};
+}
+
+function exactVertexIndex(positions: readonly number[], point: Point3): number | null {
+	for (let index = 0; index < positions.length; index += 3) {
+		if (Object.is(positions[index], point[0]) && Object.is(positions[index + 1], point[1]) && Object.is(positions[index + 2], point[2])) return index / 3;
+	}
+	return null;
+}
+
+function assertNewOwnedFaceId(graph: BomcGraph, faceId: string) {
+	if (sequenceForApplicationId(graph.documentId, faceId) === null) invalid('Face ID must use a positive document-local rectangle/face sequence.');
+	if (graph.meshes.some((mesh) => mesh.faces.some((face) => face.id === faceId))) invalid(`Face ${faceId} already exists.`);
+}
+
+function editsForFaceAppend(
+	graph: BomcGraph,
+	definitionIndex: number,
+	previousMesh: Mesh | null,
+	nextMesh: Mesh,
+	material: SolidMaterial,
+	addMaterial: boolean
+): GeometryEdit {
+	if (previousMesh) {
+		const forward: DocumentEdit[] = [];
+		if (addMaterial) forward.push({ type: 'put-material', value: material });
+		forward.push({ type: 'put-mesh', value: nextMesh });
+		const inverse: DocumentEdit[] = [{ type: 'put-mesh', value: previousMesh }];
+		if (addMaterial) inverse.push({ type: 'delete-material', id: material.id });
+		return { forward, inverse };
+	}
+	const definition = graph.definitions[definitionIndex]!;
+	const nextDefinition = { ...definition, meshId: nextMesh.id };
+	return {
+		forward: [
+			{ type: 'put-material', value: material },
+			{ type: 'put-definition', value: nextDefinition },
+			{ type: 'put-mesh', value: nextMesh }
+		],
+		inverse: [
+			{ type: 'delete-mesh', id: nextMesh.id },
+			{ type: 'put-definition', value: definition },
+			{ type: 'delete-material', id: material.id }
+		]
+	};
+}
+
+function graphAfterEdits(graph: BomcGraph, edits: readonly DocumentEdit[]): BomcGraph {
+	let materials = [...graph.materials];
+	let definitions = [...graph.definitions];
+	let meshes = [...graph.meshes];
+	for (const edit of edits) {
+		if (edit.type === 'put-material') materials = [...materials.filter((item) => item.id !== edit.value.id), edit.value].sort((a, b) => codeUnitCompare(a.id, b.id));
+		else if (edit.type === 'delete-material') materials = materials.filter((item) => item.id !== edit.id);
+		else if (edit.type === 'put-definition') definitions = [...definitions.filter((item) => item.id !== edit.value.id), edit.value].sort((a, b) => codeUnitCompare(a.id, b.id));
+		else if (edit.type === 'put-mesh') meshes = [...meshes.filter((item) => item.id !== edit.value.id), edit.value].sort((a, b) => codeUnitCompare(a.id, b.id));
+		else if (edit.type === 'delete-mesh') meshes = meshes.filter((item) => item.id !== edit.id);
+	}
+	return { ...graph, materials, definitions, meshes };
+}
+
+/** Commit a new application-owned planar face while reusing exact canonical endpoint vertices. */
+export function buildFaceLoopEdit(
+	graph: BomcGraph,
+	faceId: string,
+	points: readonly AuthoringPoint[],
+	constructionNormal: AuthoringPoint,
+	kind: 'rectangle' | 'line' = 'line'
+): GeometryEdit {
+	assertNewOwnedFaceId(graph, faceId);
+	const { definitionIndex, mesh: previousMesh } = validateRootForTopologyEditing(graph);
+	let prepared;
+	try { prepared = preparePolygon(points as readonly Point3[], constructionNormal as Point3); }
+	catch (error) {
+		if (error instanceof AuthoringPolygonError) invalid(error.message);
+		throw error;
+	}
+	if (previousMesh) rejectUnsupportedFaceIntersections(previousMesh, prepared.points, prepared.normal);
+	const materialPolicy = materialForNewGeometry(graph);
+	const positions = previousMesh ? [...previousMesh.positions] : [];
+	const ring: number[] = [];
+	for (const point of prepared.points) {
+		let vertex = exactVertexIndex(positions, point);
+		if (vertex === null) {
+			vertex = positions.length / 3;
+			positions.push(point[0], point[1], point[2]);
+		}
+		ring.push(vertex);
+	}
+	const base: Mesh = previousMesh
+		? { ...previousMesh, positions }
+		: { id: rootMeshId(graph), definitionId: graph.rootDefinitionId, positions, faces: [] };
+	const face: Face = {
+		id: faceId,
+		outer: ring,
+		holes: [],
+		triangles: prepared.triangles.map((local) => ring[local]!),
+		normal: [prepared.normal[0], prepared.normal[1], prepared.normal[2]],
+		frontMaterialId: materialPolicy.material.id,
+		backMaterialId: materialPolicy.material.id,
+		hidden: false,
+		surfaceCode: 0,
+		roleCode: 0,
+		label: v2FaceLabel(faceId, kind)
+	};
+	const nextMesh = withSortedFaces(base, [...base.faces, face]);
+	const edit = editsForFaceAppend(graph, definitionIndex, previousMesh, nextMesh, materialPolicy.material, materialPolicy.add);
+	const validation = validateEditableSubset(graphAfterEdits(graph, edit.forward));
+	if (!validation.editable) invalid(`Face loop is outside the supported authoring topology: ${validation.reason}`);
+	return edit;
+}
+
+/** Commit one exact four-corner orthogonal planar rectangle. */
+export function buildPlanarRectangleEdit(
+	graph: BomcGraph,
+	faceId: string,
+	points: readonly AuthoringPoint[],
+	constructionNormal: AuthoringPoint
+): GeometryEdit {
+	if (points.length !== 4) invalid('Rectangle must contain exactly four corners.');
+	const prepared = preparePolygon(points as readonly Point3[], constructionNormal as Point3);
+	const edge = (start: number, end: number) => [
+		prepared.points[end]![0] - prepared.points[start]![0],
+		prepared.points[end]![1] - prepared.points[start]![1],
+		prepared.points[end]![2] - prepared.points[start]![2]
+	] as const;
+	const e0 = edge(0, 1); const e1 = edge(1, 2); const e2 = edge(2, 3); const e3 = edge(3, 0);
+	const scale = Math.max(1, ...[e0, e1, e2, e3].map((value) => Math.hypot(...value)));
+	const tolerance = 1e-9 * scale * scale;
+	if (Math.abs(dot3(e0, e1)) > tolerance || Math.abs(dot3(e1, e2)) > tolerance
+		|| Math.abs(e0[0] + e2[0]) > 1e-9 * scale || Math.abs(e0[1] + e2[1]) > 1e-9 * scale || Math.abs(e0[2] + e2[2]) > 1e-9 * scale
+		|| Math.abs(e1[0] + e3[0]) > 1e-9 * scale || Math.abs(e1[1] + e3[1]) > 1e-9 * scale || Math.abs(e1[2] + e3[2]) > 1e-9 * scale) {
+		invalid('Rectangle corners must form one orthogonal planar rectangle.');
+	}
+	return buildFaceLoopEdit(graph, faceId, prepared.points as readonly AuthoringPoint[], constructionNormal, 'rectangle');
+}
+
+function upgradedFace(mesh: Mesh, face: Face, operationId: string): Face {
+	const currentNormal = rawRingNormal(mesh, face.outer);
+	if (dot3(currentNormal, face.normal) <= 1e-9) invalid(`Push/Pull would invert face ${face.id}.`);
+	return faceFromRing(
+		mesh,
+		face.id,
+		face.outer,
+		face.frontMaterialId!,
+		face.backMaterialId,
+		v2FaceLabel(face.id, 'push-pull', operationId),
+		face.normal
+	);
+}
+
+function rejectOppositeBoundaryCrossing(mesh: Mesh, selected: Face, distance: number): void {
+	const anchor = vectorAt(mesh.positions, selected.outer[0]!);
+	const selectedVertices = new Set(selected.outer);
+	for (const face of mesh.faces) {
+		if (face.id === selected.id || face.outer.some((vertex) => selectedVertices.has(vertex))) continue;
+		if (Math.abs(Math.abs(dot3(face.normal, selected.normal)) - 1) > 1e-9) continue;
+		const offsets = face.outer.map((vertex) => {
+			const point = vectorAt(mesh.positions, vertex);
+			return (point[0] - anchor[0]) * selected.normal[0] + (point[1] - anchor[1]) * selected.normal[1] + (point[2] - anchor[2]) * selected.normal[2];
+		});
+		const min = Math.min(...offsets); const max = Math.max(...offsets);
+		if (max - min > 1e-9 * Math.max(1, Math.abs(min), Math.abs(max))) continue;
+		const boundary = (min + max) / 2;
+		if (boundary * distance > 0 && Math.abs(distance) + MIN_EDGE_METRES >= Math.abs(boundary)) {
+			invalid('Push/Pull would cross or collapse an opposite boundary and requires unsupported topology deletion.');
+		}
+	}
+}
+
+/** Push/Pull one canonical face. Open standalone faces become prisms; manifold faces move their shared boundary. */
+export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance: number, operationSequence: number): GeometryEdit {
+	if (!finite(distance) || Math.abs(distance) < MIN_AUTHORING_EDGE_METRES) invalid('Push/Pull distance must be finite and at least 1e-6 metres from zero.');
+	if (!Number.isSafeInteger(operationSequence) || operationSequence < 1 || operationSequence >= Number.MAX_SAFE_INTEGER) invalid('Push/Pull operation sequence is exhausted.');
+	const { mesh } = validateRootForTopologyEditing(graph);
+	if (!mesh) invalid('Push/Pull requires an authored face.');
+	const subset = validateEditableSubset(graph);
+	if (!subset.editable) invalid(`Document is outside the editable topology: ${subset.reason}`);
+	const target = mesh.faces.find((face) => face.id === faceId);
+	if (!target) invalid(`Face ${faceId} no longer exists.`);
+	const topology = buildAuthoringTopology(mesh);
+	const incidentCounts = target.outer.map((vertex, index) => topology.edges.get(vertex < target.outer[(index + 1) % target.outer.length]!
+		? `${vertex}:${target.outer[(index + 1) % target.outer.length]!}`
+		: `${target.outer[(index + 1) % target.outer.length]!}:${vertex}`)?.faceIds.length ?? 0);
+	const operationId = `${graph.documentId}:op:${operationSequence}`;
+	const oldMesh = mesh;
+
+	if (incidentCounts.every((count) => count === 1)) {
+		const capStart = mesh.positions.length / 3;
+		const positions = [...mesh.positions];
+		for (const vertex of target.outer) {
+			const point = vectorAt(mesh.positions, vertex);
+			positions.push(
+				point[0] + target.normal[0] * distance,
+				point[1] + target.normal[1] * distance,
+				point[2] + target.normal[2] * distance
+			);
+		}
+		const moving = target.outer.map((_vertex, index) => capStart + index);
+		const expanded: Mesh = { ...mesh, positions };
+		const positive = distance > 0;
+		const baseRing = positive ? [...target.outer].reverse() : [...target.outer];
+		const capRing = positive ? [...moving] : [...moving].reverse();
+		const materialId = target.frontMaterialId;
+		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const replacements: Face[] = [
+			faceFromRing(expanded, target.id, baseRing, materialId, null, v2FaceLabel(target.id, 'push-pull', operationId), positive
+				? [-target.normal[0], -target.normal[1], -target.normal[2]] : target.normal),
+			faceFromRing(expanded, `${operationId}:cap`, capRing, materialId, null, v2FaceLabel(`${operationId}:cap`, 'push-pull', operationId), positive
+				? target.normal : [-target.normal[0], -target.normal[1], -target.normal[2]])
+		];
+		for (let index = 0; index < target.outer.length; index += 1) {
+			const next = (index + 1) % target.outer.length;
+			const sideRing = [target.outer[index]!, target.outer[next]!, moving[next]!, moving[index]!];
+			const sideId = `${operationId}:side:${index}`;
+			const start = vectorAt(mesh.positions, target.outer[index]!);
+			const end = vectorAt(mesh.positions, target.outer[next]!);
+			const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+			const outward: Point3 = [
+				edge[1] * target.normal[2] - edge[2] * target.normal[1],
+				edge[2] * target.normal[0] - edge[0] * target.normal[2],
+				edge[0] * target.normal[1] - edge[1] * target.normal[0]
+			];
+			replacements.push(faceFromRing(expanded, sideId, sideRing, materialId, null, v2FaceLabel(sideId, 'push-pull', operationId), outward));
+		}
+		const nextMesh = withSortedFaces(expanded, [...mesh.faces.filter((face) => face.id !== target.id), ...replacements]);
+		const nextGraph = { ...graph, meshes: [nextMesh] };
+		const validation = validateEditableSubset(nextGraph);
+		if (!validation.editable) invalid(`Push/Pull result is outside the supported topology: ${validation.reason}`);
+		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+	}
+
+	if (!incidentCounts.every((count) => count === 2)) invalid('Push/Pull supports standalone faces or faces on a closed manifold component.');
+	rejectOppositeBoundaryCrossing(mesh, target, distance);
+	const moved = new Set(target.outer);
+	const positions = [...mesh.positions];
+	for (const vertex of moved) {
+		const offset = vertex * 3;
+		positions[offset] = positions[offset]! + target.normal[0] * distance;
+		positions[offset + 1] = positions[offset + 1]! + target.normal[1] * distance;
+		positions[offset + 2] = positions[offset + 2]! + target.normal[2] * distance;
+	}
+	const movedMesh: Mesh = { ...mesh, positions };
+	const affected = new Set([target.id, ...(topology.adjacentFaceIds.get(target.id) ?? [])]);
+	const faces = mesh.faces.map((face) => affected.has(face.id) ? upgradedFace(movedMesh, face, operationId) : face);
+	const nextMesh = withSortedFaces(movedMesh, faces);
+	const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+	if (!validation.editable) invalid(`Push/Pull result is outside the supported topology: ${validation.reason}`);
+	return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 }
 
 function makeFace(
@@ -386,6 +919,81 @@ function verifyExtrusionEntity(
 	};
 }
 
+function v2SequenceForFace(graph: BomcGraph, face: Face): number | null {
+	const direct = sequenceForApplicationId(graph.documentId, face.id);
+	if (direct !== null) return direct;
+	const label = tupleLabel(face);
+	if (!label) return null;
+	for (const value of label) if (typeof value === 'string') {
+		const sequence = sequenceForApplicationId(graph.documentId, value);
+		if (sequence !== null) return sequence;
+	}
+	return null;
+}
+
+function validateTopologyEditableSubset(graph: BomcGraph): EditableSubsetResult {
+	try {
+		const { mesh } = validateRootForTopologyEditing(graph);
+		if (!mesh) return { editable: true, entities: [] };
+		if (mesh.positions.length === 0 || mesh.positions.length % 3 !== 0 || mesh.positions.some((value) => !finite(value))) {
+			return { editable: false, reason: 'Mesh positions are malformed for authoring.' };
+		}
+		for (let index = 1; index < mesh.faces.length; index += 1) {
+			if (codeUnitCompare(mesh.faces[index - 1]!.id, mesh.faces[index]!.id) >= 0) {
+				return { editable: false, reason: 'Mesh faces are not in canonical code-unit ID order.' };
+			}
+		}
+		const supportedMaterialIds = new Set(graph.materials.map((material) => material.id));
+		const usedVertices = new Set<number>();
+		for (const face of mesh.faces) {
+			if (face.hidden || face.surfaceCode !== 0 || face.roleCode !== 0 || face.holes.length !== 0) {
+				return { editable: false, reason: `Face ${face.id} uses unsupported authoring face attributes.` };
+			}
+			if (!face.frontMaterialId || !supportedMaterialIds.has(face.frontMaterialId)
+				|| (face.backMaterialId !== null && !supportedMaterialIds.has(face.backMaterialId))) {
+				return { editable: false, reason: `Face ${face.id} references an unsupported authoring material.` };
+			}
+			const label = tupleLabel(face);
+			const v2 = label?.[0] === SHAPE_SCHEMA_V2 && (label.length === 3 || label.length === 4)
+				&& ['rectangle', 'line', 'push-pull'].includes(String(label[1])) && label[2] === face.id
+				&& (label.length === 3 || (typeof label[3] === 'string' && sequenceForApplicationId(graph.documentId, label[3]) !== null));
+			const legacy = label?.[0] === SHAPE_SCHEMA && (label?.[1] === 'rectangle' || label?.[1] === 'extrusion')
+				&& typeof label?.[2] === 'string' && sequenceForEntity(graph.documentId, label[2]) !== null;
+			if (!v2 && !legacy) return { editable: false, reason: `Face ${face.id} has an unsupported authoring label.` };
+			if (face.outer.length < 3 || face.outer.length > 256 || new Set(face.outer).size !== face.outer.length
+				|| face.triangles.length !== (face.outer.length - 2) * 3
+				|| face.triangles.some((vertex) => !face.outer.includes(vertex))) {
+				return { editable: false, reason: `Face ${face.id} has malformed ring or triangle topology.` };
+			}
+			for (const vertex of face.outer) usedVertices.add(vertex);
+			let prepared;
+			try { prepared = preparePolygon(face.outer.map((vertex) => vectorAt(mesh.positions, vertex)) as Point3[], face.normal as Point3, { canonicalizeStart: false }); }
+			catch (error) { return { editable: false, reason: `Face ${face.id} is not a supported simple planar polygon: ${error instanceof Error ? error.message : 'polygon validation failed'}` }; }
+			if (dot3(rawRingNormal(mesh, face.outer), face.normal) < 1 - 1e-9 || dot3(prepared.normal, face.normal) < 1 - 1e-9) {
+				return { editable: false, reason: `Face ${face.id} normal is inconsistent with its ring.` };
+			}
+		}
+		if (usedVertices.size !== mesh.positions.length / 3) return { editable: false, reason: 'Mesh contains orphan vertex positions.' };
+		try { buildAuthoringTopology(mesh); }
+		catch (error) {
+			const message = error instanceof AuthoringTopologyError ? error.message : 'Topology validation failed.';
+			return { editable: false, reason: message };
+		}
+		const entities: AuthoringEntity[] = mesh.faces.map((face) => ({
+			entityId: face.id,
+			sequence: v2SequenceForFace(graph, face) ?? 1,
+			kind: 'face' as const,
+			faces: [face],
+			baseFace: face,
+			outer: face.outer,
+			distance: null
+		})).sort((left, right) => left.sequence - right.sequence || codeUnitCompare(left.entityId, right.entityId));
+		return { editable: true, entities };
+	} catch (error) {
+		return { editable: false, reason: error instanceof Error ? error.message : 'Application authoring topology validation failed.' };
+	}
+}
+
 /**
  * Inspect a kernel-valid BOMC graph without repairing it. Callers must run the
  * canonical BOMC reader/document validator first; unsupported application
@@ -393,6 +1001,7 @@ function verifyExtrusionEntity(
  */
 export function validateEditableSubset(graph: BomcGraph): EditableSubsetResult {
 	try {
+		if (graph.meshes.some((mesh) => mesh.faces.some(isV2Face))) return validateTopologyEditableSubset(graph);
 		const docId = graph.documentId;
 		if (typeof docId !== 'string' || !docId) return { editable: false, reason: 'Document identity is missing.' };
 		const rootDefinitionId = `${docId}:definition:root`;
@@ -484,13 +1093,25 @@ export function validateEditableSubset(graph: BomcGraph): EditableSubsetResult {
 export function nextRectangleSequence(graph: BomcGraph): number {
 	const subset = validateEditableSubset(graph);
 	if (!subset.editable) invalid(`Cannot allocate an ID for a viewer-only document: ${subset.reason}`);
-	const max = subset.entities.reduce((value, entity) => Math.max(value, entity.sequence), 0);
+	let max = subset.entities.reduce((value, entity) => Math.max(value, entity.sequence), 0);
+	for (const mesh of graph.meshes) for (const face of mesh.faces) {
+		for (const value of [face.id, ...(tupleLabel(face) ?? [])]) if (typeof value === 'string') {
+			const sequence = sequenceForApplicationId(graph.documentId, value);
+			if (sequence !== null) max = Math.max(max, sequence);
+		}
+	}
 	if (max >= Number.MAX_SAFE_INTEGER) invalid('Rectangle ID sequence is exhausted.');
 	return max + 1;
 }
 
+export const nextAuthoringSequence = nextRectangleSequence;
+
 export function hasEntityId(graph: BomcGraph, entityId: string): boolean {
 	return graph.meshes.some((mesh) => mesh.faces.some((face) => face.id === entityId || tupleLabel(face)?.[2] === entityId));
+}
+
+export function hasFaceId(graph: BomcGraph, faceId: string): boolean {
+	return graph.meshes.some((mesh) => mesh.faces.some((face) => face.id === faceId));
 }
 
 export function journalEntry(edit: GeometryEdit): AuthoringJournalEntry {

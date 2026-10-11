@@ -1,0 +1,84 @@
+import { describe, expect, test } from 'bun:test';
+import type { Face, Mesh } from '@sibambo/bomc-document';
+import { preparePolygon } from '../../src/lib/authoring/polygon.js';
+import { buildAuthoringTopology } from '../../src/lib/authoring/topology.js';
+
+function face(id: string, outer: number[], triangles: number[], normal: [number, number, number] = [0, 1, 0]): Face {
+	return {
+		id,
+		outer,
+		holes: [],
+		triangles,
+		normal,
+		frontMaterialId: 'material',
+		backMaterialId: null,
+		hidden: false,
+		surfaceCode: 0,
+		roleCode: 0,
+		label: null
+	};
+}
+
+describe('authoring polygon and topology', () => {
+	test('triangulates triangle, quad and concave simple loops deterministically', () => {
+		for (const points of [
+			[[0, 0, 0], [2, 0, 0], [0, 0, 2]],
+			[[0, 0, 0], [3, 0, 0], [3, 0, 2], [0, 0, 2]],
+			[[0, 0, 0], [3, 0, 0], [3, 0, 3], [1.5, 0, 1.5], [0, 0, 3]]
+		] as const) {
+			const first = preparePolygon(points);
+			const second = preparePolygon(points);
+			expect(first).toEqual(second);
+			expect(first.triangles).toHaveLength((points.length - 2) * 3);
+			expect(first.normal).toEqual([0, 1, 0]);
+		}
+	});
+
+	test('normalizes rotated start and reversed winding to the same canonical polygon', () => {
+		const base = [[0, 0, 0], [4, 0, 0], [4, 0, 3], [0, 0, 3]] as const;
+		const rotated = [[4, 0, 3], [0, 0, 3], [0, 0, 0], [4, 0, 0]] as const;
+		const reversed = [[0, 0, 0], [0, 0, 3], [4, 0, 3], [4, 0, 0]] as const;
+		expect(preparePolygon(rotated)).toEqual(preparePolygon(base));
+		expect(preparePolygon(reversed)).toEqual(preparePolygon(base));
+	});
+
+	test('rejects self-intersection, repeated vertex, tiny edge, nonplanar point and zero area', () => {
+		for (const points of [
+			[[0, 0, 0], [2, 0, 2], [0, 0, 2], [2, 0, 0]],
+			[[0, 0, 0], [2, 0, 0], [0, 0, 0], [0, 0, 2]],
+			[[0, 0, 0], [1e-7, 0, 0], [0, 0, 2]],
+			[[0, 0, 0], [2, 0, 0], [2, 1e-4, 2], [0, 0, 2]],
+			[[0, 0, 0], [1, 0, 0], [2, 0, 0]]
+		] as const) expect(() => preparePolygon(points)).toThrow();
+	});
+
+	test('accepts a shared edge and derives stable adjacency independent of face order', () => {
+		const mesh: Mesh = {
+			id: 'mesh',
+			definitionId: 'definition',
+			positions: [0, 0, 0, 2, 0, 0, 0, 0, 2, 2, 0, 2],
+			faces: [
+				face('face-b', [1, 3, 2], [1, 3, 2]),
+				face('face-a', [0, 1, 2], [0, 1, 2])
+			]
+		};
+		const topology = buildAuthoringTopology(mesh);
+		expect(topology.edges.get('1:2')?.faceIds).toEqual(['face-a', 'face-b']);
+		expect(topology.adjacentFaceIds.get('face-a')).toEqual(['face-b']);
+		expect(topology.adjacentFaceIds.get('face-b')).toEqual(['face-a']);
+	});
+
+	test('rejects an edge incident to three faces', () => {
+		const mesh: Mesh = {
+			id: 'mesh',
+			definitionId: 'definition',
+			positions: [0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 1, 2, 0, -1, 2],
+			faces: [
+				face('a', [0, 1, 2], [0, 1, 2]),
+				face('b', [1, 0, 3], [1, 0, 3]),
+				face('c', [0, 1, 4], [0, 1, 4])
+			]
+		};
+		expect(() => buildAuthoringTopology(mesh)).toThrow(/non-manifold/i);
+	});
+});

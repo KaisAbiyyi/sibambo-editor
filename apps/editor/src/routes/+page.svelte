@@ -16,7 +16,8 @@
 	import { AuthoringClient, type AuthoringRecoveryState } from '$lib/authoring/bomc-authoring-client';
 	import { graphsEqual } from '$lib/authoring/history';
 	import { projectAuthoringScene } from '$lib/authoring/scene';
-	import { AuthoringToolController } from '$lib/authoring/tools';
+	import { AuthoringToolController, type AuthoringTool } from '$lib/authoring/tools';
+	import { hasEntityId } from '$lib/authoring/geometry';
 	import type { AuthoringCheckpoint, AuthoringCommand, AuthoringResult, OpenResult } from '$lib/authoring/protocol';
 	import type { PreparedRuntimeGeometryScene } from '@sibambo/scene-runtime/types';
 	import type { ViewportBounds } from '@sibambo/viewport';
@@ -29,7 +30,6 @@
 	let artifactSha256 = $state('');
 	let modelTabTitle = $state('Sibambo Editor');
 	type EditorMode = 'empty' | 'imported' | 'authoring';
-	type AuthoringTool = 'select' | 'rectangle' | 'extrude';
 	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null } | { kind: 'close' };
 	let mode = $state<EditorMode>('empty');
 	let hasModel = $derived(mode !== 'empty');
@@ -42,6 +42,7 @@
 	let authoringRecovery = $state.raw<AuthoringRecoveryState>(Object.freeze({ phase: 'closed', error: null }));
 	let unsubscribeAuthoringRecovery: (() => void) | null = null;
 	let authoringTool = $state<AuthoringTool>('select');
+	let authoringInference = $state('');
 	let extrusionDistanceText = $state('');
 	let selectedEntityId = $state('');
 	let authoringBounds = $state.raw<ViewportBounds | null>(null);
@@ -106,6 +107,7 @@
 		authoringCheckpoint: AuthoringCheckpoint | null;
 		authoringTools: AuthoringToolController | null;
 		authoringTool: AuthoringTool;
+		authoringInference: string;
 		selectedEntityId: string;
 		authoringBounds: ViewportBounds | null;
 		activeSourceName: string | null;
@@ -128,7 +130,7 @@
 	function snapshotLoadedState(): LoadedEditorState {
 		return {
 			mode, provenance, artifactSha256, modelTabTitle, result, session, editorController, viewport,
-			authoringClient, authoringCheckpoint, authoringTools, authoringTool, selectedEntityId, authoringBounds, activeSourceName,
+				authoringClient, authoringCheckpoint, authoringTools, authoringTool, authoringInference, selectedEntityId, authoringBounds, activeSourceName,
 			ready, picked,
 			selectedOccurrenceHandles: [...selectedOccurrenceHandles], activeTool, activeCameraTool, selectionBox: selectionBox ? { ...selectionBox } : null,
 			moveDistanceText, moveAxis, extrusionDistanceText, editorNotice, projectionError, sceneId,
@@ -160,6 +162,7 @@
 		authoringCheckpoint = snapshot.authoringCheckpoint;
 		authoringTools = snapshot.authoringTools;
 		authoringTool = snapshot.authoringTool;
+		authoringInference = snapshot.authoringInference;
 		selectedEntityId = snapshot.selectedEntityId;
 		authoringBounds = snapshot.authoringBounds;
 		activeSourceName = snapshot.activeSourceName;
@@ -280,6 +283,7 @@
 						} finally { if (operationGeneration === generation && ownsAuthoringController(client, target, tools)) authoringOperationBusy = false; }
 					},
 				onSelectionChange: (entityId: string | null) => { if (ownsAuthoringController(client, target, tools)) selectedEntityId = entityId ?? ''; },
+				onInferenceChange: (label: string) => { if (ownsAuthoringController(client, target, tools)) authoringInference = label; },
 				onError: (message: string) => { if (ownsAuthoringController(client, target, tools)) editorNotice = message; }
 			});
 		tools.setCheckpoint(initial);
@@ -326,7 +330,7 @@
 		authoringCheckpoint = acknowledged.checkpoint;
 		authoringTools?.setCheckpoint(acknowledged.checkpoint);
 		if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
-		else if (selectedEntityId && !acknowledged.checkpoint.snapshot.graph.meshes.some((mesh) => mesh.id === selectedEntityId)) selectedEntityId = '';
+		else if (selectedEntityId && !hasEntityId(acknowledged.checkpoint.snapshot.graph, selectedEntityId)) selectedEntityId = '';
 		modelTabTitle = authoringTitle(acknowledged.checkpoint);
 		refreshAuthoringProjection(false);
 		return true;
@@ -353,6 +357,7 @@
 		if (!canAuthor()) return;
 		authoringTools?.setTool(tool);
 		authoringTool = tool;
+		authoringInference = '';
 		if (tool !== 'extrude') { extrusionDistanceText = ''; authoringTools?.setExtrusionDistance(''); }
 		activeTool = 'select';
 		activeCameraTool = null;
@@ -364,8 +369,13 @@
 		sourceInput?.click();
 	}
 
+	function canRunTransition(action: PendingTransition) {
+		const recoveryClose = action.kind === 'close' && mode === 'authoring' && authoringRecovery.phase !== 'ready';
+		return clientReady && !busy && !saveBusy && (!authoringOperationBusy || recoveryClose);
+	}
+
 	function requestTransition(action: PendingTransition, trigger: HTMLElement | null = transitionTrigger) {
-		if (!clientReady || busy || saveBusy || authoringOperationBusy || pendingTransition) return;
+		if (!canRunTransition(action) || pendingTransition) return;
 		transitionTrigger = trigger;
 		transitionError = '';
 		if (mode === 'authoring' && isAuthoringDirty()) {
@@ -377,7 +387,7 @@
 	}
 
 	async function executeTransition(action: PendingTransition) {
-		if (!clientReady || busy || saveBusy || authoringOperationBusy) return;
+		if (!canRunTransition(action)) return;
 		if (action.kind === 'new') await createNewAuthoringDocument();
 		else if (action.kind === 'open') await openModel(action.file, action.sidecar);
 		else unload();
@@ -560,7 +570,7 @@
 			mode = 'authoring'; result = null; session = null; editorController = null;
 			provenance = null; artifactSha256 = ''; activeSourceName = null; sceneId = '';
 			viewport = candidateViewport; authoringClient = client; authoringCheckpoint = created.checkpoint;
-			authoringBounds = candidateBounds; authoringTool = 'select'; extrusionDistanceText = ''; selectedEntityId = '';
+				authoringBounds = candidateBounds; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; selectedEntityId = '';
 			picked = null; selectedOccurrenceHandles = []; activeTool = 'select'; activeCameraTool = null;
 			selectionBox = null; pointerGesture = null; activeTouchPoints.clear(); moveDistanceText = ''; moveAxis = null;
 			ready = true; editorNotice = 'Writable BOMC · New canonical document. Coordinates remain in metres.';
@@ -668,11 +678,11 @@
 				mode = 'authoring'; result = null; session = null; editorController = null;
 				provenance = admitted.provenance; artifactSha256 = admitted.artifactSha256; activeSourceName = file.name;
 				sceneId = ''; viewport = writableViewport; authoringClient = candidateClient; authoringCheckpoint = checkpoint;
-				authoringBounds = bounds; authoringTool = 'select'; extrusionDistanceText = ''; selectedEntityId = ''; picked = null; selectedOccurrenceHandles = [];
+					authoringBounds = bounds; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; selectedEntityId = ''; picked = null; selectedOccurrenceHandles = [];
 				activeTool = 'select'; activeCameraTool = null; selectionBox = null; pointerGesture = null; activeTouchPoints.clear();
 					ready = true; authoringTools = makeAuthoringTools(candidateClient, writableViewport, checkpoint);
 					bindAuthoringRecovery(candidateClient);
-				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · This file is inside the supported Editor rectangle/extrusion subset.';
+				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · This file is inside the supported Editor planar-face topology subset.';
 				writableViewport.setOnReady(() => { if (viewport === writableViewport && request === generation) ready = true; });
 				pendingCandidateViewports.delete(writableViewport); pendingCandidateViewports.delete(importedViewport);
 				importedViewport.dispose(); importedViewport = null;
@@ -687,7 +697,7 @@
 				provenance = admitted.provenance; artifactSha256 = admitted.artifactSha256; activeSourceName = file.name; modelTabTitle = resolveLoadedModelTabTitle({ modelName: loaded.modelName, sourceFileName: loaded.sourceFileName, selectedFileName: file.name }, 'Sibambo Editor');
 					sceneId = nextSceneId; viewport = importedViewport; authoringClient = null; authoringCheckpoint = null; authoringTools = null; authoringBounds = null;
 					bindAuthoringRecovery(null);
-				ready = false; picked = null; selectedOccurrenceHandles = []; activeTool = 'select'; authoringTool = 'select'; extrusionDistanceText = ''; activeCameraTool = null;
+					ready = false; picked = null; selectedOccurrenceHandles = []; activeTool = 'select'; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; activeCameraTool = null;
 				moveDistanceText = ''; moveAxis = null; editorNotice = inspection.reason; selectionBox = null; importedViewport.setSelectedOccurrences([]);
 				unsubscribeOccurrenceTransforms?.();
 				unsubscribeOccurrenceTransforms = candidateSession.editableGeometry.subscribeOccurrenceTransforms((transforms) => {
@@ -1040,9 +1050,8 @@
 		pointerGesture = null;
 	}
 	function handleViewportWheel(event: WheelEvent) {
-		if (!viewport) return;
-		event.preventDefault();
-		viewport.zoomAt(event.clientX, event.clientY, event.deltaY);
+		if (!viewport || mode !== 'authoring') return;
+		authoringTools?.handleCameraChange();
 	}
 	function handleViewportKeyDown(event: KeyboardEvent) {
 		if (event.defaultPrevented) return;
@@ -1150,6 +1159,7 @@
 	}
 	function zoomExtents() {
 		cancelEditorCameraGesture();
+		if (mode === 'authoring') authoringTools?.handleCameraChange();
 		if (mode === 'authoring' && authoringBounds) {
 			viewport?.setAuthoringBounds(authoringBounds);
 			viewport?.focusBounds(authoringBounds);
@@ -1162,11 +1172,13 @@
 	}
 	function levelCamera() {
 		cancelEditorCameraGesture();
+		if (mode === 'authoring') authoringTools?.handleCameraChange();
 		viewport?.levelCamera();
 		editorNotice = 'Camera leveled · imported roll removed while preserving the current view direction.';
 	}
 	function setCameraView(name: 'top' | 'front' | 'iso') {
 		cancelEditorCameraGesture();
+		if (mode === 'authoring') authoringTools?.handleCameraChange();
 		if (mode === 'authoring' && authoringBounds) {
 			viewport?.setAuthoringBounds(authoringBounds);
 			viewport?.viewBounds(name, authoringBounds);
@@ -1232,6 +1244,7 @@
 		activeSourceName = null;
 		selectedEntityId = '';
 		authoringTool = 'select';
+		authoringInference = '';
 		mode = 'empty';
 		authoringOperationBusy = false;
 		editorController = null;
@@ -1404,13 +1417,13 @@
 		<details class="menu-root">
 			<summary>Draw</summary>
 			<div class="menu-popover">
-				<button type="button" onclick={() => setAuthoringTool('rectangle')} disabled={!canAuthor()} title={mode === 'authoring' ? 'Draw a ground-plane rectangle from two ray hits.' : 'Available for writable BOMC documents.'}>Rectangle</button>
-				<button type="button" onclick={() => setAuthoringTool('extrude')} disabled={!canAuthor()} title={mode === 'authoring' ? 'Push or pull an eligible flat rectangle.' : 'Available for writable BOMC documents.'}>Push/Pull</button>
-				{#if mode === 'authoring'}
-					<button type="button" disabled title="Line authoring is outside the supported rectangle and extrusion subset.">Line</button>
-					<button type="button" disabled title="Circle authoring is outside the supported rectangle and extrusion subset.">Circle</button>
-					<button type="button" disabled title="Arbitrary polygons are outside the supported rectangle and extrusion subset.">Polygon</button>
-					<span class="menu-status">Only Editor rectangles and their first signed extrusion are writable.</span>
+					<button type="button" onclick={() => setAuthoringTool('rectangle')} disabled={!canAuthor()} title={mode === 'authoring' ? 'Draw a rectangle on the inferred face or ground construction plane.' : 'Available for writable BOMC documents.'}>Rectangle</button>
+					<button type="button" onclick={() => setAuthoringTool('line')} disabled={!canAuthor()} title={mode === 'authoring' ? 'Draw connected inferred segments and close the loop to create a planar face.' : 'Available for writable BOMC documents.'}>Line</button>
+					<button type="button" onclick={() => setAuthoringTool('extrude')} disabled={!canAuthor()} title={mode === 'authoring' ? 'Hover and click an authored face, then push or pull along its normal.' : 'Available for writable BOMC documents.'}>Push/Pull</button>
+					{#if mode === 'authoring'}
+						<button type="button" disabled title="Circle authoring is outside the supported planar-face topology subset.">Circle</button>
+						<button type="button" disabled title="Polygon authoring uses the Line tool loop workflow in this phase.">Polygon</button>
+						<span class="menu-status">Rectangle, Line face loops, and authored-face Push/Pull are writable.</span>
 				{/if}
 			</div>
 		</details>
@@ -1418,7 +1431,7 @@
 			<summary>Tools</summary>
 			<div class="menu-popover">
 				<button type="button" onclick={() => setTool('move')} disabled={mode !== 'imported' || !canMoveSelected()}>Move Selected<kbd>M</kbd></button>
-				{#if mode === 'authoring'}<span class="menu-status">Only Editor rectangles and their first signed extrusion are editable.</span>{/if}
+					{#if mode === 'authoring'}<span class="menu-status">Application-authored planar topology supports direct face Push/Pull.</span>{/if}
 			</div>
 		</details>
 		<details class="menu-root">
@@ -1449,9 +1462,10 @@
 			<button type="button" class:active={mode === 'authoring' ? authoringTool === 'select' && activeCameraTool === null : activeTool === 'select' && activeCameraTool === null} onclick={() => mode === 'authoring' ? setAuthoringTool('select') : activateSelectTool()} aria-label="Select" title="Select (Space)" disabled={!viewport || busy || saveBusy}>
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6.1 1.2 3.4 6-2.6 1.4-3.3-6.1L5 18.3V3.5Z"/></svg>
 			</button>
-			{#if mode === 'authoring'}
-				<button type="button" class:active={authoringTool === 'rectangle'} onclick={() => setAuthoringTool('rectangle')} aria-label="Rectangle" title="Rectangle (two ground-plane ray hits)" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
-				<button type="button" class:active={authoringTool === 'extrude'} onclick={() => setAuthoringTool('extrude')} aria-label="Push/Pull" title="Push/Pull selected rectangle" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9 12 5l8 4-8 4-8-4Z"/><path d="M4 9v7l8 4v-7M20 9v7l-8 4M12 5v4"/></svg></button>
+				{#if mode === 'authoring'}
+					<button type="button" class:active={authoringTool === 'rectangle'} onclick={() => setAuthoringTool('rectangle')} aria-label="Rectangle" title="Rectangle on inferred construction plane" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
+					<button type="button" class:active={authoringTool === 'line'} onclick={() => setAuthoringTool('line')} aria-label="Line" title="Line · click inferred points and close the loop" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 10 7l9 10"/><circle cx="5" cy="18" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="19" cy="17" r="1.5"/></svg></button>
+					<button type="button" class:active={authoringTool === 'extrude'} onclick={() => setAuthoringTool('extrude')} aria-label="Push/Pull" title="Push/Pull hovered authored face" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9 12 5l8 4-8 4-8-4Z"/><path d="M4 9v7l8 4v-7M20 9v7l-8 4M12 5v4"/></svg></button>
 			{/if}
 			<span class="tool-separator"></span>
 			<button type="button" class:active={activeCameraTool === 'orbit'} onclick={() => setCameraTool('orbit')} aria-label="Orbit" title="Orbit (O)" disabled={!viewport || busy || saveBusy}>
@@ -1468,7 +1482,7 @@
 			</button>
 		</div>
 		{#if mode === 'authoring' && authoringCheckpoint}<div class="tool-context"><span>{authoringCheckpoint.snapshot.graph.name || 'Untitled'}</span><span class="mode-badge">Writable BOMC</span><span>{isAuthoringDirty() ? 'Unsaved' : 'Saved'}</span></div>
-		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span title="BOMC editing is limited to Editor-created rectangles and their first extrusion.">Viewer · supported authoring subset only</span></div>{/if}
+		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span title="BOMC editing is limited to the validated Editor-authored planar-face topology subset.">Viewer · supported authoring subset only</span></div>{/if}
 	</nav>
 
 	{#if result?.scenes.length}
@@ -1484,7 +1498,7 @@
 	<section class="editor-stage">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace" tabindex="0">
+			<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onwheel={handleViewportWheel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace" tabindex="0">
 			<div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div>
 			{#if !hasModel && !busy}
 				<div class="empty-workspace">
@@ -1506,10 +1520,10 @@
 						<button type="button" onclick={() => { editorController?.cancel(); activeTool = 'select'; editorController?.setTool('select'); viewport?.setOccurrencePreview(null); editorNotice = 'Move canceled.'; }}>Cancel</button>
 					</div>
 				{/if}
-			{#if mode === 'authoring' && authoringTool === 'extrude'}
-				<div class="extrude-hud" aria-label="Push/Pull controls">
-						<label>Extrusion (m) <input type="text" inputmode="decimal" autocomplete="off" value={extrusionDistanceText} aria-describedby="extrude-help" disabled={!canAuthor()} oninput={(event) => { extrusionDistanceText = (event.currentTarget as HTMLInputElement).value; authoringTools?.setExtrusionDistance(extrusionDistanceText); }} onkeydown={(event) => { if (event.key === 'Enter' && canAuthor()) { event.preventDefault(); authoringTools?.commitExtrusionDistance(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); authoringTools?.cancelPreview(); setAuthoringTool('select'); } }} /> </label>
-					<span id="extrude-help">Enter commits the complete finite distance; negative values pull below the source plane.</span>
+				{#if mode === 'authoring' && authoringTool === 'extrude'}
+					<div class="extrude-hud" aria-label="Push/Pull controls">
+							<label>Distance (m) <input type="text" inputmode="decimal" autocomplete="off" value={extrusionDistanceText} aria-describedby="extrude-help" disabled={!canAuthor()} oninput={(event) => { extrusionDistanceText = (event.currentTarget as HTMLInputElement).value; authoringTools?.setExtrusionDistance(extrusionDistanceText); }} onkeydown={(event) => { if (event.key === 'Enter' && canAuthor()) { event.preventDefault(); authoringTools?.commitExtrusionDistance(); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); authoringTools?.cancelPreview(); setAuthoringTool('select'); } }} /> </label>
+						<span id="extrude-help">Hover and click an authored face first. Drag/click along its normal, or enter an exact signed metre distance.</span>
 					<button type="button" class="hud-primary" onclick={() => authoringTools?.commitExtrusionDistance()} disabled={!canAuthor()}>Commit</button>
 					<button type="button" onclick={() => { authoringTools?.cancelPreview(); setAuthoringTool('select'); }}>Cancel</button>
 				</div>
@@ -1530,7 +1544,7 @@
 		<div class="footer-brand"><strong>Sibambo Editor</strong><span>BOMC workspace</span></div>
 		<div class="footer-status" aria-live="polite">
 			{#if hasModel}
-				<span>{editorNotice || (ready ? 'Ready' : 'Preparing viewport…')}</span>
+					<span>{authoringInference || editorNotice || (ready ? 'Ready' : 'Preparing viewport…')}</span>
 				{#if mode === 'authoring'}<span>{isAuthoringDirty() ? 'Unsaved BOMC' : 'Saved BOMC'}</span>{/if}
 				{#if mode === 'imported' && selectedOccurrenceHandles.length}<span>{selectedOccurrenceHandles.length} selected</span>{/if}
 				{#if picked?.sourceFaceIndex !== null && picked?.sourceFaceIndex !== undefined}<span>Face {picked.sourceFaceIndex}</span>{/if}
