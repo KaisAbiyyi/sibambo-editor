@@ -1096,6 +1096,7 @@
 			return;
 		}
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (mode === 'authoring' && key === 't') { event.preventDefault(); setAuthoringTool('measure'); return; }
 		if (key === 'z' && event.shiftKey) { if (!viewport) return; event.preventDefault(); cancelEditorCameraGesture(); zoomExtents(); activeCameraTool = null; return; }
 		if (key === 'm') { event.preventDefault(); setTool('move'); return; }
 		if (key === 'o' || key === 'h' || key === 'z') {
@@ -1431,7 +1432,10 @@
 			<summary>Tools</summary>
 			<div class="menu-popover">
 				<button type="button" onclick={() => setTool('move')} disabled={mode !== 'imported' || !canMoveSelected()}>Move Selected<kbd>M</kbd></button>
-					{#if mode === 'authoring'}<span class="menu-status">Application-authored planar topology supports direct face Push/Pull.</span>{/if}
+				{#if mode === 'authoring'}
+					<button type="button" onclick={() => setAuthoringTool('measure')} disabled={!canAuthor()}>Tape Measure<kbd>T</kbd></button>
+					<span class="menu-status">Tape Measure is transient and does not modify BOMC geometry.</span>
+				{/if}
 			</div>
 		</details>
 		<details class="menu-root">
@@ -1462,10 +1466,11 @@
 			<button type="button" class:active={mode === 'authoring' ? authoringTool === 'select' && activeCameraTool === null : activeTool === 'select' && activeCameraTool === null} onclick={() => mode === 'authoring' ? setAuthoringTool('select') : activateSelectTool()} aria-label="Select" title="Select (Space)" disabled={!viewport || busy || saveBusy}>
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6.1 1.2 3.4 6-2.6 1.4-3.3-6.1L5 18.3V3.5Z"/></svg>
 			</button>
-				{#if mode === 'authoring'}
-					<button type="button" class:active={authoringTool === 'rectangle'} onclick={() => setAuthoringTool('rectangle')} aria-label="Rectangle" title="Rectangle on inferred construction plane" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
-					<button type="button" class:active={authoringTool === 'line'} onclick={() => setAuthoringTool('line')} aria-label="Line" title="Line · click inferred points and close the loop" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 10 7l9 10"/><circle cx="5" cy="18" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="19" cy="17" r="1.5"/></svg></button>
-					<button type="button" class:active={authoringTool === 'extrude'} onclick={() => setAuthoringTool('extrude')} aria-label="Push/Pull" title="Push/Pull hovered authored face" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9 12 5l8 4-8 4-8-4Z"/><path d="M4 9v7l8 4v-7M20 9v7l-8 4M12 5v4"/></svg></button>
+			{#if mode === 'authoring'}
+				<button type="button" class:active={authoringTool === 'rectangle'} onclick={() => setAuthoringTool('rectangle')} aria-label="Rectangle" title="Rectangle on inferred construction plane" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
+				<button type="button" class:active={authoringTool === 'line'} onclick={() => setAuthoringTool('line')} aria-label="Line" title="Line · click inferred points and close the loop" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 10 7l9 10"/><circle cx="5" cy="18" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="19" cy="17" r="1.5"/></svg></button>
+				<button type="button" class:active={authoringTool === 'extrude'} onclick={() => setAuthoringTool('extrude')} aria-label="Push/Pull" title="Push/Pull hovered authored face" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9 12 5l8 4-8 4-8-4Z"/><path d="M4 9v7l8 4v-7M20 9v7l-8 4M12 5v4"/></svg></button>
+				<button type="button" class:active={authoringTool === 'measure'} onclick={() => setAuthoringTool('measure')} aria-label="Tape Measure" title="Tape Measure (T) · click two inferred points" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17.5 17.5 5 20 7.5 7.5 20 5 17.5Z"/><path d="m9 15 2 2m1-5 2 2m1-5 2 2"/></svg></button>
 			{/if}
 			<span class="tool-separator"></span>
 			<button type="button" class:active={activeCameraTool === 'orbit'} onclick={() => setCameraTool('orbit')} aria-label="Orbit" title="Orbit (O)" disabled={!viewport || busy || saveBusy}>
@@ -1536,7 +1541,7 @@
 						<button type="button" onclick={(event) => requestTransition({ kind: 'close' }, event.currentTarget)}>Close</button>
 					</div>
 				{:else if busy || error || projectionError}<div class="viewport-status" class:error-state={!!error || !!projectionError} role="status"><span>{error || projectionError || loadStatus}</span>{#if busy}<button type="button" onclick={cancelLoad}>Cancel</button>{/if}{#if projectionError && mode === 'authoring'}<button type="button" onclick={() => refreshAuthoringProjection(false)}>Retry Render</button>{/if}</div>{/if}
-			<p class="viewport-hint">Middle-drag Orbit · Shift+Middle Pan · Wheel Zoom · O/H/Z camera tools</p>
+			<p class="viewport-hint">Middle-drag Orbit · Shift+Middle Pan · Wheel Zoom · O/H/Z camera tools · T Tape Measure</p>
 		</div>
 	</section>
 

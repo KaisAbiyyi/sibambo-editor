@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { Mesh, Object3D, Ray, Vector3 } from 'three';
+import { LineSegments, Mesh, Object3D, Points, Ray, Vector3 } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
 import {
@@ -194,6 +194,39 @@ describe('canonical authoring tools', () => {
 			expect(subset.editable).toBe(true);
 			if (subset.editable) expect(subset.entities).toHaveLength(6);
 			expect(harness.overlays.has('editor-authoring-preview')).toBe(false);
+		} finally { harness.close(); }
+		});
+
+	test('shows a dotted Push/Pull face hover before the face is clicked', async () => {
+		const harness = createHarness([{ first: [0, 0, 0], opposite: [2, 0, 3] }]);
+		try {
+			harness.controller.setTool('extrude');
+			harness.controller.handlePointerMove(pointer(1, 1), false);
+			await flush();
+			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
+			expect(preview.children.some((child) => child instanceof Points)).toBe(true);
+			expect(harness.submitted).toHaveLength(0);
+			expect(harness.getCheckpoint().snapshot.revision).toBe(1);
+		} finally { harness.close(); }
+	});
+
+	test('Tape Measure reports snapped 3D distance without mutating canonical BOMC', async () => {
+		const harness = createHarness();
+		try {
+			const revision = harness.getCheckpoint().snapshot.revision;
+			harness.controller.setTool('measure');
+			click(harness.controller, 0, 0);
+			harness.controller.handlePointerMove(pointer(30, 40), false);
+			await flush();
+			expect(harness.controller.inferenceLabel).toContain('Tape Measure');
+			expect(harness.controller.inferenceLabel).toContain('50 m');
+			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
+			expect(preview.children.some((child) => child instanceof LineSegments)).toBe(true);
+			click(harness.controller, 30, 40);
+			await flush();
+			expect(harness.controller.inferenceLabel).toBe('Tape Measure · 50 m');
+			expect(harness.submitted).toHaveLength(0);
+			expect(harness.getCheckpoint().snapshot.revision).toBe(revision);
 		} finally { harness.close(); }
 	});
 

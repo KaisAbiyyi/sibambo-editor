@@ -303,8 +303,9 @@ async function selectProjectedRectangle(page: Page, graph: BomcGraph, entityId: 
 async function clickProjectedFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'front' | 'iso' = 'top') {
 	const mesh = graph.meshes[0];
 	const face = mesh?.faces.find((candidate) => candidate.id === faceId);
-	if (!mesh || !face || face.outer.length < 3) throw new Error(`Canonical graph has no projected face ${faceId}.`);
-	const center = [0, 1, 2].map((axis) => face.outer.reduce((sum, vertex) => sum + mesh.positions[vertex * 3 + axis]!, 0) / face.outer.length) as [number, number, number];
+	if (!mesh || !face || face.triangles.length < 3) throw new Error(`Canonical graph has no projected face ${faceId}.`);
+	const triangle = face.triangles.slice(0, 3);
+	const center = [0, 1, 2].map((axis) => triangle.reduce((sum, vertex) => sum + mesh.positions[vertex * 3 + axis]!, 0) / triangle.length) as [number, number, number];
 	const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
 	for (let offset = 0; offset < mesh.positions.length; offset += 3) {
 		const [x, y, z] = mesh.positions.slice(offset, offset + 3);
@@ -676,10 +677,16 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await pushPullProjectedFace(page, topInsetGraph, topInset.id, 0.35, 'top');
 		const pushedInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
 		expect(pushedInsetGraph.meshes[0]!.faces.find((face) => face.id === topInset.id)).toBeDefined();
+		expect(pushedInsetGraph.meshes[0]!.faces.find((face) => face.id === topId)?.holes).toHaveLength(1);
 
-		const frontAfterTopPush = frontFaceId(pushedInsetGraph);
-		const beforeLineIds = new Set(pushedInsetGraph.meshes[0]!.faces.map((face) => face.id));
-		await drawLineLoopOnFace(page, pushedInsetGraph, frontAfterTopPush, 'front');
+		await pushPullProjectedFace(page, pushedInsetGraph, topId, 0.15, 'top');
+		const parentMovedGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		expect(parentMovedGraph.meshes[0]!.faces.find((face) => face.id === topId)?.holes).toHaveLength(1);
+		expect(parentMovedGraph.meshes[0]!.faces.find((face) => face.id === topInset.id)).toBeDefined();
+
+		const frontAfterTopPush = frontFaceId(parentMovedGraph);
+		const beforeLineIds = new Set(parentMovedGraph.meshes[0]!.faces.map((face) => face.id));
+		await drawLineLoopOnFace(page, parentMovedGraph, frontAfterTopPush, 'front');
 		const lineInsetGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
 		const lineInset = lineInsetGraph.meshes[0]!.faces.find((face) => !beforeLineIds.has(face.id) && face.label?.includes('"line"'));
 		if (!lineInset) throw new Error('Line-on-side-face did not create a canonical inset face.');
@@ -703,6 +710,33 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		try { expect(independent.snapshot().graph).toStrictEqual(nestedGraph); }
 		finally { independent.dispose(); }
 	});
+
+		test('Tape Measure measures inferred authored-face points without mutating canonical BOMC', async ({ page }) => {
+			await createNew(page);
+			await ensureTopView(page);
+			await drawRectangle(page, 0.38, 0.38, 0.20, 0.18);
+			const before = await currentCheckpoint(page);
+			const box = await page.locator('.viewport canvas').boundingBox();
+			if (!box) throw new Error('The production viewport canvas has no browser layout box.');
+			const firstScreen = { x: box.x + box.width * 0.42, y: box.y + box.height * 0.42 };
+			const secondScreen = { x: box.x + box.width * 0.54, y: box.y + box.height * 0.50 };
+			const commandsBefore = (await authoringCommands(page)).length;
+
+			await page.getByRole('button', { name: 'Tape Measure', exact: true }).click();
+			await page.mouse.move(firstScreen.x, firstScreen.y);
+			await expect(page.locator('.footer-status')).toContainText('On Face');
+			await page.mouse.click(firstScreen.x, firstScreen.y);
+			await page.mouse.move(secondScreen.x, secondScreen.y);
+			await expect(page.locator('.footer-status')).toContainText('Tape Measure');
+			await expect(page.locator('.footer-status')).toContainText('m');
+			const liveStatus = await page.locator('.footer-status').innerText();
+			const measured = liveStatus.match(/Tape Measure · ([0-9]+(?:\.[0-9]+)? m)/)?.[1];
+			if (!measured) throw new Error(`Tape Measure did not expose a numeric metre readout: ${liveStatus}`);
+			await page.mouse.click(secondScreen.x, secondScreen.y);
+			await expect(page.locator('.footer-status')).toContainText(`Tape Measure · ${measured}`);
+			expect((await authoringCommands(page))).toHaveLength(commandsBefore);
+			expect((await currentCheckpoint(page)).snapshot.revision).toBe(before.snapshot.revision);
+		});
 
 	test('1,000 real pointer moves keep inference nonmutating and avoid authoring long tasks over 50 ms', async ({ page }) => {
 		test.setTimeout(120_000);

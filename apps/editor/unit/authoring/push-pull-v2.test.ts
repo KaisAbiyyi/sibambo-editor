@@ -217,6 +217,52 @@ describe('authoring topology v2 Push/Pull', () => {
 			expect(pushedInset.meshes[0]!.faces.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))).toHaveLength(4);
 			expect(pushedInset.meshes[0]!.faces.find((face) => face.id === topFaceId)?.holes).toHaveLength(1);
 		} finally { document.dispose(); }
+		});
+
+	test('keeps a surrounding box face with a pushed child inset Push/Pull-editable', () => {
+		const { document, history, faceId } = createNeutralRectangle();
+		try {
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 2.7, 2)));
+			const box = document.snapshot().graph;
+			const topFaceId = `${DOCUMENT_ID}:op:2:cap`;
+			const top = box.meshes[0]!.faces.find((face) => face.id === topFaceId)!;
+			const topPoints = vertexPositions(box, topFaceId) as [number, number, number][];
+			const center = topPoints.reduce(
+				(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+				[0, 0, 0] as [number, number, number]
+			).map((value) => value / topPoints.length) as [number, number, number];
+			const insetPoints = topPoints.map((point) => [
+				center[0] + (point[0] - center[0]) * 0.4,
+				center[1] + (point[1] - center[1]) * 0.4,
+				center[2] + (point[2] - center[2]) * 0.4
+			] as [number, number, number]);
+			const insetFaceId = `${DOCUMENT_ID}:face:3`;
+			history.execute(document, journalEntry(buildFaceLoopEdit(box, insetFaceId, insetPoints, top.normal)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, insetFaceId, 0.6, 4)));
+
+			const withChild = document.snapshot().graph;
+			const meshBefore = withChild.meshes[0]!;
+			const parentBefore = meshBefore.faces.find((face) => face.id === topFaceId)!;
+			expect(parentBefore.holes).toHaveLength(1);
+			const movedParentVertices = [...new Set([parentBefore.outer, ...parentBefore.holes].flatMap((ring) => [...ring]))];
+			const parentPointsBefore = new Map(movedParentVertices.map((vertex) => [vertex, meshBefore.positions.slice(vertex * 3, vertex * 3 + 3)]));
+			const childCapBefore = vertexPositions(withChild, insetFaceId);
+
+			history.execute(document, journalEntry(buildPushPullFaceEdit(withChild, topFaceId, 0.2, 5)));
+			const movedParent = document.snapshot().graph;
+			const meshAfter = movedParent.meshes[0]!;
+			const parentAfter = meshAfter.faces.find((face) => face.id === topFaceId)!;
+			expect(validateEditableSubset(movedParent)).toMatchObject({ editable: true });
+			expect([...buildAuthoringTopology(meshAfter).edges.values()].every((edge) => edge.faceIds.length === 2)).toBe(true);
+			expect(parentAfter.holes).toHaveLength(1);
+			for (const vertex of movedParentVertices) {
+				const before = parentPointsBefore.get(vertex)!;
+				const after = meshAfter.positions.slice(vertex * 3, vertex * 3 + 3);
+				const delta = after.map((value, axis) => value - before[axis]!) as [number, number, number];
+				expect(delta[0] * parentBefore.normal[0] + delta[1] * parentBefore.normal[1] + delta[2] * parentBefore.normal[2]).toBeCloseTo(0.2, 12);
+			}
+			expect(vertexPositions(movedParent, insetFaceId)).toEqual(childCapBefore);
+		} finally { document.dispose(); }
 	});
 
 	test('pulls a side inset past a disjoint parallel reveal while still respecting the true opposite shell boundary', () => {

@@ -819,11 +819,11 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	if (!subset.editable) invalid(`Document is outside the editable topology: ${subset.reason}`);
 	const target = mesh.faces.find((face) => face.id === faceId);
 	if (!target) invalid(`Face ${faceId} no longer exists.`);
-	if (target.holes.length > 0) invalid('Push/Pull of a surrounding face that contains inset regions is not supported; target a hole-free face region.');
 	const topology = buildAuthoringTopology(mesh);
-	const incidentCounts = target.outer.map((vertex, index) => topology.edges.get(vertex < target.outer[(index + 1) % target.outer.length]!
-		? `${vertex}:${target.outer[(index + 1) % target.outer.length]!}`
-		: `${target.outer[(index + 1) % target.outer.length]!}:${vertex}`)?.faceIds.length ?? 0);
+	const boundaryRings = [target.outer, ...target.holes];
+	const incidentCounts = boundaryRings.flatMap((ring) => ring.map((vertex, index) => topology.edges.get(vertex < ring[(index + 1) % ring.length]!
+		? `${vertex}:${ring[(index + 1) % ring.length]!}`
+		: `${ring[(index + 1) % ring.length]!}:${vertex}`)?.faceIds.length ?? 0));
 	const operationId = `${graph.documentId}:op:${operationSequence}`;
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
@@ -875,6 +875,10 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
+	if (target.holes.length > 0 && !incidentCounts.every((count) => count === 2)) {
+		invalid('Push/Pull of a surrounding face with inset regions requires a closed manifold boundary.');
+	}
+
 	if (incidentCounts.every((count) => count === 1)) {
 		const capStart = mesh.positions.length / 3;
 		const positions = [...mesh.positions];
@@ -922,7 +926,7 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 
 	if (!incidentCounts.every((count) => count === 2)) invalid('Push/Pull supports standalone faces or faces on a closed manifold component.');
 	rejectOppositeBoundaryCrossing(mesh, target, distance);
-	const moved = new Set(target.outer);
+	const moved = new Set(boundaryRings.flatMap((ring) => [...ring]));
 	const positions = [...mesh.positions];
 	for (const vertex of moved) {
 		const offset = vertex * 3;

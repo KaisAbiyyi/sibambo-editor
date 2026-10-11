@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { DoubleSide, LineBasicMaterial, LineSegments, Mesh, MeshStandardMaterial } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { DEFAULT_DISPLAY_STATE, sourceEdgeMaterialDescriptor, type DisplayState } from '@sibambo/viewport';
-import { buildExtrusionEdit, buildPlanarRectangleEdit, buildRectangleEdit } from '../../src/lib/authoring/geometry.js';
+import { buildExtrusionEdit, buildFaceLoopEdit, buildPlanarRectangleEdit, buildPushPullFaceEdit, buildRectangleEdit } from '../../src/lib/authoring/geometry.js';
 import { projectAuthoringScene } from '../../src/lib/authoring/scene.js';
 
 const DOCUMENT_ID = 'a4f2d141-64e1-4c62-8d0d-53623f71a220';
@@ -105,6 +105,49 @@ describe('canonical authoring projection', () => {
 				expect(edges.material).toBeInstanceOf(LineBasicMaterial);
 				expect((edges.material as LineBasicMaterial).toneMapped).toBe(false);
 				expect((edges.material as LineBasicMaterial).opacity).toBe(sourceEdgeMaterialDescriptor(wireframe).opacity);
+			} finally { disposeProjection(projection.group); }
+		} finally { document.dispose(); }
+		});
+
+	test('renders inset/parent intersection edges above offset authoring faces', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Nested edges' });
+		try {
+			const baseId = `${DOCUMENT_ID}:rectangle:1`;
+			document.transact(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				baseId,
+				[[0, 0, 0], [4, 0, 0], [4, 0, 4], [0, 0, 4]],
+				[0, 1, 0]
+			).forward);
+			document.transact(buildPushPullFaceEdit(document.snapshot().graph, baseId, 2, 2).forward);
+			const topId = `${DOCUMENT_ID}:op:2:cap`;
+			document.transact(buildFaceLoopEdit(
+				document.snapshot().graph,
+				`${DOCUMENT_ID}:face:3`,
+				[[1, 2, 1], [3, 2, 1], [3, 2, 3], [1, 2, 3]],
+				[0, 1, 0],
+				'rectangle'
+			).forward);
+			document.transact(buildPushPullFaceEdit(document.snapshot().graph, `${DOCUMENT_ID}:face:3`, 0.5, 4).forward);
+
+			const snapshot = document.snapshot();
+			const mesh = snapshot.graph.meshes[0]!;
+			const parent = mesh.faces.find((face) => face.id === topId)!;
+			expect(parent.holes).toHaveLength(1);
+			const expectedEdges = new Set<string>();
+			for (const face of mesh.faces) for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+				const a = ring[index]!; const b = ring[(index + 1) % ring.length]!;
+				expectedEdges.add(a < b ? `${a}:${b}` : `${b}:${a}`);
+			}
+
+			const projection = projectAuthoringScene(snapshot, DEFAULT_DISPLAY_STATE);
+			try {
+				const faces = projection.group.children.filter((child) => child instanceof Mesh) as Mesh[];
+				const edges = projection.group.children.find((child) => child instanceof LineSegments) as LineSegments;
+				expect(edges.geometry.getAttribute('position').count).toBe(expectedEdges.size * 2);
+				expect((edges.material as LineBasicMaterial).opacity).toBeGreaterThanOrEqual(0.82);
+				expect(edges.renderOrder).toBeGreaterThan(Math.max(...faces.map((face) => face.renderOrder)));
+				expect(faces.every((face) => (face.material as MeshStandardMaterial).polygonOffset)).toBe(true);
 			} finally { disposeProjection(projection.group); }
 		} finally { document.dispose(); }
 	});

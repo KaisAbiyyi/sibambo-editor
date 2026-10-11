@@ -89,7 +89,10 @@ function materialForFace(face: Face, snapshot: BomcSnapshot, displayState: Displ
 		metalness: 0.02,
 		opacity: alpha,
 		transparent: alpha < 1,
-		side: doubleSided ? DoubleSide : FrontSide
+		side: doubleSided ? DoubleSide : FrontSide,
+		polygonOffset: true,
+		polygonOffsetFactor: 1,
+		polygonOffsetUnits: 1
 	});
 	original.color.setRGB(material.rgba[0] / 255, material.rgba[1] / 255, material.rgba[2] / 255, SRGBColorSpace);
 	const manager = new MaterialStateManager();
@@ -195,10 +198,15 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 				let material: LineBasicMaterial | null = null;
 				try {
 					geometry.setAttribute('position', new Float32BufferAttribute(edgePositions, 3));
-					material = new LineBasicMaterial(sourceEdgeMaterialDescriptor(displayState));
+					const descriptor = sourceEdgeMaterialDescriptor(displayState);
+					material = new LineBasicMaterial({
+						...descriptor,
+						opacity: displayState.faceStyle === 'wireframe' ? descriptor.opacity : Math.max(0.82, descriptor.opacity)
+					});
 					material.toneMapped = false;
 					const edges = new LineSegments(geometry, material);
 					edges.name = 'editor-authoring-source-edges';
+					edges.renderOrder = 8;
 					group.add(edges);
 				} catch (error) {
 					geometry.dispose();
