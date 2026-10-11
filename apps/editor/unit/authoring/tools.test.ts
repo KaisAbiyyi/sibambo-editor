@@ -9,7 +9,8 @@ import {
 	buildPushPullFaceEdit,
 	buildRectangleEdit,
 	journalEntry,
-	validateEditableSubset
+	validateEditableSubset,
+	type GeometryEdit
 } from '../../src/lib/authoring/geometry.js';
 import { AuthoringHistory } from '../../src/lib/authoring/history.js';
 import type { AuthoringCheckpoint, AuthoringCommand, AuthoringResult } from '../../src/lib/authoring/protocol.js';
@@ -118,10 +119,17 @@ function createHarness(rectangles: readonly { first: [number, number, number]; o
 			measureDwellMs: 5,
 			onError: (message) => errors.push(message)
 		});
-		return {
-			document, history, controller, viewport, overlays, submitted, errors, selections, measureTooltips,
-		getCheckpoint: () => checkpoint,
-		hasDuplicateDisposal: () => duplicateDisposal,
+			return {
+				document, history, controller, viewport, overlays, submitted, errors, selections, measureTooltips,
+			getCheckpoint: () => checkpoint,
+			applyEdit: (edit: GeometryEdit, consumesSequence = true) => {
+				const changed = history.execute(document, journalEntry(edit));
+				if (!changed) throw new Error('Test harness direct edit did not commit.');
+				if (consumesSequence) sequence += 1;
+				checkpoint = { snapshot: document.snapshot(), sequence, history: history.checkpoint() };
+				controller.setCheckpoint(checkpoint);
+			},
+			hasDuplicateDisposal: () => duplicateDisposal,
 		getOverlayCount: () => overlays.size,
 		setRayFactory: (factory: (clientX: number, clientY: number) => Ray | null) => { rayFactory = factory; },
 		close: () => { controller.dispose(); document.dispose(); }
@@ -197,8 +205,39 @@ describe('canonical authoring tools', () => {
 			expect(subset.editable).toBe(true);
 			if (subset.editable) expect(subset.entities).toHaveLength(6);
 			expect(harness.overlays.has('editor-authoring-preview')).toBe(false);
+			} finally { harness.close(); }
+			});
+
+	test('snaps an active nested Push/Pull exactly to a hovered parallel surrounding face level', async () => {
+		const harness = createHarness();
+		try {
+			const parentId = `${DOCUMENT_ID}:rectangle:1`;
+			const childId = `${DOCUMENT_ID}:face:2`;
+			harness.applyEdit(buildPlanarRectangleEdit(
+				harness.getCheckpoint().snapshot.graph,
+				parentId,
+				[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]],
+				[0, 1, 0]
+			));
+			harness.applyEdit(buildFaceLoopEdit(
+				harness.getCheckpoint().snapshot.graph,
+				childId,
+				[[2, 0, 2], [4, 0, 2], [4, 0, 4], [2, 0, 4]],
+				[0, 1, 0]
+			));
+			harness.applyEdit(buildPushPullFaceEdit(harness.getCheckpoint().snapshot.graph, parentId, 1, harness.getCheckpoint().sequence));
+
+			harness.controller.setTool('extrude');
+			click(harness.controller, 3, 3);
+			click(harness.controller, 1, 3);
+			await flush();
+
+			expect(harness.submitted.at(-1)).toEqual({ kind: 'PUSH_PULL_FACE', faceId: childId, distance: 1 });
+			const graph = harness.getCheckpoint().snapshot.graph;
+			const child = graph.meshes[0]!.faces.find((face) => face.id === childId)!;
+			expect(child.outer.map((vertex) => graph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([1, 1, 1, 1]);
 		} finally { harness.close(); }
-		});
+	});
 
 	test('shows a dotted Push/Pull face hover before the face is clicked', async () => {
 		const harness = createHarness([{ first: [0, 0, 0], opposite: [2, 0, 3] }]);

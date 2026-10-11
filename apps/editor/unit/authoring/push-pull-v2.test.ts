@@ -305,8 +305,16 @@ describe('authoring topology v2 Push/Pull', () => {
 				const delta = moved.map((value, axis) => value - before[axis]!) as [number, number, number];
 				expect(delta[0] * upperFront.normal[0] + delta[1] * upperFront.normal[1] + delta[2] * upperFront.normal[2]).toBeCloseTo(1.2, 12);
 			}
-			expect(Math.max(...afterPoints.map((point) => point[2]!))).toBeGreaterThan(3);
-			expect(validateEditableSubset(overhung)).toMatchObject({ editable: true });
+				expect(Math.max(...afterPoints.map((point) => point[2]!))).toBeGreaterThan(3);
+				const slabTopAfter = overhung.meshes[0]!.faces.find((face) => face.id === topFaceId)!;
+				expect(slabTopAfter.holes).toHaveLength(0);
+				expect(slabTopAfter.outer.length).toBeGreaterThan(4);
+				const underside = overhung.meshes[0]!.faces
+					.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:5:`) && face.normal[1] < -0.9)
+					.flatMap((face) => vertexPositions(overhung, face.id));
+				expect(underside.length).toBeGreaterThan(0);
+				expect(Math.min(...underside.map((point) => point[2]!))).toBeGreaterThanOrEqual(3 - 1e-12);
+				expect(validateEditableSubset(overhung)).toMatchObject({ editable: true });
 			expect([...buildAuthoringTopology(overhung.meshes[0]!).edges.values()].every((edge) => edge.faceIds.length === 2)).toBe(true);
 		} finally { document.dispose(); }
 	});
@@ -405,6 +413,73 @@ describe('authoring topology v2 Push/Pull', () => {
 			}
 			expect(vertexPositions(after, childId)).toEqual(childCapBefore);
 			expect(afterMesh.faces.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))).toHaveLength(4);
+			} finally { document.dispose(); }
+		});
+
+	test('moves a flat surrounding parent without dragging its nested child face', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Flat nested parent' });
+		const history = new AuthoringHistory(null);
+		try {
+			const parentId = `${DOCUMENT_ID}:rectangle:1`;
+			const childId = `${DOCUMENT_ID}:face:2`;
+			history.execute(document, journalEntry(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				parentId,
+				[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]],
+				[0, 1, 0]
+			)));
+			history.execute(document, journalEntry(buildFaceLoopEdit(
+				document.snapshot().graph,
+				childId,
+				[[2, 0, 2], [4, 0, 2], [4, 0, 4], [2, 0, 4]],
+				[0, 1, 0]
+			)));
+
+			const split = document.snapshot().graph;
+			const childBefore = vertexPositions(split, childId);
+			history.execute(document, journalEntry(buildPushPullFaceEdit(split, parentId, 1.0, 3)));
+
+			const raisedParent = document.snapshot().graph;
+			const parentAfter = raisedParent.meshes[0]!.faces.find((face) => face.id === parentId)!;
+			expect(parentAfter.outer.map((vertex) => raisedParent.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([1, 1, 1, 1]);
+			expect(parentAfter.holes).toHaveLength(1);
+			expect(parentAfter.holes[0]!.map((vertex) => raisedParent.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([1, 1, 1, 1]);
+			expect(vertexPositions(raisedParent, childId)).toEqual(childBefore);
+			expect(validateEditableSubset(raisedParent)).toMatchObject({ editable: true });
+		} finally { document.dispose(); }
+	});
+
+	test('lets a nested child return to the surrounding level and then continue above it', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Nested level transition' });
+		const history = new AuthoringHistory(null);
+		try {
+			const parentId = `${DOCUMENT_ID}:rectangle:1`;
+			const childId = `${DOCUMENT_ID}:face:2`;
+			history.execute(document, journalEntry(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				parentId,
+				[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]],
+				[0, 1, 0]
+			)));
+			history.execute(document, journalEntry(buildFaceLoopEdit(
+				document.snapshot().graph,
+				childId,
+				[[2, 0, 2], [4, 0, 2], [4, 0, 4], [2, 0, 4]],
+				[0, 1, 0]
+			)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, parentId, 1.0, 3)));
+
+			const recessed = document.snapshot().graph;
+			history.execute(document, journalEntry(buildPushPullFaceEdit(recessed, childId, 1.0, 4)));
+			const level = document.snapshot().graph;
+			const parentLevel = vertexPositions(level, parentId)[0]![1]!;
+			expect(vertexPositions(level, childId).every((point) => Math.abs(point[1]! - parentLevel) < 1e-12)).toBe(true);
+			expect(validateEditableSubset(level)).toMatchObject({ editable: true });
+
+			history.execute(document, journalEntry(buildPushPullFaceEdit(level, childId, 0.5, 5)));
+			const protruded = document.snapshot().graph;
+			expect(vertexPositions(protruded, childId).every((point) => Math.abs(point[1]! - 1.5) < 1e-12)).toBe(true);
+			expect(validateEditableSubset(protruded)).toMatchObject({ editable: true });
 		} finally { document.dispose(); }
 	});
 

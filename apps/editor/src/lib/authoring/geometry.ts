@@ -879,6 +879,193 @@ function holeBoundaryHostForFace(mesh: Mesh, target: Face): Face | null {
 	return hosts[0] ?? null;
 }
 
+type ParallelHoleBridge = Readonly<{
+	host: Face;
+	holeIndex: number;
+	hostRing: readonly number[];
+	offset: number;
+	bridgeFaceIds: readonly string[];
+}>;
+
+function parallelHoleBridgeForFace(mesh: Mesh, target: Face): ParallelHoleBridge | null {
+	if (target.holes.length > 0 || target.outer.length < 3) return null;
+	const topology = buildAuthoringTopology(mesh);
+	const targetPoints = target.outer.map((vertex) => vectorAt(mesh.positions, vertex) as Point3);
+	const scale = Math.max(1, ...targetPoints.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	const candidates: ParallelHoleBridge[] = [];
+	for (const host of mesh.faces) {
+		if (host.id === target.id || Math.abs(Math.abs(dot3(host.normal, target.normal)) - 1) > 1e-9) continue;
+		for (const [holeIndex, hole] of host.holes.entries()) {
+			if (hole.length !== target.outer.length) continue;
+			for (const source of [hole, [...hole].reverse()] as const) for (let offsetIndex = 0; offsetIndex < source.length; offsetIndex += 1) {
+				const mapped = target.outer.map((_vertex, index) => source[(index + offsetIndex) % source.length]!);
+				const offsets = mapped.map((vertex, index) => {
+					const delta = subtract3(vectorAt(mesh.positions, vertex), targetPoints[index]!);
+					const signed = dot3(delta, target.normal);
+					const perpendicular: Point3 = [
+						delta[0] - target.normal[0] * signed,
+						delta[1] - target.normal[1] * signed,
+						delta[2] - target.normal[2] * signed
+					];
+					return Math.hypot(...perpendicular) <= tolerance ? signed : Number.NaN;
+				});
+				if (offsets.some((value) => !Number.isFinite(value))) continue;
+				const signedOffset = offsets.reduce((sum, value) => sum + value, 0) / offsets.length;
+				if (Math.abs(signedOffset) <= MIN_AUTHORING_EDGE_METRES
+					|| offsets.some((value) => Math.abs(value - signedOffset) > tolerance)) continue;
+
+				const bridgeFaceIds = new Set<string>();
+				let bridged = true;
+				for (let index = 0; index < target.outer.length; index += 1) {
+					const next = (index + 1) % target.outer.length;
+					const targetEdge = topology.edges.get(target.outer[index]! < target.outer[next]!
+						? `${target.outer[index]!}:${target.outer[next]!}` : `${target.outer[next]!}:${target.outer[index]!}`);
+					const expected = new Set([target.outer[index]!, target.outer[next]!, mapped[index]!, mapped[next]!]);
+					const bridge = (targetEdge?.faceIds ?? [])
+						.filter((faceId) => faceId !== target.id)
+						.map((faceId) => topology.faceById.get(faceId))
+						.find((face): face is Face => !!face && face.outer.length === 4 && expected.size === 4
+							&& face.outer.every((vertex) => expected.has(vertex)));
+					if (!bridge) { bridged = false; break; }
+					bridgeFaceIds.add(bridge.id);
+				}
+				if (!bridged || bridgeFaceIds.size !== target.outer.length) continue;
+				candidates.push(Object.freeze({
+					host,
+					holeIndex,
+					hostRing: Object.freeze(mapped),
+					offset: signedOffset,
+					bridgeFaceIds: Object.freeze([...bridgeFaceIds].sort(codeUnitCompare))
+				}));
+			}
+		}
+	}
+	if (candidates.length > 1) invalid(`Face ${target.id} is bridged to more than one parallel containing surface.`);
+	return candidates[0] ?? null;
+}
+
+function compactReferencedVertices(mesh: Mesh): Mesh {
+	const used = [...new Set(mesh.faces.flatMap((face) => [face.outer, ...face.holes].flatMap((ring) => [...ring])))]
+		.sort((left, right) => left - right);
+	if (used.length === mesh.positions.length / 3 && used.every((vertex, index) => vertex === index)) return mesh;
+	const remap = new Map(used.map((vertex, index) => [vertex, index]));
+	const positions = used.flatMap((vertex) => vectorAt(mesh.positions, vertex));
+	const remapRing = (ring: readonly number[]) => ring.map((vertex) => {
+		const mapped = remap.get(vertex);
+		if (mapped === undefined) invalid('Vertex compaction encountered an unreferenced face vertex.');
+		return mapped;
+	});
+	const faces = mesh.faces.map((face) => ({
+		...face,
+		outer: remapRing(face.outer),
+		holes: face.holes.map(remapRing),
+		triangles: face.triangles.map((vertex) => {
+			const mapped = remap.get(vertex);
+			if (mapped === undefined) invalid('Vertex compaction encountered an unreferenced triangle vertex.');
+			return mapped;
+		})
+	}));
+	return { ...mesh, positions, faces };
+}
+
+function insertVerticesOnRing(mesh: Mesh, ring: readonly number[], insertions: readonly number[]): number[] {
+	const result: number[] = [];
+	for (let index = 0; index < ring.length; index += 1) {
+		const startVertex = ring[index]!;
+		const endVertex = ring[(index + 1) % ring.length]!;
+		const start = vectorAt(mesh.positions, startVertex) as Point3;
+		const end = vectorAt(mesh.positions, endVertex) as Point3;
+		result.push(startVertex);
+		const edge = subtract3(end, start);
+		const lengthSquared = dot3(edge, edge);
+		const inside = insertions.filter((vertex) => vertex !== startVertex && vertex !== endVertex)
+			.map((vertex) => {
+				const point = vectorAt(mesh.positions, vertex) as Point3;
+				if (!pointOnSegmentInterior3(point, start, end)) return null;
+				const parameter = dot3(subtract3(point, start), edge) / lengthSquared;
+				return { vertex, parameter };
+			})
+			.filter((entry): entry is { vertex: number; parameter: number } => entry !== null)
+			.sort((left, right) => left.parameter - right.parameter || left.vertex - right.vertex);
+		for (const entry of inside) if (!result.includes(entry.vertex)) result.push(entry.vertex);
+	}
+	return result;
+}
+
+function cross2(a: Point2, b: Point2): number { return a[0] * b[1] - a[1] * b[0]; }
+
+function raySegmentIntersection2(origin: Point2, direction: Point2, start: Point2, end: Point2): { distance: number; edgeParameter: number } | null {
+	const edge: Point2 = [end[0] - start[0], end[1] - start[1]];
+	const denominator = cross2(direction, edge);
+	if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-12) return null;
+	const delta: Point2 = [start[0] - origin[0], start[1] - origin[1]];
+	const distance = cross2(delta, edge) / denominator;
+	const edgeParameter = cross2(delta, direction) / denominator;
+	if (!Number.isFinite(distance) || !Number.isFinite(edgeParameter) || distance <= MIN_AUTHORING_EDGE_METRES
+		|| edgeParameter < -1e-9 || edgeParameter > 1 + 1e-9) return null;
+	return { distance, edgeParameter };
+}
+
+type HoleBoundaryExit = Readonly<{
+	holeIndex: number;
+	holeEdgeIndex: number;
+	outerEdgeIndex: number;
+	distance: number;
+	holeStart: number;
+	holeEnd: number;
+	outerStart: number;
+	outerEnd: number;
+	startParameter: number;
+	endParameter: number;
+}>;
+
+function holeBoundaryExitForFace(mesh: Mesh, target: Face, host: Face): HoleBoundaryExit | null {
+	if (Math.abs(dot3(target.normal, host.normal)) > 1e-9) return null;
+	const drop = projectionAxis(host.normal as Point3);
+	const direction3 = target.normal as Point3;
+	const directionProjectedPoint = projectPoint2(direction3, drop);
+	const direction: Point2 = [directionProjectedPoint[0], directionProjectedPoint[1]];
+	if (Math.hypot(direction[0], direction[1]) < 1e-12) return null;
+	const exits: HoleBoundaryExit[] = [];
+	for (const [holeIndex, hole] of host.holes.entries()) for (let holeEdgeIndex = 0; holeEdgeIndex < hole.length; holeEdgeIndex += 1) {
+		const holeStart = hole[holeEdgeIndex]!;
+		const holeEnd = hole[(holeEdgeIndex + 1) % hole.length]!;
+		const targetEdges = new Set<string>();
+		for (let index = 0; index < target.outer.length; index += 1) {
+			const a = target.outer[index]!; const b = target.outer[(index + 1) % target.outer.length]!;
+			targetEdges.add(a < b ? `${a}:${b}` : `${b}:${a}`);
+		}
+		const holeKey = holeStart < holeEnd ? `${holeStart}:${holeEnd}` : `${holeEnd}:${holeStart}`;
+		if (!targetEdges.has(holeKey)) continue;
+		const startPoint = projectPoint2(vectorAt(mesh.positions, holeStart) as Point3, drop);
+		const endPoint = projectPoint2(vectorAt(mesh.positions, holeEnd) as Point3, drop);
+		for (let outerEdgeIndex = 0; outerEdgeIndex < host.outer.length; outerEdgeIndex += 1) {
+			const outerStart = host.outer[outerEdgeIndex]!;
+			const outerEnd = host.outer[(outerEdgeIndex + 1) % host.outer.length]!;
+			const outerStartPoint = projectPoint2(vectorAt(mesh.positions, outerStart) as Point3, drop);
+			const outerEndPoint = projectPoint2(vectorAt(mesh.positions, outerEnd) as Point3, drop);
+			const first = raySegmentIntersection2(startPoint, direction, outerStartPoint, outerEndPoint);
+			const second = raySegmentIntersection2(endPoint, direction, outerStartPoint, outerEndPoint);
+			if (!first || !second) continue;
+			const scale = Math.max(1, Math.abs(first.distance), Math.abs(second.distance));
+			if (Math.abs(first.distance - second.distance) > 1e-9 * scale) continue;
+			exits.push(Object.freeze({
+				holeIndex, holeEdgeIndex, outerEdgeIndex,
+				distance: (first.distance + second.distance) / 2,
+				holeStart, holeEnd, outerStart, outerEnd,
+				startParameter: first.edgeParameter, endParameter: second.edgeParameter
+			}));
+		}
+	}
+	if (exits.length === 0) return null;
+	exits.sort((left, right) => left.distance - right.distance || left.holeIndex - right.holeIndex || left.holeEdgeIndex - right.holeEdgeIndex);
+	if (exits.length > 1 && Math.abs(exits[0]!.distance - exits[1]!.distance) <= 1e-9 * Math.max(1, exits[0]!.distance)) {
+		invalid(`Face ${target.id} reaches more than one host boundary at the same Push/Pull distance.`);
+	}
+	return exits[0]!;
+}
+
 /** Push/Pull one canonical face. Open standalone faces become prisms; manifold faces move their shared boundary. */
 export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance: number, operationSequence: number): GeometryEdit {
 	if (!finite(distance) || Math.abs(distance) < MIN_AUTHORING_EDGE_METRES) invalid('Push/Pull distance must be finite and at least 1e-6 metres from zero.');
@@ -905,6 +1092,7 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
 	const holeBoundaryHost = holeBoundaryHostForFace(mesh, target);
+	const parallelBridge = insetHost ? null : parallelHoleBridgeForFace(mesh, target);
 
 	if (insetHost) {
 		rejectOppositeBoundaryCrossing(mesh, target, distance);
@@ -953,57 +1141,188 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
-	if (!insetHost && holeBoundaryHost && target.holes.length === 0 && distance > 0 && incidentCounts.every((count) => count === 2)) {
-		// A side of a child box raised from a parent-face hole is allowed to grow
-		// beyond the parent's footprint. Moving its shared vertices would drag the
-		// parent's hole outside the parent ring and invalidate that surface. Instead,
-		// treat the outward Push/Pull as a face extrusion: keep the old perimeter as
-		// the attachment seam, move a duplicate cap, and bridge the two rings. This
-		// produces the same external solid (with bounded coplanar seams) and naturally
-		// creates the underside once the child overhangs its parent.
-		rejectOppositeBoundaryCrossing(mesh, target, distance);
-		const materialId = target.frontMaterialId;
-		if (!materialId) invalid('Push/Pull target has no supported front material.');
-		const movingStart = mesh.positions.length / 3;
-		const positions = [...mesh.positions];
-		for (const vertex of target.outer) {
-			const point = vectorAt(mesh.positions, vertex);
-			positions.push(
-				point[0] + target.normal[0] * distance,
-				point[1] + target.normal[1] * distance,
-				point[2] + target.normal[2] * distance
-			);
+	if (parallelBridge && parallelBridge.offset * distance > 0) {
+		const transitionTolerance = 1e-9 * Math.max(1, Math.abs(parallelBridge.offset), Math.abs(distance));
+		if (Math.abs(distance) + transitionTolerance >= Math.abs(parallelBridge.offset)) {
+			const materialId = target.frontMaterialId;
+			if (!materialId) invalid('Push/Pull target has no supported front material.');
+			const excess = distance - parallelBridge.offset;
+			let expanded: Mesh = mesh;
+			const replacements: Face[] = [];
+			if (Math.abs(excess) <= transitionTolerance) {
+				replacements.push(faceFromRing(
+					expanded,
+					target.id,
+					parallelBridge.hostRing,
+					materialId,
+					target.backMaterialId,
+					v2FaceLabel(target.id, 'push-pull', operationId),
+					target.normal
+				));
+			} else {
+				const movingStart = mesh.positions.length / 3;
+				const positions = [...mesh.positions];
+				for (const vertex of parallelBridge.hostRing) {
+					const point = vectorAt(mesh.positions, vertex);
+					positions.push(
+						point[0] + target.normal[0] * excess,
+						point[1] + target.normal[1] * excess,
+						point[2] + target.normal[2] * excess
+					);
+				}
+				const moving = parallelBridge.hostRing.map((_vertex, index) => movingStart + index);
+				expanded = { ...mesh, positions };
+				replacements.push(faceFromRing(
+					expanded,
+					target.id,
+					moving,
+					materialId,
+					target.backMaterialId,
+					v2FaceLabel(target.id, 'push-pull', operationId),
+					target.normal
+				));
+				for (let index = 0; index < parallelBridge.hostRing.length; index += 1) {
+					const next = (index + 1) % parallelBridge.hostRing.length;
+					const start = vectorAt(mesh.positions, parallelBridge.hostRing[index]!);
+					const end = vectorAt(mesh.positions, parallelBridge.hostRing[next]!);
+					const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+					const outward: Point3 = [
+						edge[1] * target.normal[2] - edge[2] * target.normal[1],
+						edge[2] * target.normal[0] - edge[0] * target.normal[2],
+						edge[0] * target.normal[1] - edge[1] * target.normal[0]
+					];
+					const preferred: Point3 = excess > 0 ? outward : [-outward[0], -outward[1], -outward[2]];
+					const sideId = `${operationId}:side:${index}`;
+					replacements.push(faceFromRing(
+						expanded,
+						sideId,
+						[parallelBridge.hostRing[index]!, parallelBridge.hostRing[next]!, moving[next]!, moving[index]!],
+						materialId,
+						null,
+						v2FaceLabel(sideId, 'push-pull', operationId),
+						preferred
+					));
+				}
+			}
+			const removed = new Set([target.id, ...parallelBridge.bridgeFaceIds]);
+			const transitioned = withSortedFaces(expanded, [...mesh.faces.filter((face) => !removed.has(face.id)), ...replacements]);
+			const nextMesh = compactReferencedVertices(transitioned);
+			const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+			if (!validation.editable) invalid(`Nested face level transition is outside the supported topology: ${validation.reason}`);
+			return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 		}
-		const moving = target.outer.map((_vertex, index) => movingStart + index);
-		const expanded: Mesh = { ...mesh, positions };
-		const replacements: Face[] = [
-			faceFromRing(expanded, target.id, moving, materialId, target.backMaterialId, v2FaceLabel(target.id, 'push-pull', operationId), target.normal)
-		];
-		for (let index = 0; index < target.outer.length; index += 1) {
-			const next = (index + 1) % target.outer.length;
-			const start = vectorAt(mesh.positions, target.outer[index]!);
-			const end = vectorAt(mesh.positions, target.outer[next]!);
-			const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-			const outward: Point3 = [
-				edge[1] * target.normal[2] - edge[2] * target.normal[1],
-				edge[2] * target.normal[0] - edge[0] * target.normal[2],
-				edge[0] * target.normal[1] - edge[1] * target.normal[0]
+	}
+
+	const holeBoundaryExit = !insetHost && holeBoundaryHost && target.holes.length === 0 && distance > 0
+		&& incidentCounts.every((count) => count === 2)
+		? holeBoundaryExitForFace(mesh, target, holeBoundaryHost)
+		: null;
+	if (holeBoundaryHost && holeBoundaryExit) {
+		const boundaryTolerance = 1e-9 * Math.max(1, Math.abs(holeBoundaryExit.distance), Math.abs(distance));
+		if (distance + boundaryTolerance >= holeBoundaryExit.distance) {
+			rejectOppositeBoundaryCrossing(mesh, target, distance);
+			const materialId = target.frontMaterialId;
+			if (!materialId) invalid('Push/Pull target has no supported front material.');
+			const positions = [...mesh.positions];
+			for (const vertex of target.outer) {
+				const offset = vertex * 3;
+				positions[offset] = positions[offset]! + target.normal[0] * distance;
+				positions[offset + 1] = positions[offset + 1]! + target.normal[1] * distance;
+				positions[offset + 2] = positions[offset + 2]! + target.normal[2] * distance;
+			}
+			const residual = distance - holeBoundaryExit.distance;
+			const boundaryPoint = (vertex: number): Point3 => {
+				const original = vectorAt(mesh.positions, vertex);
+				return [
+					original[0] + target.normal[0] * holeBoundaryExit.distance,
+					original[1] + target.normal[1] * holeBoundaryExit.distance,
+					original[2] + target.normal[2] * holeBoundaryExit.distance
+				];
+			};
+			const ensureBoundaryVertex = (point: Point3): number => {
+				const existing = exactVertexIndex(positions, point);
+				if (existing !== null) return existing;
+				const vertex = positions.length / 3;
+				positions.push(point[0], point[1], point[2]);
+				return vertex;
+			};
+			const boundaryStart = Math.abs(residual) <= boundaryTolerance
+				? holeBoundaryExit.holeStart : ensureBoundaryVertex(boundaryPoint(holeBoundaryExit.holeStart));
+			const boundaryEnd = Math.abs(residual) <= boundaryTolerance
+				? holeBoundaryExit.holeEnd : ensureBoundaryVertex(boundaryPoint(holeBoundaryExit.holeEnd));
+			const expanded: Mesh = { ...mesh, positions };
+
+			const hole = holeBoundaryHost.holes[holeBoundaryExit.holeIndex]!;
+			const alternative: number[] = [];
+			let cursor = (holeBoundaryExit.holeEdgeIndex - 1 + hole.length) % hole.length;
+			let guard = 0;
+			while (hole[cursor] !== holeBoundaryExit.holeEnd) {
+				alternative.push(hole[cursor]!);
+				cursor = (cursor - 1 + hole.length) % hole.length;
+				guard += 1;
+				if (guard > hole.length) invalid('Unable to open the nested host hole at its crossed boundary.');
+			}
+			const notchPath = holeBoundaryExit.startParameter <= holeBoundaryExit.endParameter
+				? [boundaryStart, ...alternative, boundaryEnd]
+				: [boundaryEnd, ...[...alternative].reverse(), boundaryStart];
+			const notchOuter = [
+				...holeBoundaryHost.outer.slice(0, holeBoundaryExit.outerEdgeIndex + 1),
+				...notchPath,
+				...holeBoundaryHost.outer.slice(holeBoundaryExit.outerEdgeIndex + 1)
 			];
-			const sideId = `${operationId}:side:${index}`;
-			replacements.push(faceFromRing(
+			const remainingHoles = holeBoundaryHost.holes.filter((_ring, index) => index !== holeBoundaryExit.holeIndex);
+			const rebuiltHost = faceFromRing(
 				expanded,
-				sideId,
-				[target.outer[index]!, target.outer[next]!, moving[next]!, moving[index]!],
-				materialId,
-				null,
-				v2FaceLabel(sideId, 'push-pull', operationId),
-				outward
-			));
+				holeBoundaryHost.id,
+				notchOuter,
+				holeBoundaryHost.frontMaterialId!,
+				holeBoundaryHost.backMaterialId,
+				v2FaceLabel(holeBoundaryHost.id, 'push-pull', operationId),
+				holeBoundaryHost.normal,
+				remainingHoles
+			);
+
+			const insertionVertices = [boundaryStart, boundaryEnd];
+			const affected = new Set([target.id, ...(topology.adjacentFaceIds.get(target.id) ?? [])]);
+			const retained = mesh.faces
+				.filter((face) => face.id !== holeBoundaryHost.id)
+				.map((face) => {
+					const outer = insertVerticesOnRing(expanded, face.outer, insertionVertices);
+					const holes = face.holes.map((ring) => insertVerticesOnRing(expanded, ring, insertionVertices));
+					const split = outer.length !== face.outer.length || holes.some((ring, index) => ring.length !== face.holes[index]!.length);
+					if (!affected.has(face.id) && !split) return face;
+					if (!face.frontMaterialId) invalid(`Push/Pull affected face ${face.id} has no supported front material.`);
+					return faceFromRing(
+						expanded,
+						face.id,
+						outer,
+						face.frontMaterialId,
+						face.backMaterialId,
+						v2FaceLabel(face.id, 'push-pull', operationId),
+						face.normal,
+						holes
+					);
+				});
+
+			const additions: Face[] = [rebuiltHost];
+			if (residual > boundaryTolerance) {
+				if (residual < MIN_AUTHORING_EDGE_METRES) invalid('Push/Pull overhang beyond the host boundary is too small to form a stable underside.');
+				const undersideId = `${operationId}:underside`;
+				additions.push(faceFromRing(
+					expanded,
+					undersideId,
+					[boundaryStart, boundaryEnd, holeBoundaryExit.holeEnd, holeBoundaryExit.holeStart],
+					materialId,
+					null,
+					v2FaceLabel(undersideId, 'push-pull', operationId),
+					[-holeBoundaryHost.normal[0], -holeBoundaryHost.normal[1], -holeBoundaryHost.normal[2]]
+				));
+			}
+			const nextMesh = withSortedFaces(expanded, [...retained, ...additions]);
+			const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+			if (!validation.editable) invalid(`Connected overhang Push/Pull result is outside the supported topology: ${validation.reason}`);
+			return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 		}
-		const nextMesh = withSortedFaces(expanded, [...mesh.faces.filter((face) => face.id !== target.id), ...replacements]);
-		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
-		if (!validation.editable) invalid(`Nested side Push/Pull result is outside the supported topology: ${validation.reason}`);
-		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
 	const surroundingOpenParent = target.holes.length > 0
@@ -1022,34 +1341,63 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 				point[1] + target.normal[1] * distance,
 				point[2] + target.normal[2] * distance
 			);
-		}
-		const movingOuter = target.outer.map((_vertex, index) => movingOuterStart + index);
-		for (const hole of target.holes) for (const vertex of hole) {
-			const offset = vertex * 3;
-			positions[offset] = positions[offset]! + target.normal[0] * distance;
-			positions[offset + 1] = positions[offset + 1]! + target.normal[1] * distance;
-			positions[offset + 2] = positions[offset + 2]! + target.normal[2] * distance;
-		}
-		const expanded: Mesh = { ...mesh, positions };
-		const movedParent = faceFromRing(
+			}
+			const movingOuter = target.outer.map((_vertex, index) => movingOuterStart + index);
+			const movingHoles: number[][] = [];
+			const decoupledHoles: Array<{ holeIndex: number; source: readonly number[]; moving: readonly number[] }> = [];
+			const mutatedHoleAdjacentFaceIds = new Set<string>();
+			for (const [holeIndex, hole] of target.holes.entries()) {
+				const adjacentIds = new Set<string>();
+				for (let index = 0; index < hole.length; index += 1) {
+					const a = hole[index]!; const b = hole[(index + 1) % hole.length]!;
+					const edge = topology.edges.get(a < b ? `${a}:${b}` : `${b}:${a}`);
+					for (const adjacentFaceId of edge?.faceIds ?? []) if (adjacentFaceId !== target.id) adjacentIds.add(adjacentFaceId);
+				}
+				const hasCoplanarNestedFace = [...adjacentIds].some((faceId) => {
+					const adjacentFace = topology.faceById.get(faceId);
+					return !!adjacentFace && Math.abs(Math.abs(dot3(adjacentFace.normal, target.normal)) - 1) <= 1e-9;
+				});
+				if (hasCoplanarNestedFace) {
+					const movingStart = positions.length / 3;
+					for (const vertex of hole) {
+						const point = vectorAt(mesh.positions, vertex);
+						positions.push(
+							point[0] + target.normal[0] * distance,
+							point[1] + target.normal[1] * distance,
+							point[2] + target.normal[2] * distance
+						);
+					}
+					const moving = hole.map((_vertex, index) => movingStart + index);
+					movingHoles.push(moving);
+					decoupledHoles.push({ holeIndex, source: hole, moving });
+				} else {
+					for (const adjacentFaceId of adjacentIds) mutatedHoleAdjacentFaceIds.add(adjacentFaceId);
+					for (const vertex of hole) {
+						const offset = vertex * 3;
+						positions[offset] = positions[offset]! + target.normal[0] * distance;
+						positions[offset + 1] = positions[offset + 1]! + target.normal[1] * distance;
+						positions[offset + 2] = positions[offset + 2]! + target.normal[2] * distance;
+					}
+					movingHoles.push([...hole]);
+				}
+			}
+			const expanded: Mesh = { ...mesh, positions };
+			const movedParent = faceFromRing(
 			expanded,
 			target.id,
 			movingOuter,
 			materialId,
 			target.backMaterialId,
-			v2FaceLabel(target.id, 'push-pull', operationId),
-			target.normal,
-			target.holes
-		);
-		const adjacent = new Set(topology.adjacentFaceIds.get(target.id) ?? []);
-		const retained = mesh.faces
-			.filter((face) => face.id !== target.id)
-			.map((face) => adjacent.has(face.id)
-				? holeAdjacentFaceIds.has(face.id)
+				v2FaceLabel(target.id, 'push-pull', operationId),
+				target.normal,
+				movingHoles
+			);
+			const retained = mesh.faces
+				.filter((face) => face.id !== target.id)
+				.map((face) => mutatedHoleAdjacentFaceIds.has(face.id)
 					? upgradedFaceAllowOrientationFlip(expanded, face, operationId)
-					: upgradedFace(expanded, face, operationId)
-				: face);
-		const sides: Face[] = [];
+					: face);
+			const sides: Face[] = [];
 		for (let index = 0; index < target.outer.length; index += 1) {
 			const next = (index + 1) % target.outer.length;
 			const start = vectorAt(mesh.positions, target.outer[index]!);
@@ -1068,9 +1416,30 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 				materialId,
 				null,
 				v2FaceLabel(sideId, 'push-pull', operationId),
-				outward
-			));
-		}
+					outward
+				));
+			}
+			for (const decoupled of decoupledHoles) for (let index = 0; index < decoupled.source.length; index += 1) {
+				const next = (index + 1) % decoupled.source.length;
+				const start = vectorAt(mesh.positions, decoupled.source[index]!);
+				const end = vectorAt(mesh.positions, decoupled.source[next]!);
+				const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+				const inward: Point3 = [
+					edge[1] * target.normal[2] - edge[2] * target.normal[1],
+					edge[2] * target.normal[0] - edge[0] * target.normal[2],
+					edge[0] * target.normal[1] - edge[1] * target.normal[0]
+				];
+				const sideId = `${operationId}:hole:${decoupled.holeIndex}:side:${index}`;
+				sides.push(faceFromRing(
+					expanded,
+					sideId,
+					[decoupled.source[index]!, decoupled.source[next]!, decoupled.moving[next]!, decoupled.moving[index]!],
+					materialId,
+					null,
+					v2FaceLabel(sideId, 'push-pull', operationId),
+					inward
+				));
+			}
 		const nextMesh = withSortedFaces(expanded, [...retained, movedParent, ...sides]);
 		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
 		if (!validation.editable) invalid(`Surrounding face Push/Pull result is outside the supported topology: ${validation.reason}`);

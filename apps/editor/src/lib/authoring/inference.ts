@@ -43,6 +43,11 @@ export type FaceRayHit = Readonly<{
 	distance: number;
 }>;
 
+export type PushPullLevelSnap = Readonly<{
+	distance: number;
+	inference: AuthoringInference;
+}>;
+
 const AXES: readonly Readonly<{ name: AuthoringAxis; vector: AuthoringPoint }>[] = [
 	{ name: 'x', vector: [1, 0, 0] },
 	{ name: 'y', vector: [0, 1, 0] },
@@ -88,11 +93,12 @@ function intersectPlane(ray: Ray, plane: AuthoringPlane): AuthoringPoint | null 
 	return point.toArray().every(Number.isFinite) ? [point.x, point.y, point.z] : null;
 }
 
-export function nearestAuthoringFaceHit(graph: BomcGraph, ray: Ray): FaceRayHit | null {
+function nearestAuthoringFaceHitWhere(graph: BomcGraph, ray: Ray, accept: (face: Face) => boolean): FaceRayHit | null {
 	const mesh = graph.meshes[0];
 	if (!mesh) return null;
 	let best: FaceRayHit | null = null;
 	for (const face of mesh.faces) {
+		if (!accept(face)) continue;
 		for (let index = 0; index < face.triangles.length; index += 3) {
 			const a = new Vector3(...pointAt(mesh, face.triangles[index]!));
 			const b = new Vector3(...pointAt(mesh, face.triangles[index + 1]!));
@@ -109,6 +115,41 @@ export function nearestAuthoringFaceHit(graph: BomcGraph, ray: Ray): FaceRayHit 
 		}
 	}
 	return best;
+}
+
+export function nearestAuthoringFaceHit(graph: BomcGraph, ray: Ray): FaceRayHit | null {
+	return nearestAuthoringFaceHitWhere(graph, ray, () => true);
+}
+
+export function resolvePushPullLevelSnap(options: Readonly<{
+	graph: BomcGraph;
+	viewport: InferenceViewport;
+	clientX: number;
+	clientY: number;
+	faceId: string;
+}>): PushPullLevelSnap | null {
+	if (!Number.isFinite(options.clientX) || !Number.isFinite(options.clientY)) return null;
+	const mesh = options.graph.meshes[0];
+	const target = mesh?.faces.find((face) => face.id === options.faceId);
+	if (!mesh || !target) return null;
+	const ray = options.viewport.rayFromScreen(options.clientX, options.clientY);
+	if (!ray) return null;
+	const hit = nearestAuthoringFaceHitWhere(options.graph, ray, (face) => face.id !== target.id);
+	if (!hit || Math.abs(Math.abs(dot(hit.face.normal as AuthoringPoint, target.normal as AuthoringPoint)) - 1) > 1e-9) return null;
+	const targetOrigin = pointAt(mesh, target.outer[0]!);
+	const candidateOrigin = pointAt(mesh, hit.face.outer[0]!);
+	const distance = dot(subtract(candidateOrigin, targetOrigin), target.normal as AuthoringPoint);
+	if (!Number.isFinite(distance) || Math.abs(distance) < 1e-6) return null;
+	return Object.freeze({
+		distance,
+		inference: Object.freeze({
+			point: hit.point,
+			kind: 'face' as const,
+			faceId: hit.face.id,
+			plane: planeForFace(mesh, hit.face),
+			screenDistancePx: 0
+		})
+	});
 }
 
 function screenDistance(viewport: InferenceViewport, point: AuthoringPoint, clientX: number, clientY: number): number | null {

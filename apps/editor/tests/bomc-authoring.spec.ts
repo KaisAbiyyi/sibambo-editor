@@ -737,9 +737,64 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 			expect(movedParent.holes).toHaveLength(1);
 			expect(movedParent.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([0.2, 0.2, 0.2, 0.2]);
 				expect(childAfterParentMove.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
-			});
+				});
 
-				test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
+				test('flat nested rectangle stays put when the surrounding face rises, snaps level, then can protrude above it', async ({ page }) => {
+					await createNew(page);
+					await ensureTopView(page);
+					await drawRectangle(page, 0.24, 0.24, 0.50, 0.48);
+					const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const parentId = rectangleEntityId(flat, 1);
+					const beforeChildIds = new Set(flat.meshes[0]!.faces.map((face) => face.id));
+
+					await drawRectangleOnFace(page, flat, parentId, 'top');
+					const split = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const child = split.meshes[0]!.faces.find((face) => !beforeChildIds.has(face.id) && face.label?.includes('"rectangle"'));
+					if (!child) throw new Error('Flat nested rectangle did not create a canonical child face.');
+					const childBeforeY = child.outer.map((vertex) => split.meshes[0]!.positions[vertex * 3 + 1]!);
+
+					await pushPullProjectedFace(page, split, parentId, 0.55, 'top');
+					const raised = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const parent = raised.meshes[0]!.faces.find((face) => face.id === parentId)!;
+					const childRecessed = raised.meshes[0]!.faces.find((face) => face.id === child.id)!;
+					const parentY = raised.meshes[0]!.positions[parent.outer[0]! * 3 + 1]!;
+					expect(parent.holes).toHaveLength(1);
+					expect(childRecessed.outer.map((vertex) => raised.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
+
+					const snapCommandCount = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length;
+					const snapRevision = (await currentCheckpoint(page)).snapshot.revision;
+					await ensureTopView(page);
+					await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+					await clickProjectedFace(page, raised, child.id, 'top');
+					const parentTriangle = parent.triangles.slice(0, 3);
+					const parentPoint = [0, 1, 2].map((axis) => parentTriangle.reduce(
+						(sum, vertex) => sum + raised.meshes[0]!.positions[vertex * 3 + axis]!, 0
+					) / parentTriangle.length) as [number, number, number];
+					const parentScreen = await projectWorldPoint(page, raised, parentPoint, 'top');
+					await page.mouse.move(parentScreen.x, parentScreen.y);
+					await expect(page.locator('.footer-status')).toContainText('On Face');
+					await page.mouse.click(parentScreen.x, parentScreen.y);
+					await expect.poll(async () => (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length).toBe(snapCommandCount + 1);
+					await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(snapRevision + 1);
+
+					const snapCommand = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').at(-1);
+					if (!snapCommand || snapCommand.kind !== 'PUSH_PULL_FACE') throw new Error('Nested level snap did not emit a Push/Pull command.');
+					expect(snapCommand.faceId).toBe(child.id);
+					expect(snapCommand.distance).toBeCloseTo(parentY - childBeforeY[0]!, 12);
+
+					const level = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const childLevel = level.meshes[0]!.faces.find((face) => face.id === child.id)!;
+					expect(childLevel.outer.map((vertex) => level.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([parentY, parentY, parentY, parentY]);
+
+					await pushPullProjectedFace(page, level, child.id, 0.35, 'top');
+					const protruded = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const childAbove = protruded.meshes[0]!.faces.find((face) => face.id === child.id)!;
+					for (const vertex of childAbove.outer) {
+						expect(protruded.meshes[0]!.positions[vertex * 3 + 1]!).toBeCloseTo(parentY + 0.35, 12);
+					}
+				});
+
+					test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
 				await createNew(page);
 				await ensureTopView(page);
 				await drawRectangle(page, 0.30, 0.30, 0.38, 0.34);
@@ -824,9 +879,16 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 					const overhung = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
 					const moved = overhung.meshes[0]!.faces.find((face) => face.id === upperFront.id);
 					if (!moved) throw new Error('Upper-box overhang lost the selected face identity.');
-					const maxZ = Math.max(...moved.outer.map((vertex) => overhung.meshes[0]!.positions[vertex * 3 + 2]!));
-					expect(maxZ).toBeGreaterThan(slabMaxZ);
-				});
+						const maxZ = Math.max(...moved.outer.map((vertex) => overhung.meshes[0]!.positions[vertex * 3 + 2]!));
+						expect(maxZ).toBeGreaterThan(slabMaxZ);
+						const slabTopAfter = overhung.meshes[0]!.faces.find((face) => face.id === slabTopId)!;
+						expect(slabTopAfter.holes).toHaveLength(0);
+						expect(slabTopAfter.outer.length).toBeGreaterThan(4);
+						const underside = overhung.meshes[0]!.faces.find((face) => face.id.endsWith(':underside'));
+						if (!underside) throw new Error('Connected overhang did not create an exterior-only underside face.');
+						const undersideMinZ = Math.min(...underside.outer.map((vertex) => overhung.meshes[0]!.positions[vertex * 3 + 2]!));
+						expect(undersideMinZ).toBeGreaterThanOrEqual(slabMaxZ - 1e-9);
+					});
 
 					test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
 					await createNew(page);

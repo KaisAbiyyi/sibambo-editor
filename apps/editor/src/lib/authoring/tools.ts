@@ -19,6 +19,7 @@ import {
 	nearestAuthoringFaceHit,
 	rectangleCorners,
 	resolveAuthoringInference,
+	resolvePushPullLevelSnap,
 	type AuthoringInference,
 	type AuthoringPlane
 } from './inference.js';
@@ -788,8 +789,16 @@ export class AuthoringToolController {
 		if (!checkpoint) return;
 		if (this.pushPull) {
 			if (checkpoint !== this.pushPull.checkpoint) { this.cancelPushPull(); return; }
-			const distance = solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY);
+			const snap = resolvePushPullLevelSnap({
+				graph: checkpoint.snapshot.graph,
+				viewport: this.options.viewport,
+				clientX,
+				clientY,
+				faceId: this.pushPull.faceId
+			});
+			const distance = snap?.distance ?? solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY);
 			this.pushPull = Object.freeze({ ...this.pushPull, distance });
+			this.setInference(snap?.inference ?? null);
 			if (distance === null || Math.abs(distance) < MIN_EXTRUSION_METRES) { this.clearPreviewOverlay(); return; }
 			this.updatePushPullPreview(distance);
 			return;
@@ -940,7 +949,14 @@ export class AuthoringToolController {
 			return;
 		}
 		if (checkpoint !== this.pushPull.checkpoint) { this.cancelPushPull(); return; }
-		const distance = solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY) ?? this.pushPull.distance;
+		const snap = resolvePushPullLevelSnap({
+			graph: checkpoint.snapshot.graph,
+			viewport: this.options.viewport,
+			clientX,
+			clientY,
+			faceId: this.pushPull.faceId
+		});
+		const distance = snap?.distance ?? solveAxisDrag(this.options.viewport, this.pushPull.drag, clientX, clientY) ?? this.pushPull.distance;
 		if (distance === null || !Number.isFinite(distance) || Math.abs(distance) < MIN_EXTRUSION_METRES) {
 			this.options.onError('Move along the face normal by at least 0.000001 m before committing Push/Pull.');
 			return;
