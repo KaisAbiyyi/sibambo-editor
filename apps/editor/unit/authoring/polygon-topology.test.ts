@@ -81,4 +81,25 @@ describe('authoring polygon and topology', () => {
 		};
 		expect(() => buildAuthoringTopology(mesh)).toThrow(/non-manifold/i);
 	});
+
+	test('admits only the bounded nested Push/Pull three-face junction pattern', () => {
+		const mesh: Mesh = {
+			id: 'mesh',
+			definitionId: 'definition',
+			positions: [
+				1, 0, 1, 3, 0, 1, 3, 0, 3, 1, 0, 3,
+				0, 0, 0, 4, 0, 0, 4, 0, 4, 0, 0, 4,
+				1, 1, 1, 3, 1, 1
+			],
+			faces: [
+				{ ...face('base-ring', [4, 5, 6, 7], []), holes: [[0, 1, 2, 3]] },
+				face('child', [0, 1, 2, 3], []),
+				face('reveal', [0, 1, 9, 8], [], [0, 0, 1])
+			]
+		};
+		const topology = buildAuthoringTopology(mesh);
+		expect(topology.edges.get('0:1')?.faceIds).toEqual(['base-ring', 'child', 'reveal']);
+		expect(topology.adjacentFaceIds.get('child')).toContain('base-ring');
+		expect(topology.adjacentFaceIds.get('child')).toContain('reveal');
+	});
 });

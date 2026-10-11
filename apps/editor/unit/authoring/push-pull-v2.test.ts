@@ -445,7 +445,20 @@ describe('authoring topology v2 Push/Pull', () => {
 			expect(parentAfter.holes).toHaveLength(1);
 			expect(parentAfter.holes[0]!.map((vertex) => raisedParent.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([1, 1, 1, 1]);
 			expect(vertexPositions(raisedParent, childId)).toEqual(childBefore);
+			const baseId = `${DOCUMENT_ID}:op:3:base`;
+			const base = raisedParent.meshes[0]!.faces.find((face) => face.id === baseId);
+			expect(base).toBeDefined();
+			expect(base?.holes).toHaveLength(1);
+			expect(base?.outer.map((vertex) => raisedParent.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([0, 0, 0, 0]);
+			expect(base?.holes[0]!.map((vertex) => raisedParent.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([0, 0, 0, 0]);
 			expect(validateEditableSubset(raisedParent)).toMatchObject({ editable: true });
+			const topology = buildAuthoringTopology(raisedParent.meshes[0]!);
+			const child = raisedParent.meshes[0]!.faces.find((face) => face.id === childId)!;
+			for (let index = 0; index < child.outer.length; index += 1) {
+				const a = child.outer[index]!; const b = child.outer[(index + 1) % child.outer.length]!;
+				const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+				expect(topology.edges.get(key)?.faceIds.length).toBe(3);
+			}
 		} finally { document.dispose(); }
 	});
 

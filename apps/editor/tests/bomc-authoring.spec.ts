@@ -760,6 +760,10 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 					const parentY = raised.meshes[0]!.positions[parent.outer[0]! * 3 + 1]!;
 					expect(parent.holes).toHaveLength(1);
 					expect(childRecessed.outer.map((vertex) => raised.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
+					const baseRing = raised.meshes[0]!.faces.find((face) => face.id.endsWith(':base') && face.holes.length === 1
+						&& face.outer.every((vertex) => Math.abs(raised.meshes[0]!.positions[vertex * 3 + 1]! - childBeforeY[0]!) < 1e-12));
+					if (!baseRing) throw new Error('Flat nested Push/Pull did not preserve the original surrounding ring as an underside/base face.');
+					expect(baseRing.holes[0]!.map((vertex) => raised.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
 
 					const snapCommandCount = (await authoringCommands(page)).filter((command) => command.kind === 'PUSH_PULL_FACE').length;
 					const snapRevision = (await currentCheckpoint(page)).snapshot.revision;

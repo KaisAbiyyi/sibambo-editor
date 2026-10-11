@@ -7,6 +7,11 @@ export type MeshEdge = Readonly<{
 	faceIds: readonly string[];
 }>;
 
+type EdgeFaceRef = Readonly<{
+	faceId: string;
+	ringIndex: number;
+}>;
+
 export type AuthoringTopology = Readonly<{
 	edges: ReadonlyMap<string, MeshEdge>;
 	faceById: ReadonlyMap<string, Face>;
@@ -15,6 +20,26 @@ export type AuthoringTopology = Readonly<{
 
 export class AuthoringTopologyError extends Error {
 	constructor(message: string) { super(message); this.name = 'AuthoringTopologyError'; }
+}
+
+function dot(left: readonly number[], right: readonly number[]): number {
+	return left[0]! * right[0]! + left[1]! * right[1]! + left[2]! * right[2]!;
+}
+
+function supportedNestedThreeFaceJunction(entry: readonly EdgeFaceRef[], faceById: ReadonlyMap<string, Face>): boolean {
+	if (entry.length !== 3) return false;
+	const holeRefs = entry.filter((ref) => ref.ringIndex > 0);
+	const outerRefs = entry.filter((ref) => ref.ringIndex === 0);
+	if (holeRefs.length !== 1 || outerRefs.length !== 2) return false;
+	const holeFace = faceById.get(holeRefs[0]!.faceId);
+	const outerFaces = outerRefs.map((ref) => faceById.get(ref.faceId));
+	if (!holeFace || outerFaces.some((face) => !face)) return false;
+	const [first, second] = outerFaces as [Face, Face];
+	const firstParallel = Math.abs(Math.abs(dot(holeFace.normal, first.normal)) - 1) <= 1e-9;
+	const secondParallel = Math.abs(Math.abs(dot(holeFace.normal, second.normal)) - 1) <= 1e-9;
+	if (firstParallel === secondParallel) return false;
+	const reveal = firstParallel ? second : first;
+	return Math.abs(dot(holeFace.normal, reveal.normal)) <= 1e-9;
 }
 
 export function edgeKey(a: number, b: number): string {
@@ -36,7 +61,7 @@ export function buildAuthoringTopology(mesh: Mesh): AuthoringTopology {
 	const vertexCount = mesh.positions.length / 3;
 	if (!Number.isInteger(vertexCount)) throw new AuthoringTopologyError('Mesh positions are not XYZ triples.');
 	const faceById = new Map<string, Face>();
-	const edgeFaces = new Map<string, { a: number; b: number; faceIds: string[] }>();
+	const edgeFaces = new Map<string, { a: number; b: number; refs: EdgeFaceRef[] }>();
 	const cycles = new Map<string, string>();
 	for (const face of mesh.faces) {
 		if (!face.id || faceById.has(face.id)) throw new AuthoringTopologyError(`Face identity ${face.id || '<empty>'} is duplicated.`);
@@ -50,24 +75,29 @@ export function buildAuthoringTopology(mesh: Mesh): AuthoringTopology {
 		if (duplicate) throw new AuthoringTopologyError(`Faces ${duplicate} and ${face.id} duplicate the same vertex cycle.`);
 		cycles.set(cycle, face.id);
 		faceById.set(face.id, face);
-		for (const ring of rings) for (let index = 0; index < ring.length; index += 1) {
+		for (const [ringIndex, ring] of rings.entries()) for (let index = 0; index < ring.length; index += 1) {
 			const a = ring[index]!; const b = ring[(index + 1) % ring.length]!;
 			const key = edgeKey(a, b);
-			const entry = edgeFaces.get(key) ?? { a: Math.min(a, b), b: Math.max(a, b), faceIds: [] };
-			if (entry.faceIds.includes(face.id)) throw new AuthoringTopologyError(`Face ${face.id} reuses edge ${key} across its rings.`);
-			entry.faceIds.push(face.id);
-			if (entry.faceIds.length > 2) throw new AuthoringTopologyError(`Edge ${key} is non-manifold with more than two incident faces.`);
+			const entry = edgeFaces.get(key) ?? { a: Math.min(a, b), b: Math.max(a, b), refs: [] };
+			if (entry.refs.some((ref) => ref.faceId === face.id)) throw new AuthoringTopologyError(`Face ${face.id} reuses edge ${key} across its rings.`);
+			entry.refs.push(Object.freeze({ faceId: face.id, ringIndex }));
+			if (entry.refs.length > 3) throw new AuthoringTopologyError(`Edge ${key} is non-manifold with more than three incident faces.`);
 			edgeFaces.set(key, entry);
 		}
 	}
 	const edges = new Map<string, MeshEdge>();
 	const adjacency = new Map<string, Set<string>>([...faceById.keys()].map((faceId) => [faceId, new Set()]));
 	for (const [key, entry] of edgeFaces) {
-		const faceIds = [...entry.faceIds].sort(codeUnitCompare);
+		if (entry.refs.length === 3 && !supportedNestedThreeFaceJunction(entry.refs, faceById)) {
+			throw new AuthoringTopologyError(`Edge ${key} is non-manifold with an unsupported three-face junction.`);
+		}
+		const faceIds = entry.refs.map((ref) => ref.faceId).sort(codeUnitCompare);
 		edges.set(key, Object.freeze({ key, a: entry.a, b: entry.b, faceIds: Object.freeze(faceIds) }));
-		if (faceIds.length === 2) {
-			adjacency.get(faceIds[0]!)!.add(faceIds[1]!);
-			adjacency.get(faceIds[1]!)!.add(faceIds[0]!);
+		if (faceIds.length >= 2) {
+			for (let first = 0; first < faceIds.length; first += 1) for (let second = first + 1; second < faceIds.length; second += 1) {
+				adjacency.get(faceIds[first]!)!.add(faceIds[second]!);
+				adjacency.get(faceIds[second]!)!.add(faceIds[first]!);
+			}
 		}
 	}
 	const adjacentFaceIds = new Map<string, readonly string[]>();

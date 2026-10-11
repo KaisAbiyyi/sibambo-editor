@@ -1092,9 +1092,9 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
 	const holeBoundaryHost = holeBoundaryHostForFace(mesh, target);
-	const parallelBridge = insetHost ? null : parallelHoleBridgeForFace(mesh, target);
+	const parallelBridge = parallelHoleBridgeForFace(mesh, target);
 
-	if (insetHost) {
+	if (insetHost && !(parallelBridge && parallelBridge.offset * distance > 0)) {
 		rejectOppositeBoundaryCrossing(mesh, target, distance);
 		const movingStart = mesh.positions.length / 3;
 		const positions = [...mesh.positions];
@@ -1143,74 +1143,125 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 
 	if (parallelBridge && parallelBridge.offset * distance > 0) {
 		const transitionTolerance = 1e-9 * Math.max(1, Math.abs(parallelBridge.offset), Math.abs(distance));
-		if (Math.abs(distance) + transitionTolerance >= Math.abs(parallelBridge.offset)) {
-			const materialId = target.frontMaterialId;
-			if (!materialId) invalid('Push/Pull target has no supported front material.');
-			const excess = distance - parallelBridge.offset;
-			let expanded: Mesh = mesh;
-			const replacements: Face[] = [];
-			if (Math.abs(excess) <= transitionTolerance) {
-				replacements.push(faceFromRing(
-					expanded,
-					target.id,
-					parallelBridge.hostRing,
-					materialId,
-					target.backMaterialId,
-					v2FaceLabel(target.id, 'push-pull', operationId),
-					target.normal
-				));
-			} else {
-				const movingStart = mesh.positions.length / 3;
-				const positions = [...mesh.positions];
-				for (const vertex of parallelBridge.hostRing) {
-					const point = vectorAt(mesh.positions, vertex);
-					positions.push(
-						point[0] + target.normal[0] * excess,
-						point[1] + target.normal[1] * excess,
-						point[2] + target.normal[2] * excess
-					);
-				}
-				const moving = parallelBridge.hostRing.map((_vertex, index) => movingStart + index);
-				expanded = { ...mesh, positions };
-				replacements.push(faceFromRing(
-					expanded,
-					target.id,
-					moving,
-					materialId,
-					target.backMaterialId,
-					v2FaceLabel(target.id, 'push-pull', operationId),
-					target.normal
-				));
-				for (let index = 0; index < parallelBridge.hostRing.length; index += 1) {
-					const next = (index + 1) % parallelBridge.hostRing.length;
-					const start = vectorAt(mesh.positions, parallelBridge.hostRing[index]!);
-					const end = vectorAt(mesh.positions, parallelBridge.hostRing[next]!);
-					const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-					const outward: Point3 = [
-						edge[1] * target.normal[2] - edge[2] * target.normal[1],
-						edge[2] * target.normal[0] - edge[0] * target.normal[2],
-						edge[0] * target.normal[1] - edge[1] * target.normal[0]
-					];
-					const preferred: Point3 = excess > 0 ? outward : [-outward[0], -outward[1], -outward[2]];
-					const sideId = `${operationId}:side:${index}`;
-					replacements.push(faceFromRing(
-						expanded,
-						sideId,
-						[parallelBridge.hostRing[index]!, parallelBridge.hostRing[next]!, moving[next]!, moving[index]!],
-						materialId,
-						null,
-						v2FaceLabel(sideId, 'push-pull', operationId),
-						preferred
-					));
-				}
+		const materialId = target.frontMaterialId;
+		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const reachesHost = Math.abs(distance) + transitionTolerance >= Math.abs(parallelBridge.offset);
+		const excess = distance - parallelBridge.offset;
+		const positions = [...mesh.positions];
+		let expanded: Mesh = mesh;
+		const replacements: Face[] = [];
+		const bridgeFaceForEdge = (index: number): Face => {
+			const next = (index + 1) % target.outer.length;
+			const expected = new Set([
+				target.outer[index]!, target.outer[next]!,
+				parallelBridge.hostRing[index]!, parallelBridge.hostRing[next]!
+			]);
+			const bridge = parallelBridge.bridgeFaceIds
+				.map((faceId) => mesh.faces.find((face) => face.id === faceId))
+				.find((face): face is Face => !!face && face.outer.length === 4 && face.outer.every((vertex) => expected.has(vertex)));
+			if (!bridge) invalid(`Nested Push/Pull bridge for face ${target.id} is incomplete.`);
+			return bridge;
+		};
+
+		if (!reachesHost) {
+			const movingStart = positions.length / 3;
+			for (const vertex of target.outer) {
+				const point = vectorAt(mesh.positions, vertex);
+				positions.push(
+					point[0] + target.normal[0] * distance,
+					point[1] + target.normal[1] * distance,
+					point[2] + target.normal[2] * distance
+				);
 			}
-			const removed = new Set([target.id, ...parallelBridge.bridgeFaceIds]);
-			const transitioned = withSortedFaces(expanded, [...mesh.faces.filter((face) => !removed.has(face.id)), ...replacements]);
-			const nextMesh = compactReferencedVertices(transitioned);
-			const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
-			if (!validation.editable) invalid(`Nested face level transition is outside the supported topology: ${validation.reason}`);
-			return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+			const moving = target.outer.map((_vertex, index) => movingStart + index);
+			expanded = { ...mesh, positions };
+			replacements.push(faceFromRing(
+				expanded,
+				target.id,
+				moving,
+				materialId,
+				target.backMaterialId,
+				v2FaceLabel(target.id, 'push-pull', operationId),
+				target.normal
+			));
+			for (let index = 0; index < target.outer.length; index += 1) {
+				const next = (index + 1) % target.outer.length;
+				const sideId = `${operationId}:side:${index}`;
+				replacements.push(faceFromRing(
+					expanded,
+					sideId,
+					[moving[index]!, moving[next]!, parallelBridge.hostRing[next]!, parallelBridge.hostRing[index]!],
+					materialId,
+					null,
+					v2FaceLabel(sideId, 'push-pull', operationId),
+					bridgeFaceForEdge(index).normal
+				));
+			}
+		} else if (Math.abs(excess) <= transitionTolerance) {
+			replacements.push(faceFromRing(
+				expanded,
+				target.id,
+				parallelBridge.hostRing,
+				materialId,
+				target.backMaterialId,
+				v2FaceLabel(target.id, 'push-pull', operationId),
+				target.normal
+			));
+		} else {
+			const movingStart = positions.length / 3;
+			for (const vertex of parallelBridge.hostRing) {
+				const point = vectorAt(mesh.positions, vertex);
+				positions.push(
+					point[0] + target.normal[0] * excess,
+					point[1] + target.normal[1] * excess,
+					point[2] + target.normal[2] * excess
+				);
+			}
+			const moving = parallelBridge.hostRing.map((_vertex, index) => movingStart + index);
+			expanded = { ...mesh, positions };
+			replacements.push(faceFromRing(
+				expanded,
+				target.id,
+				moving,
+				materialId,
+				target.backMaterialId,
+				v2FaceLabel(target.id, 'push-pull', operationId),
+				target.normal
+			));
+			for (let index = 0; index < parallelBridge.hostRing.length; index += 1) {
+				const next = (index + 1) % parallelBridge.hostRing.length;
+				const sideId = `${operationId}:side:${index}`;
+				replacements.push(faceFromRing(
+					expanded,
+					sideId,
+					[parallelBridge.hostRing[index]!, parallelBridge.hostRing[next]!, moving[next]!, moving[index]!],
+					materialId,
+					null,
+					v2FaceLabel(sideId, 'push-pull', operationId),
+					bridgeFaceForEdge(index).normal
+				));
+			}
 		}
+
+		if (insetHost) {
+			const baseId = `${operationId}:base`;
+			replacements.push(faceFromRing(
+				expanded,
+				baseId,
+				target.outer,
+				materialId,
+				target.backMaterialId,
+				v2FaceLabel(baseId, 'push-pull', operationId),
+				target.normal
+			));
+		}
+
+		const removed = new Set([target.id, ...parallelBridge.bridgeFaceIds]);
+		const transitioned = withSortedFaces(expanded, [...mesh.faces.filter((face) => !removed.has(face.id)), ...replacements]);
+		const nextMesh = compactReferencedVertices(transitioned);
+		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+		if (!validation.editable) invalid(`Nested face level transition is outside the supported topology: ${validation.reason}`);
+		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
 	const holeBoundaryExit = !insetHost && holeBoundaryHost && target.holes.length === 0 && distance > 0
@@ -1398,7 +1449,21 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 					? upgradedFaceAllowOrientationFlip(expanded, face, operationId)
 					: face);
 			const sides: Face[] = [];
-		for (let index = 0; index < target.outer.length; index += 1) {
+			const baseFaces: Face[] = [];
+			if (decoupledHoles.length > 0 && decoupledHoles.length === target.holes.length) {
+				const baseId = `${operationId}:base`;
+				baseFaces.push(faceFromRing(
+					expanded,
+					baseId,
+					target.outer,
+					materialId,
+					target.backMaterialId,
+					v2FaceLabel(baseId, 'push-pull', operationId),
+					target.normal,
+					target.holes
+				));
+			}
+			for (let index = 0; index < target.outer.length; index += 1) {
 			const next = (index + 1) % target.outer.length;
 			const start = vectorAt(mesh.positions, target.outer[index]!);
 			const end = vectorAt(mesh.positions, target.outer[next]!);
@@ -1440,7 +1505,7 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 					inward
 				));
 			}
-		const nextMesh = withSortedFaces(expanded, [...retained, movedParent, ...sides]);
+			const nextMesh = withSortedFaces(expanded, [...retained, ...baseFaces, movedParent, ...sides]);
 		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
 		if (!validation.editable) invalid(`Surrounding face Push/Pull result is outside the supported topology: ${validation.reason}`);
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
