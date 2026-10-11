@@ -181,6 +181,21 @@ main[data-app="editor"].is-loaded {
 
 .selection-box { position: absolute; z-index: 12; border: 1px solid #125dff; background: rgba(18,93,255,.10); pointer-events: none; }
 .selection-box.intersect { border-style: dashed; background: rgba(18,93,255,.05); }
+.measure-tooltip {
+	position: fixed;
+	z-index: 40;
+	padding: 3px 6px;
+	border: 1px solid #a89f6a;
+	border-radius: 3px;
+	background: #fff7bf;
+	box-shadow: 0 2px 7px rgba(16,24,40,.16);
+	color: #171717;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 1.2;
+	pointer-events: none;
+	white-space: nowrap;
+}
 .viewport-hint {
 	position: absolute;
 	right: 8px;

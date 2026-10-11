@@ -707,13 +707,41 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		const path = testInfo.outputPath('face-subdivision-flat-pushed-pulled.bomc');
 		const saved = await saveBomc(page, path);
 		const independent = await readWebBomc(new Uint8Array(saved.bytes));
-		try { expect(independent.snapshot().graph).toStrictEqual(nestedGraph); }
-		finally { independent.dispose(); }
-	});
+			try { expect(independent.snapshot().graph).toStrictEqual(nestedGraph); }
+			finally { independent.dispose(); }
+		});
 
-		test('Tape Measure measures inferred authored-face points without mutating canonical BOMC', async ({ page }) => {
+		test('flat surrounding parent stays Push/Pull-editable after its child rectangle is raised', async ({ page }) => {
 			await createNew(page);
 			await ensureTopView(page);
+			await drawRectangle(page, 0.24, 0.24, 0.50, 0.48);
+			const outerGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const parentId = rectangleEntityId(outerGraph, 1);
+			const beforeChildIds = new Set(outerGraph.meshes[0]!.faces.map((face) => face.id));
+
+			await drawRectangleOnFace(page, outerGraph, parentId, 'top');
+			const splitGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const child = splitGraph.meshes[0]!.faces.find((face) => !beforeChildIds.has(face.id) && face.label?.includes('"rectangle"'));
+			if (!child) throw new Error('Nested child rectangle did not create an inset face on the flat parent.');
+			expect(splitGraph.meshes[0]!.faces.find((face) => face.id === parentId)?.holes).toHaveLength(1);
+
+			await pushPullProjectedFace(page, splitGraph, child.id, 0.55, 'top');
+			const raisedChildGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const childBeforeParentMove = raisedChildGraph.meshes[0]!.faces.find((face) => face.id === child.id)!;
+			const childBeforeY = childBeforeParentMove.outer.map((vertex) => raisedChildGraph.meshes[0]!.positions[vertex * 3 + 1]!);
+
+			await pushPullProjectedFace(page, raisedChildGraph, parentId, 0.20, 'top');
+			const movedParentGraph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const movedParent = movedParentGraph.meshes[0]!.faces.find((face) => face.id === parentId)!;
+			const childAfterParentMove = movedParentGraph.meshes[0]!.faces.find((face) => face.id === child.id)!;
+			expect(movedParent.holes).toHaveLength(1);
+			expect(movedParent.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([0.2, 0.2, 0.2, 0.2]);
+			expect(childAfterParentMove.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
+		});
+
+			test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
+				await createNew(page);
+				await ensureTopView(page);
 			await drawRectangle(page, 0.38, 0.38, 0.20, 0.18);
 			const before = await currentCheckpoint(page);
 			const box = await page.locator('.viewport canvas').boundingBox();
@@ -722,18 +750,22 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 			const secondScreen = { x: box.x + box.width * 0.54, y: box.y + box.height * 0.50 };
 			const commandsBefore = (await authoringCommands(page)).length;
 
-			await page.getByRole('button', { name: 'Tape Measure', exact: true }).click();
-			await page.mouse.move(firstScreen.x, firstScreen.y);
-			await expect(page.locator('.footer-status')).toContainText('On Face');
-			await page.mouse.click(firstScreen.x, firstScreen.y);
-			await page.mouse.move(secondScreen.x, secondScreen.y);
-			await expect(page.locator('.footer-status')).toContainText('Tape Measure');
-			await expect(page.locator('.footer-status')).toContainText('m');
-			const liveStatus = await page.locator('.footer-status').innerText();
-			const measured = liveStatus.match(/Tape Measure · ([0-9]+(?:\.[0-9]+)? m)/)?.[1];
-			if (!measured) throw new Error(`Tape Measure did not expose a numeric metre readout: ${liveStatus}`);
-			await page.mouse.click(secondScreen.x, secondScreen.y);
-			await expect(page.locator('.footer-status')).toContainText(`Tape Measure · ${measured}`);
+				await page.getByRole('button', { name: 'Tape Measure', exact: true }).click();
+				await page.mouse.move(firstScreen.x, firstScreen.y);
+				await expect(page.locator('.footer-status')).toContainText('On Face');
+				await page.mouse.down();
+				await page.mouse.move(secondScreen.x, secondScreen.y);
+				await expect(page.locator('.footer-status')).toContainText('Tape Measure');
+				await expect(page.locator('.footer-status')).toContainText('m');
+				const liveStatus = await page.locator('.footer-status').innerText();
+				const measured = liveStatus.match(/Tape Measure · ([0-9]+(?:\.[0-9]+)? m)/)?.[1];
+				if (!measured) throw new Error(`Tape Measure did not expose a numeric metre readout: ${liveStatus}`);
+				await page.waitForTimeout(1350);
+				await expect(page.locator('.measure-tooltip')).toBeVisible();
+				await expect(page.locator('.measure-tooltip')).toHaveText(measured);
+				await page.mouse.up();
+				await expect(page.locator('.measure-tooltip')).toBeHidden();
+				await expect(page.locator('.footer-status')).toContainText(`Tape Measure · ${measured}`);
 			expect((await authoringCommands(page))).toHaveLength(commandsBefore);
 			expect((await currentCheckpoint(page)).snapshot.revision).toBe(before.snapshot.revision);
 		});

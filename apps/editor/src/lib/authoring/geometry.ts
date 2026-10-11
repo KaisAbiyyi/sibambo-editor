@@ -821,9 +821,10 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	if (!target) invalid(`Face ${faceId} no longer exists.`);
 	const topology = buildAuthoringTopology(mesh);
 	const boundaryRings = [target.outer, ...target.holes];
-	const incidentCounts = boundaryRings.flatMap((ring) => ring.map((vertex, index) => topology.edges.get(vertex < ring[(index + 1) % ring.length]!
+	const ringIncidentCounts = boundaryRings.map((ring) => ring.map((vertex, index) => topology.edges.get(vertex < ring[(index + 1) % ring.length]!
 		? `${vertex}:${ring[(index + 1) % ring.length]!}`
 		: `${ring[(index + 1) % ring.length]!}:${vertex}`)?.faceIds.length ?? 0));
+	const incidentCounts = ringIncidentCounts.flat();
 	const operationId = `${graph.documentId}:op:${operationSequence}`;
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
@@ -875,8 +876,75 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
+	const surroundingOpenParent = target.holes.length > 0
+		&& ringIncidentCounts[0]?.every((count) => count === 1)
+		&& ringIncidentCounts.slice(1).every((counts) => counts.every((count) => count === 2));
+	if (surroundingOpenParent) {
+		rejectOppositeBoundaryCrossing(mesh, target, distance);
+		const materialId = target.frontMaterialId;
+		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const positions = [...mesh.positions];
+		const movingOuterStart = positions.length / 3;
+		for (const vertex of target.outer) {
+			const point = vectorAt(mesh.positions, vertex);
+			positions.push(
+				point[0] + target.normal[0] * distance,
+				point[1] + target.normal[1] * distance,
+				point[2] + target.normal[2] * distance
+			);
+		}
+		const movingOuter = target.outer.map((_vertex, index) => movingOuterStart + index);
+		for (const hole of target.holes) for (const vertex of hole) {
+			const offset = vertex * 3;
+			positions[offset] = positions[offset]! + target.normal[0] * distance;
+			positions[offset + 1] = positions[offset + 1]! + target.normal[1] * distance;
+			positions[offset + 2] = positions[offset + 2]! + target.normal[2] * distance;
+		}
+		const expanded: Mesh = { ...mesh, positions };
+		const movedParent = faceFromRing(
+			expanded,
+			target.id,
+			movingOuter,
+			materialId,
+			target.backMaterialId,
+			v2FaceLabel(target.id, 'push-pull', operationId),
+			target.normal,
+			target.holes
+		);
+		const adjacent = new Set(topology.adjacentFaceIds.get(target.id) ?? []);
+		const retained = mesh.faces
+			.filter((face) => face.id !== target.id)
+			.map((face) => adjacent.has(face.id) ? upgradedFace(expanded, face, operationId) : face);
+		const sides: Face[] = [];
+		for (let index = 0; index < target.outer.length; index += 1) {
+			const next = (index + 1) % target.outer.length;
+			const start = vectorAt(mesh.positions, target.outer[index]!);
+			const end = vectorAt(mesh.positions, target.outer[next]!);
+			const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+			const outward: Point3 = [
+				edge[1] * target.normal[2] - edge[2] * target.normal[1],
+				edge[2] * target.normal[0] - edge[0] * target.normal[2],
+				edge[0] * target.normal[1] - edge[1] * target.normal[0]
+			];
+			const sideId = `${operationId}:side:${index}`;
+			sides.push(faceFromRing(
+				expanded,
+				sideId,
+				[target.outer[index]!, target.outer[next]!, movingOuter[next]!, movingOuter[index]!],
+				materialId,
+				null,
+				v2FaceLabel(sideId, 'push-pull', operationId),
+				outward
+			));
+		}
+		const nextMesh = withSortedFaces(expanded, [...retained, movedParent, ...sides]);
+		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+		if (!validation.editable) invalid(`Surrounding face Push/Pull result is outside the supported topology: ${validation.reason}`);
+		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+	}
+
 	if (target.holes.length > 0 && !incidentCounts.every((count) => count === 2)) {
-		invalid('Push/Pull of a surrounding face with inset regions requires a closed manifold boundary.');
+		invalid('Push/Pull of a surrounding face requires either a closed manifold boundary or an open outer ring with manifold inset boundaries.');
 	}
 
 	if (incidentCounts.every((count) => count === 1)) {

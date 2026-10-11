@@ -7,8 +7,7 @@ import {
 	LineSegments,
 	Mesh,
 	MeshStandardMaterial,
-	Points,
-	PointsMaterial
+	ShaderMaterial
 } from 'three';
 import type { BomcGraph, BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
@@ -30,16 +29,21 @@ const PREVIEW_OVERLAY_KEY = 'editor-authoring-preview';
 const SELECTION_OVERLAY_KEY = 'editor-authoring-selection';
 const POINTER_DRAG_THRESHOLD_CSS_PX = 4;
 const MIN_EXTRUSION_METRES = 1e-6;
+const DEFAULT_MEASURE_DWELL_MS = 1200;
+const MEASURE_DWELL_MOVE_TOLERANCE_CSS_PX = 3;
 const SHAPE_SCHEMA = 'sibambo-editor-shape-v1';
 const GROUND_PLANE: AuthoringPlane = Object.freeze({ origin: [0, 0, 0], normal: [0, 1, 0] });
 
 export type AuthoringTool = 'select' | 'rectangle' | 'line' | 'extrude' | 'measure';
+export type MeasureTooltip = Readonly<{ x: number; y: number; text: string }>;
 export type AuthoringToolControllerOptions = {
 	viewport: Pick<PreparedSceneViewport, 'rayFromScreen' | 'projectWorldToScreen' | 'worldUnitsPerPixelAt' | 'setDomainOverlay'>;
 	getCheckpoint: () => AuthoringCheckpoint | null;
 	submitCommand: (command: AuthoringCommand) => Promise<AuthoringResult>;
 	onSelectionChange: (entityId: string | null) => void;
 	onInferenceChange?: (label: string) => void;
+	onMeasureTooltipChange?: (tooltip: MeasureTooltip | null) => void;
+	measureDwellMs?: number;
 	onError: (message: string) => void;
 };
 
@@ -172,61 +176,47 @@ function addBoundaryLines(group: Group, positions: readonly number[], color: str
 function addFaceStipple(
 	group: Group,
 	mesh: BomcMesh,
-	face: Face,
-	viewport: AuthoringToolControllerOptions['viewport'],
-	anchor: AuthoringPoint
+	face: Face
 ): void {
-	const worldPerPixel = viewport.worldUnitsPerPixelAt(anchor);
-	if (worldPerPixel === null || !Number.isFinite(worldPerPixel) || worldPerPixel <= 0) return;
-	const spacing = Math.max(worldPerPixel * 4, 1e-6);
-	const positions: number[] = [];
-	const pointCap = 7000;
-	for (let index = 0; index + 2 < face.triangles.length && positions.length / 3 < pointCap; index += 3) {
-		const a = pointAt(mesh, face.triangles[index]!);
-		const b = pointAt(mesh, face.triangles[index + 1]!);
-		const c = pointAt(mesh, face.triangles[index + 2]!);
-		positions.push(
-			(a[0] + b[0] + c[0]) / 3,
-			(a[1] + b[1] + c[1]) / 3,
-			(a[2] + b[2] + c[2]) / 3
-		);
-		const longest = Math.max(
-			Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]),
-			Math.hypot(b[0] - c[0], b[1] - c[1], b[2] - c[2]),
-			Math.hypot(c[0] - a[0], c[1] - a[1], c[2] - a[2])
-		);
-		const divisions = Math.max(2, Math.min(64, Math.ceil(longest / spacing)));
-		for (let row = 1; row < divisions && positions.length / 3 < pointCap; row += 1) {
-			for (let column = 1; column < divisions - row && positions.length / 3 < pointCap; column += 1) {
-				const u = row / divisions;
-				const v = column / divisions;
-				const w = 1 - u - v;
-				positions.push(
-					a[0] * w + b[0] * u + c[0] * v,
-					a[1] * w + b[1] * u + c[1] * v,
-					a[2] * w + b[2] * u + c[2] * v
-				);
-			}
-		}
-	}
-	if (positions.length === 0) return;
+	const vertexIndices = [...new Set([face.outer, ...face.holes].flatMap((ring) => [...ring]))];
+	const localIndex = new Map(vertexIndices.map((sourceIndex, index) => [sourceIndex, index]));
+	const positions = vertexIndices.flatMap((sourceIndex) => pointAt(mesh, sourceIndex));
+	const indices = face.triangles.map((sourceIndex) => {
+		const index = localIndex.get(sourceIndex);
+		if (index === undefined) throw new Error(`Face ${face.id} stipple references a vertex outside its canonical rings.`);
+		return index;
+	});
 	const geometry = new BufferGeometry();
-	let material: PointsMaterial | null = null;
+	let material: ShaderMaterial | null = null;
 	try {
 		geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
-		material = new PointsMaterial({
-			color: '#125dff',
-			size: 1.6,
-			sizeAttenuation: false,
+		geometry.setIndex(indices);
+		material = new ShaderMaterial({
+			vertexShader: `
+				void main() {
+					gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+				}
+			`,
+			fragmentShader: `
+				void main() {
+					vec2 cell = fract(gl_FragCoord.xy / 5.0) - vec2(0.5);
+					if (dot(cell, cell) > 0.055) discard;
+					gl_FragColor = vec4(0.0706, 0.3647, 1.0, 0.62);
+				}
+			`,
 			transparent: true,
-			opacity: 0.58,
 			depthTest: true,
-			depthWrite: false
+			depthWrite: false,
+			side: DoubleSide,
+			polygonOffset: true,
+			polygonOffsetFactor: -2,
+			polygonOffsetUnits: -2
 		});
-		const points = new Points(geometry, material);
-		points.name = 'editor-authoring-push-pull-stipple';
-		points.renderOrder = 11;
-		group.add(points);
+		material.toneMapped = false;
+		const stipple = new Mesh(geometry, material);
+		stipple.name = 'editor-authoring-push-pull-stipple';
+		stipple.renderOrder = 11;
+		group.add(stipple);
 	} catch (error) {
 		geometry.dispose();
 		material?.dispose();
@@ -236,11 +226,11 @@ function addFaceStipple(
 
 function disposeUntransferred(group: Group): void {
 	const geometries = new Set<BufferGeometry>();
-	const materials = new Set<MeshStandardMaterial | LineBasicMaterial | PointsMaterial>();
+	const materials = new Set<MeshStandardMaterial | LineBasicMaterial | ShaderMaterial>();
 	group.traverse((object) => {
 		const drawable = object as typeof object & {
 			geometry?: BufferGeometry;
-			material?: MeshStandardMaterial | LineBasicMaterial | PointsMaterial | Array<MeshStandardMaterial | LineBasicMaterial | PointsMaterial>;
+			material?: MeshStandardMaterial | LineBasicMaterial | ShaderMaterial | Array<MeshStandardMaterial | LineBasicMaterial | ShaderMaterial>;
 		};
 		if (drawable.geometry) geometries.add(drawable.geometry);
 		if (Array.isArray(drawable.material)) for (const material of drawable.material) materials.add(material);
@@ -376,15 +366,13 @@ function makePushPullPreview(checkpoint: AuthoringCheckpoint, faceId: string, di
 }
 
 function makePushPullHoverPreview(
-	viewport: AuthoringToolControllerOptions['viewport'],
 	mesh: BomcMesh,
-	face: Face,
-	point: AuthoringPoint
+	face: Face
 ): Group {
 	const group = new Group();
 	group.name = PREVIEW_OVERLAY_KEY;
 	try {
-		addFaceStipple(group, mesh, face, viewport, point);
+		addFaceStipple(group, mesh, face);
 		addBoundaryLines(group, uniqueBoundaryPositions(mesh, [face]), '#125dff', 0.82, false);
 		return group;
 	} catch (error) {
@@ -449,6 +437,8 @@ export class AuthoringToolController {
 	private pushPull: PushPullGesture | null = null;
 	private measureStart: MeasurementGesture | null = null;
 	private lockedMeasurement: LockedMeasurement | null = null;
+	private measureDwellTimer: ReturnType<typeof setTimeout> | null = null;
+	private measureDwellAnchor: { x: number; y: number; text: string } | null = null;
 	private extrusionText = '';
 	private selectedEntity: string | null = null;
 	private commandPending = false;
@@ -488,6 +478,9 @@ export class AuthoringToolController {
 			checkpoint: this.options.getCheckpoint(),
 			tool: this.activeTool
 		};
+		if (this.activeTool === 'measure' && this.pointer.checkpoint) {
+			this.beginMeasure(event.clientX, event.clientY, this.pointer.checkpoint);
+		}
 	}
 
 	handlePointerMove(event: PointerEvent, cameraHandled: boolean): void {
@@ -495,6 +488,10 @@ export class AuthoringToolController {
 		if (cameraHandled) {
 			if (this.pointer && event.pointerId === this.pointer.pointerId) this.pointer.cameraHandled = true;
 			this.cancelForCameraMove();
+			return;
+		}
+		if (this.pointer && event.pointerId === this.pointer.pointerId && this.pointer.tool === 'measure') {
+			this.queuePreview(event.clientX, event.clientY);
 			return;
 		}
 		if (this.pointer && event.pointerId === this.pointer.pointerId) {
@@ -508,11 +505,19 @@ export class AuthoringToolController {
 		if (!pointer || pointer.pointerId !== event.pointerId) return;
 		this.pointer = null;
 		const current = this.options.getCheckpoint();
+		if (pointer.tool === 'measure') {
+			if (this.disposed || this.commandPending || pointer.cameraHandled || cameraHandled || pointer.checkpoint !== current) {
+				this.cancelMeasureDwell();
+				this.measureStart = null;
+				return;
+			}
+			this.finishMeasure(event.clientX, event.clientY, current);
+			return;
+		}
 		if (this.disposed || this.commandPending || pointer.cameraHandled || cameraHandled || pointer.moved || pointer.checkpoint !== current) return;
 		if (pointer.tool === 'select') this.selectAt(event.clientX, event.clientY, current);
 		else if (pointer.tool === 'rectangle') this.rectangleClick(event.clientX, event.clientY, current);
 		else if (pointer.tool === 'line') this.lineClick(event.clientX, event.clientY, current);
-		else if (pointer.tool === 'measure') this.measureClick(event.clientX, event.clientY, current);
 		else this.pushPullClick(event.clientX, event.clientY, current);
 	}
 
@@ -539,6 +544,7 @@ export class AuthoringToolController {
 		this.pushPull = null;
 		this.measureStart = null;
 		this.lockedMeasurement = null;
+		this.cancelMeasureDwell();
 		this.extrusionText = '';
 		this.cancelQueuedPreview();
 		this.clearPreviewOverlay();
@@ -584,6 +590,7 @@ export class AuthoringToolController {
 		this.pushPull = null;
 		this.measureStart = null;
 		this.lockedMeasurement = null;
+		this.cancelMeasureDwell();
 		this.extrusionText = '';
 		this.clearPreviewOverlay();
 		this.setInference(null);
@@ -599,6 +606,7 @@ export class AuthoringToolController {
 		this.pushPull = null;
 		this.measureStart = null;
 		this.lockedMeasurement = null;
+		this.cancelMeasureDwell();
 		this.extrusionText = '';
 		this.cancelQueuedPreview();
 		this.options.viewport.setDomainOverlay(PREVIEW_OVERLAY_KEY, null);
@@ -613,6 +621,7 @@ export class AuthoringToolController {
 		if (this.measureStart || this.lockedMeasurement) {
 			this.measureStart = null;
 			this.lockedMeasurement = null;
+			this.cancelMeasureDwell();
 			this.clearPreviewOverlay();
 			this.setInference(null);
 		}
@@ -789,7 +798,7 @@ export class AuthoringToolController {
 		const hit = ray ? nearestAuthoringFaceHit(checkpoint.snapshot.graph, ray) : null;
 		this.setInference(hit ? Object.freeze({ point: hit.point, kind: 'face', faceId: hit.face.id, plane: { origin: pointAt(checkpoint.snapshot.graph.meshes[0]!, hit.face.outer[0]!), normal: hit.face.normal }, screenDistancePx: 0 }) : null);
 		if (!hit) { this.clearPreviewOverlay(); return; }
-		try { this.publishPreview(makePushPullHoverPreview(this.options.viewport, checkpoint.snapshot.graph.meshes[0]!, hit.face, hit.point)); }
+		try { this.publishPreview(makePushPullHoverPreview(checkpoint.snapshot.graph.meshes[0]!, hit.face)); }
 		catch { this.clearPreviewOverlay(); }
 	}
 
@@ -829,38 +838,89 @@ export class AuthoringToolController {
 		}
 		const inference = this.measureInference(clientX, clientY, checkpoint);
 		if (!this.measureStart) {
-			this.setStatus(inference ? `Tape Measure · click first point · ${inferenceLabel(inference)}` : 'Tape Measure · click first point');
+			this.cancelMeasureDwell();
+			this.setStatus(inference ? `Tape Measure · click and hold · ${inferenceLabel(inference)}` : 'Tape Measure · click and hold');
 			try { this.publishPreview(makeInferenceOnlyPreview(this.options.viewport, inference)); }
 			catch { this.clearPreviewOverlay(); }
 			return;
 		}
 		if (!inference) {
+			this.cancelMeasureDwell();
 			this.clearPreviewOverlay();
-			this.setStatus('Tape Measure · choose second point');
+			this.setStatus('Tape Measure · keep holding and drag to a point');
 			return;
 		}
 		const distance = measurementDistance(this.measureStart.point, inference.point);
 		this.setStatus(`Tape Measure · ${formatMeasurement(distance)} · ${inferenceLabel(inference)}`);
 		try { this.publishPreview(makeMeasurePreview(this.options.viewport, this.measureStart.point, inference.point, inference)); }
 		catch { this.clearPreviewOverlay(); }
+		if (this.pointer?.tool === 'measure' && Number.isFinite(distance) && distance >= MIN_EXTRUSION_METRES) {
+			this.armMeasureDwell(clientX, clientY, formatMeasurement(distance));
+		} else this.cancelMeasureDwell();
 	}
 
-	private measureClick(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
-		if (!checkpoint) return;
+	private beginMeasure(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint): void {
 		const inference = this.measureInference(clientX, clientY, checkpoint);
-		if (!inference) return;
-		if (!this.measureStart) {
-			this.lockedMeasurement = null;
-			this.measureStart = Object.freeze({ point: inference.point, plane: inference.plane });
-			this.previewMeasureAt(clientX, clientY);
+		this.cancelMeasureDwell();
+		this.lockedMeasurement = null;
+		if (!inference) {
+			this.measureStart = null;
+			this.setStatus('Tape Measure · click and hold on a measurable point');
+			return;
+		}
+		this.measureStart = Object.freeze({ point: inference.point, plane: inference.plane });
+		this.setStatus(`Tape Measure · hold and drag · ${inferenceLabel(inference)}`);
+		try { this.publishPreview(makeInferenceOnlyPreview(this.options.viewport, inference)); }
+		catch { this.clearPreviewOverlay(); }
+	}
+
+	private finishMeasure(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {
+		this.cancelMeasureDwell();
+		if (!checkpoint || !this.measureStart) {
+			this.measureStart = null;
+			return;
+		}
+		const inference = this.measureInference(clientX, clientY, checkpoint);
+		if (!inference) {
+			this.measureStart = null;
+			this.clearPreviewOverlay();
+			this.setStatus('Tape Measure · click and hold');
 			return;
 		}
 		const distance = measurementDistance(this.measureStart.point, inference.point);
-		if (!Number.isFinite(distance) || distance < MIN_EXTRUSION_METRES) return;
+		if (!Number.isFinite(distance) || distance < MIN_EXTRUSION_METRES) {
+			this.measureStart = null;
+			this.clearPreviewOverlay();
+			this.setStatus('Tape Measure · click and hold');
+			return;
+		}
 		this.lockedMeasurement = Object.freeze({ start: this.measureStart.point, end: inference.point, distance });
 		this.measureStart = null;
 		this.publishPreview(makeMeasurePreview(this.options.viewport, this.lockedMeasurement.start, this.lockedMeasurement.end, null));
 		this.setStatus(`Tape Measure · ${formatMeasurement(distance)}`);
+	}
+
+	private armMeasureDwell(clientX: number, clientY: number, text: string): void {
+		const previous = this.measureDwellAnchor;
+		if (previous && previous.text === text
+			&& Math.hypot(previous.x - clientX, previous.y - clientY) <= MEASURE_DWELL_MOVE_TOLERANCE_CSS_PX
+			&& this.measureDwellTimer !== null) return;
+		this.cancelMeasureDwell();
+		this.measureDwellAnchor = { x: clientX, y: clientY, text };
+		const dwellMs = this.options.measureDwellMs ?? DEFAULT_MEASURE_DWELL_MS;
+		this.measureDwellTimer = globalThis.setTimeout(() => {
+			this.measureDwellTimer = null;
+			const anchor = this.measureDwellAnchor;
+			if (!anchor || this.disposed || this.pointer?.tool !== 'measure' || !this.measureStart) return;
+			this.options.onMeasureTooltipChange?.(Object.freeze({ x: anchor.x, y: anchor.y, text: anchor.text }));
+		}, dwellMs);
+	}
+
+	private cancelMeasureDwell(): void {
+		if (this.measureDwellTimer !== null) globalThis.clearTimeout(this.measureDwellTimer);
+		this.measureDwellTimer = null;
+		this.measureDwellAnchor = null;
+		this.options.onMeasureTooltipChange?.(null);
 	}
 
 	private pushPullClick(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint | null): void {

@@ -16,7 +16,7 @@
 	import { AuthoringClient, type AuthoringRecoveryState } from '$lib/authoring/bomc-authoring-client';
 	import { graphsEqual } from '$lib/authoring/history';
 	import { projectAuthoringScene } from '$lib/authoring/scene';
-	import { AuthoringToolController, type AuthoringTool } from '$lib/authoring/tools';
+	import { AuthoringToolController, type AuthoringTool, type MeasureTooltip } from '$lib/authoring/tools';
 	import { hasEntityId } from '$lib/authoring/geometry';
 	import type { AuthoringCheckpoint, AuthoringCommand, AuthoringResult, OpenResult } from '$lib/authoring/protocol';
 	import type { PreparedRuntimeGeometryScene } from '@sibambo/scene-runtime/types';
@@ -43,6 +43,7 @@
 	let unsubscribeAuthoringRecovery: (() => void) | null = null;
 	let authoringTool = $state<AuthoringTool>('select');
 	let authoringInference = $state('');
+	let measureTooltip = $state.raw<MeasureTooltip | null>(null);
 	let extrusionDistanceText = $state('');
 	let selectedEntityId = $state('');
 	let authoringBounds = $state.raw<ViewportBounds | null>(null);
@@ -105,9 +106,10 @@
 		viewport: PreparedSceneViewport | null;
 		authoringClient: AuthoringClient | null;
 		authoringCheckpoint: AuthoringCheckpoint | null;
-		authoringTools: AuthoringToolController | null;
-		authoringTool: AuthoringTool;
-		authoringInference: string;
+			authoringTools: AuthoringToolController | null;
+			authoringTool: AuthoringTool;
+			authoringInference: string;
+			measureTooltip: MeasureTooltip | null;
 		selectedEntityId: string;
 		authoringBounds: ViewportBounds | null;
 		activeSourceName: string | null;
@@ -130,7 +132,7 @@
 	function snapshotLoadedState(): LoadedEditorState {
 		return {
 			mode, provenance, artifactSha256, modelTabTitle, result, session, editorController, viewport,
-				authoringClient, authoringCheckpoint, authoringTools, authoringTool, authoringInference, selectedEntityId, authoringBounds, activeSourceName,
+				authoringClient, authoringCheckpoint, authoringTools, authoringTool, authoringInference, measureTooltip, selectedEntityId, authoringBounds, activeSourceName,
 			ready, picked,
 			selectedOccurrenceHandles: [...selectedOccurrenceHandles], activeTool, activeCameraTool, selectionBox: selectionBox ? { ...selectionBox } : null,
 			moveDistanceText, moveAxis, extrusionDistanceText, editorNotice, projectionError, sceneId,
@@ -163,6 +165,7 @@
 		authoringTools = snapshot.authoringTools;
 		authoringTool = snapshot.authoringTool;
 		authoringInference = snapshot.authoringInference;
+		measureTooltip = snapshot.measureTooltip;
 		selectedEntityId = snapshot.selectedEntityId;
 		authoringBounds = snapshot.authoringBounds;
 		activeSourceName = snapshot.activeSourceName;
@@ -284,6 +287,7 @@
 					},
 				onSelectionChange: (entityId: string | null) => { if (ownsAuthoringController(client, target, tools)) selectedEntityId = entityId ?? ''; },
 				onInferenceChange: (label: string) => { if (ownsAuthoringController(client, target, tools)) authoringInference = label; },
+				onMeasureTooltipChange: (tooltip) => { if (ownsAuthoringController(client, target, tools)) measureTooltip = tooltip; },
 				onError: (message: string) => { if (ownsAuthoringController(client, target, tools)) editorNotice = message; }
 			});
 		tools.setCheckpoint(initial);
@@ -358,6 +362,7 @@
 		authoringTools?.setTool(tool);
 		authoringTool = tool;
 		authoringInference = '';
+		measureTooltip = null;
 		if (tool !== 'extrude') { extrusionDistanceText = ''; authoringTools?.setExtrusionDistance(''); }
 		activeTool = 'select';
 		activeCameraTool = null;
@@ -1470,7 +1475,7 @@
 				<button type="button" class:active={authoringTool === 'rectangle'} onclick={() => setAuthoringTool('rectangle')} aria-label="Rectangle" title="Rectangle on inferred construction plane" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
 				<button type="button" class:active={authoringTool === 'line'} onclick={() => setAuthoringTool('line')} aria-label="Line" title="Line · click inferred points and close the loop" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 10 7l9 10"/><circle cx="5" cy="18" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="19" cy="17" r="1.5"/></svg></button>
 				<button type="button" class:active={authoringTool === 'extrude'} onclick={() => setAuthoringTool('extrude')} aria-label="Push/Pull" title="Push/Pull hovered authored face" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9 12 5l8 4-8 4-8-4Z"/><path d="M4 9v7l8 4v-7M20 9v7l-8 4M12 5v4"/></svg></button>
-				<button type="button" class:active={authoringTool === 'measure'} onclick={() => setAuthoringTool('measure')} aria-label="Tape Measure" title="Tape Measure (T) · click two inferred points" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17.5 17.5 5 20 7.5 7.5 20 5 17.5Z"/><path d="m9 15 2 2m1-5 2 2m1-5 2 2"/></svg></button>
+				<button type="button" class:active={authoringTool === 'measure'} onclick={() => setAuthoringTool('measure')} aria-label="Tape Measure" title="Tape Measure (T) · click and hold, drag, then pause for the cursor length" disabled={!canAuthor()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17.5 17.5 5 20 7.5 7.5 20 5 17.5Z"/><path d="m9 15 2 2m1-5 2 2m1-5 2 2"/></svg></button>
 			{/if}
 			<span class="tool-separator"></span>
 			<button type="button" class:active={activeCameraTool === 'orbit'} onclick={() => setCameraTool('orbit')} aria-label="Orbit" title="Orbit (O)" disabled={!viewport || busy || saveBusy}>
@@ -1532,8 +1537,9 @@
 					<button type="button" class="hud-primary" onclick={() => authoringTools?.commitExtrusionDistance()} disabled={!canAuthor()}>Commit</button>
 					<button type="button" onclick={() => { authoringTools?.cancelPreview(); setAuthoringTool('select'); }}>Cancel</button>
 				</div>
-			{/if}
-			{#if selectionBox}<div class="selection-box" class:intersect={selectionBox.direction === 'intersect'} style:left={`${selectionBox.left}px`} style:top={`${selectionBox.top}px`} style:width={`${selectionBox.width}px`} style:height={`${selectionBox.height}px`} aria-hidden="true"></div>{/if}
+				{/if}
+				{#if measureTooltip}<div class="measure-tooltip" role="status" style:left={`${measureTooltip.x + 12}px`} style:top={`${measureTooltip.y + 14}px`}>{measureTooltip.text}</div>{/if}
+				{#if selectionBox}<div class="selection-box" class:intersect={selectionBox.direction === 'intersect'} style:left={`${selectionBox.left}px`} style:top={`${selectionBox.top}px`} style:width={`${selectionBox.width}px`} style:height={`${selectionBox.height}px`} aria-hidden="true"></div>{/if}
 				{#if mode === 'authoring' && authoringRecovery.phase !== 'ready'}
 					<div class="viewport-status" class:error-state={authoringRecovery.phase === 'failed'} role="status">
 						<span>{authoringRecovery.phase === 'restoring' ? 'Restoring the last acknowledged authoring checkpoint…' : `Authoring recovery failed. ${authoringRecovery.error ?? 'The retained checkpoint is read-only until recovery succeeds.'}`}</span>

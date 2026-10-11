@@ -262,6 +262,60 @@ describe('authoring topology v2 Push/Pull', () => {
 				expect(delta[0] * parentBefore.normal[0] + delta[1] * parentBefore.normal[1] + delta[2] * parentBefore.normal[2]).toBeCloseTo(0.2, 12);
 			}
 			expect(vertexPositions(movedParent, insetFaceId)).toEqual(childCapBefore);
+			} finally { document.dispose(); }
+		});
+
+	test('Push/Pulls the open surrounding parent after its child inset was raised', () => {
+		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Open parent with child' });
+		const history = new AuthoringHistory(null);
+		try {
+			const parentId = `${DOCUMENT_ID}:rectangle:1`;
+			const childId = `${DOCUMENT_ID}:face:2`;
+			history.execute(document, journalEntry(buildPlanarRectangleEdit(
+				document.snapshot().graph,
+				parentId,
+				[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]],
+				[0, 1, 0]
+			)));
+			history.execute(document, journalEntry(buildFaceLoopEdit(
+				document.snapshot().graph,
+				childId,
+				[[2, 0, 2], [4, 0, 2], [4, 0, 4], [2, 0, 4]],
+				[0, 1, 0]
+			)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, 1.4, 3)));
+
+			const before = document.snapshot().graph;
+			const beforeMesh = before.meshes[0]!;
+			const parentBefore = beforeMesh.faces.find((face) => face.id === parentId)!;
+			const childCapBefore = vertexPositions(before, childId);
+			expect(parentBefore.holes).toHaveLength(1);
+			const topologyBefore = buildAuthoringTopology(beforeMesh);
+			const outerCounts = parentBefore.outer.map((vertex, index) => topologyBefore.edges.get(
+				vertex < parentBefore.outer[(index + 1) % parentBefore.outer.length]!
+					? `${vertex}:${parentBefore.outer[(index + 1) % parentBefore.outer.length]!}`
+					: `${parentBefore.outer[(index + 1) % parentBefore.outer.length]!}:${vertex}`
+			)?.faceIds.length ?? 0);
+			const hole = parentBefore.holes[0]!;
+			const holeCounts = hole.map((vertex, index) => topologyBefore.edges.get(
+				vertex < hole[(index + 1) % hole.length]!
+					? `${vertex}:${hole[(index + 1) % hole.length]!}`
+					: `${hole[(index + 1) % hole.length]!}:${vertex}`
+			)?.faceIds.length ?? 0);
+			expect(outerCounts).toEqual([1, 1, 1, 1]);
+			expect(holeCounts).toEqual([2, 2, 2, 2]);
+
+			history.execute(document, journalEntry(buildPushPullFaceEdit(before, parentId, 0.35, 4)));
+			const after = document.snapshot().graph;
+			const afterMesh = after.meshes[0]!;
+			const parentAfter = afterMesh.faces.find((face) => face.id === parentId)!;
+			expect(validateEditableSubset(after)).toMatchObject({ editable: true });
+			expect(parentAfter.holes).toHaveLength(1);
+			for (const vertex of [...parentAfter.outer, ...parentAfter.holes[0]!]) {
+				expect(afterMesh.positions[vertex * 3 + 1]).toBeCloseTo(0.35, 12);
+			}
+			expect(vertexPositions(after, childId)).toEqual(childCapBefore);
+			expect(afterMesh.faces.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))).toHaveLength(4);
 		} finally { document.dispose(); }
 	});
 

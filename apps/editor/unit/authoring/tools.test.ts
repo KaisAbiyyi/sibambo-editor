@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { LineSegments, Mesh, Object3D, Points, Ray, Vector3 } from 'three';
+import { LineSegments, Mesh, Object3D, Ray, ShaderMaterial, Vector3 } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
 import {
@@ -52,8 +52,9 @@ function createHarness(rectangles: readonly { first: [number, number, number]; o
 		});
 	};
 	const submitted: AuthoringCommand[] = [];
-	const errors: string[] = [];
-	const selections: (string | null)[] = [];
+		const errors: string[] = [];
+		const selections: (string | null)[] = [];
+		const measureTooltips: Array<{ x: number; y: number; text: string } | null> = [];
 	let controller: AuthoringToolController;
 	let rayFactory: (clientX: number, clientY: number) => Ray | null = (clientX, clientY) =>
 		new Ray(new Vector3(clientX, 10, clientY), new Vector3(0, -1, 0));
@@ -110,13 +111,15 @@ function createHarness(rectangles: readonly { first: [number, number, number]; o
 			commandResult: { entityId }
 		};
 	};
-	controller = new AuthoringToolController({
-		viewport, getCheckpoint: () => checkpoint, submitCommand,
-		onSelectionChange: (entityId) => selections.push(entityId),
-		onError: (message) => errors.push(message)
-	});
-	return {
-		document, history, controller, viewport, overlays, submitted, errors, selections,
+		controller = new AuthoringToolController({
+			viewport, getCheckpoint: () => checkpoint, submitCommand,
+			onSelectionChange: (entityId) => selections.push(entityId),
+			onMeasureTooltipChange: (tooltip) => measureTooltips.push(tooltip),
+			measureDwellMs: 5,
+			onError: (message) => errors.push(message)
+		});
+		return {
+			document, history, controller, viewport, overlays, submitted, errors, selections, measureTooltips,
 		getCheckpoint: () => checkpoint,
 		hasDuplicateDisposal: () => duplicateDisposal,
 		getOverlayCount: () => overlays.size,
@@ -204,27 +207,32 @@ describe('canonical authoring tools', () => {
 			harness.controller.handlePointerMove(pointer(1, 1), false);
 			await flush();
 			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
-			expect(preview.children.some((child) => child instanceof Points)).toBe(true);
+			const stipple = preview.children.find((child) => child instanceof Mesh && child.name === 'editor-authoring-push-pull-stipple') as Mesh | undefined;
+			expect(stipple).toBeDefined();
+			expect(stipple?.material).toBeInstanceOf(ShaderMaterial);
+			expect(stipple?.geometry.index?.count).toBe(6);
 			expect(harness.submitted).toHaveLength(0);
 			expect(harness.getCheckpoint().snapshot.revision).toBe(1);
 		} finally { harness.close(); }
 	});
 
-	test('Tape Measure reports snapped 3D distance without mutating canonical BOMC', async () => {
+	test('Tape Measure uses click-hold-drag, shows a dwell tooltip, and never mutates canonical BOMC', async () => {
 		const harness = createHarness();
 		try {
 			const revision = harness.getCheckpoint().snapshot.revision;
 			harness.controller.setTool('measure');
-			click(harness.controller, 0, 0);
+			harness.controller.handlePointerDown(pointer(0, 0), false);
 			harness.controller.handlePointerMove(pointer(30, 40), false);
-			await flush();
+			await new Promise((resolve) => setTimeout(resolve, 15));
 			expect(harness.controller.inferenceLabel).toContain('Tape Measure');
 			expect(harness.controller.inferenceLabel).toContain('50 m');
 			const preview = harness.overlays.get('editor-authoring-preview') as { children: unknown[] };
 			expect(preview.children.some((child) => child instanceof LineSegments)).toBe(true);
-			click(harness.controller, 30, 40);
+			expect(harness.measureTooltips.at(-1)).toEqual({ x: 30, y: 40, text: '50 m' });
+			harness.controller.handlePointerUp(pointer(30, 40), false);
 			await flush();
 			expect(harness.controller.inferenceLabel).toBe('Tape Measure · 50 m');
+			expect(harness.measureTooltips.at(-1)).toBeNull();
 			expect(harness.submitted).toHaveLength(0);
 			expect(harness.getCheckpoint().snapshot.revision).toBe(revision);
 		} finally { harness.close(); }
