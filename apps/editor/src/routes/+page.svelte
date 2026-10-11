@@ -565,10 +565,11 @@
 			if (request !== generation) return;
 			await waitForViewportLayout(request);
 			const { PreparedSceneViewport } = await import('@sibambo/viewport');
-			candidateViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
-			pendingCandidateViewports.add(candidateViewport);
-			if (request !== generation) { candidateViewport.dispose(); pendingCandidateViewports.delete(candidateViewport); void client.close(); return; }
-			candidateViewport.setDisplayState({ faceStyle, effects: viewEffects });
+				candidateViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
+				pendingCandidateViewports.add(candidateViewport);
+				if (request !== generation) { candidateViewport.dispose(); pendingCandidateViewports.delete(candidateViewport); void client.close(); return; }
+				candidateViewport.setOrbitControlsEnabled(false);
+				candidateViewport.setDisplayState({ faceStyle, effects: viewEffects });
 			const candidateBounds = setAuthoringProjection(candidateViewport, created.checkpoint, true);
 			await waitForPreparedViewportReady(candidateViewport, request);
 			if (request !== generation) return;
@@ -673,10 +674,11 @@
 			if (inspection.kind === 'authoring') {
 				const checkpoint = inspection.checkpoint;
 				await waitForViewportLayout(request);
-				writableViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
-				pendingCandidateViewports.add(writableViewport);
-				if (request !== generation || importController.signal.aborted) { writableViewport.dispose(); pendingCandidateViewports.delete(writableViewport); return; }
-				writableViewport.setDisplayState({ faceStyle, effects: viewEffects });
+					writableViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
+					pendingCandidateViewports.add(writableViewport);
+					if (request !== generation || importController.signal.aborted) { writableViewport.dispose(); pendingCandidateViewports.delete(writableViewport); return; }
+					writableViewport.setOrbitControlsEnabled(false);
+					writableViewport.setDisplayState({ faceStyle, effects: viewEffects });
 				const bounds = setAuthoringProjection(writableViewport, checkpoint, true);
 				await waitForPreparedViewportReady(writableViewport, request);
 				if (request !== generation || importController.signal.aborted) return;

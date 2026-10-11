@@ -265,6 +265,49 @@ describe('authoring topology v2 Push/Pull', () => {
 			} finally { document.dispose(); }
 		});
 
+	test('moves a surrounding side face past its protruding child cap without capping at the prior cube extent', () => {
+		const { document, history, faceId } = createNeutralRectangle();
+		try {
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 2.7, 2)));
+			const box = document.snapshot().graph;
+			const sideFaceId = `${DOCUMENT_ID}:op:2:side:1`;
+			const side = box.meshes[0]!.faces.find((face) => face.id === sideFaceId)!;
+			const sidePoints = vertexPositions(box, sideFaceId) as [number, number, number][];
+			const center = sidePoints.reduce(
+				(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+				[0, 0, 0] as [number, number, number]
+			).map((value) => value / sidePoints.length) as [number, number, number];
+			const insetPoints = sidePoints.map((point) => [
+				center[0] + (point[0] - center[0]) * 0.35,
+				center[1] + (point[1] - center[1]) * 0.35,
+				center[2] + (point[2] - center[2]) * 0.35
+			] as [number, number, number]);
+			const childId = `${DOCUMENT_ID}:face:3`;
+			history.execute(document, journalEntry(buildFaceLoopEdit(box, childId, insetPoints, side.normal)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, 0.6, 4)));
+
+			const withChild = document.snapshot().graph;
+			const parentBefore = withChild.meshes[0]!.faces.find((face) => face.id === sideFaceId)!;
+			const parentBeforePoints = vertexPositions(withChild, sideFaceId);
+			const childBefore = vertexPositions(withChild, childId);
+
+			// Move the surrounding face farther than the child protrusion. This changes
+			// the former protrusion into a recess and must not be capped by its old box.
+			history.execute(document, journalEntry(buildPushPullFaceEdit(withChild, sideFaceId, 1.0, 5)));
+			const after = document.snapshot().graph;
+			const parentAfterPoints = vertexPositions(after, sideFaceId);
+			for (let index = 0; index < parentBeforePoints.length; index += 1) {
+				const before = parentBeforePoints[index]!;
+				const moved = parentAfterPoints[index]!;
+				const delta = moved.map((value, axis) => value - before[axis]!) as [number, number, number];
+				expect(delta[0] * parentBefore.normal[0] + delta[1] * parentBefore.normal[1] + delta[2] * parentBefore.normal[2]).toBeCloseTo(1.0, 12);
+			}
+			expect(vertexPositions(after, childId)).toEqual(childBefore);
+			expect(validateEditableSubset(after)).toMatchObject({ editable: true });
+			expect([...buildAuthoringTopology(after.meshes[0]!).edges.values()].every((edge) => edge.faceIds.length === 2)).toBe(true);
+		} finally { document.dispose(); }
+	});
+
 	test('Push/Pulls the open surrounding parent after its child inset was raised', () => {
 		const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Open parent with child' });
 		const history = new AuthoringHistory(null);

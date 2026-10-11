@@ -711,7 +711,7 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 			finally { independent.dispose(); }
 		});
 
-		test('flat surrounding parent stays Push/Pull-editable after its child rectangle is raised', async ({ page }) => {
+			test('flat surrounding parent stays Push/Pull-editable after its child rectangle is raised', async ({ page }) => {
 			await createNew(page);
 			await ensureTopView(page);
 			await drawRectangle(page, 0.24, 0.24, 0.50, 0.48);
@@ -736,15 +736,52 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 			const childAfterParentMove = movedParentGraph.meshes[0]!.faces.find((face) => face.id === child.id)!;
 			expect(movedParent.holes).toHaveLength(1);
 			expect(movedParent.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual([0.2, 0.2, 0.2, 0.2]);
-			expect(childAfterParentMove.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
-		});
+				expect(childAfterParentMove.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
+			});
 
-			test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
+			test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
 				await createNew(page);
 				await ensureTopView(page);
-			await drawRectangle(page, 0.38, 0.38, 0.20, 0.18);
-			const before = await currentCheckpoint(page);
-			const box = await page.locator('.viewport canvas').boundingBox();
+				await drawRectangle(page, 0.30, 0.30, 0.38, 0.34);
+				const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+				await pushPullProjectedFace(page, flat, rectangleEntityId(flat, 1), 1.2, 'top');
+				const box = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+				const parentId = frontFaceId(box);
+				const beforeChildIds = new Set(box.meshes[0]!.faces.map((face) => face.id));
+
+				await drawRectangleOnFace(page, box, parentId, 'front');
+				const split = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+				const child = split.meshes[0]!.faces.find((face) => !beforeChildIds.has(face.id) && face.label?.includes('"rectangle"'));
+				if (!child) throw new Error('Side child rectangle did not create an inset face.');
+				await pushPullProjectedFace(page, split, child.id, 0.30, 'front');
+
+				const protruded = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+				const parentBefore = protruded.meshes[0]!.faces.find((face) => face.id === parentId)!;
+				const parentBeforePoints = parentBefore.outer.map((vertex) => protruded.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3));
+				const childBefore = protruded.meshes[0]!.faces.find((face) => face.id === child.id)!;
+				const childBeforePoints = childBefore.outer.map((vertex) => protruded.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3));
+
+				await pushPullProjectedFace(page, protruded, parentId, 0.65, 'front');
+				const crossed = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+				const parentAfter = crossed.meshes[0]!.faces.find((face) => face.id === parentId)!;
+				for (let index = 0; index < parentAfter.outer.length; index += 1) {
+					const moved = crossed.meshes[0]!.positions.slice(parentAfter.outer[index]! * 3, parentAfter.outer[index]! * 3 + 3);
+					const before = parentBeforePoints[index]!;
+					const delta = moved.map((value, axis) => value - before[axis]!) as [number, number, number];
+					expect(delta[0] * parentBefore.normal[0] + delta[1] * parentBefore.normal[1] + delta[2] * parentBefore.normal[2]).toBeCloseTo(0.65, 9);
+				}
+				const childAfter = crossed.meshes[0]!.faces.find((face) => face.id === child.id)!;
+				expect(childAfter.outer.map((vertex) => crossed.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3))).toEqual(childBeforePoints);
+			});
+
+				test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
+					await createNew(page);
+					await ensureTopView(page);
+				await drawRectangle(page, 0.38, 0.38, 0.20, 0.18);
+				const before = await currentCheckpoint(page);
+				const canvas = page.locator('.viewport canvas');
+				const cameraBefore = await canvas.screenshot();
+				const box = await page.locator('.viewport canvas').boundingBox();
 			if (!box) throw new Error('The production viewport canvas has no browser layout box.');
 			const firstScreen = { x: box.x + box.width * 0.42, y: box.y + box.height * 0.42 };
 			const secondScreen = { x: box.x + box.width * 0.54, y: box.y + box.height * 0.50 };
@@ -763,12 +800,14 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 				await page.waitForTimeout(1350);
 				await expect(page.locator('.measure-tooltip')).toBeVisible();
 				await expect(page.locator('.measure-tooltip')).toHaveText(measured);
-				await page.mouse.up();
-				await expect(page.locator('.measure-tooltip')).toBeHidden();
-				await expect(page.locator('.footer-status')).toContainText(`Tape Measure · ${measured}`);
-			expect((await authoringCommands(page))).toHaveLength(commandsBefore);
-			expect((await currentCheckpoint(page)).snapshot.revision).toBe(before.snapshot.revision);
-		});
+					await page.mouse.up();
+					await expect(page.locator('.measure-tooltip')).toBeHidden();
+					await expect(page.locator('.footer-status')).toContainText(`Tape Measure · ${measured}`);
+					await page.getByRole('button', { name: 'Select', exact: true }).click();
+					await expect.poll(async () => (await canvas.screenshot()).equals(cameraBefore)).toBe(true);
+				expect((await authoringCommands(page))).toHaveLength(commandsBefore);
+				expect((await currentCheckpoint(page)).snapshot.revision).toBe(before.snapshot.revision);
+			});
 
 	test('1,000 real pointer moves keep inference nonmutating and avoid authoring long tasks over 50 ms', async ({ page }) => {
 		test.setTimeout(120_000);

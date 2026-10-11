@@ -478,6 +478,29 @@ function projectedFaceRegionsOverlap(mesh: Mesh, first: Face, second: Face, norm
 	return secondOuter.some((point) => pointInsideFaceRegion(point, firstOuter, firstHoles, tolerance));
 }
 
+function projectedOuterMatchesHole(mesh: Mesh, selected: Face, candidate: Face): boolean {
+	if (selected.holes.length === 0 || candidate.outer.length < 3) return false;
+	const drop = projectionAxis(selected.normal);
+	const candidate2 = candidate.outer.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop));
+	const all = [...candidate2, ...selected.holes.flatMap((ring) => ring.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop)))];
+	const scale = Math.max(1, ...all.flatMap((point) => point.map(Math.abs)));
+	const tolerance = 1e-9 * scale;
+	const cycleMatches = (hole2: readonly Point2[]) => {
+		if (hole2.length !== candidate2.length) return false;
+		for (const source of [candidate2, [...candidate2].reverse()] as const) {
+			for (let offset = 0; offset < source.length; offset += 1) {
+				let matches = true;
+				for (let index = 0; index < hole2.length; index += 1) {
+					if (!samePoint2(hole2[index]!, source[(index + offset) % source.length]!, tolerance)) { matches = false; break; }
+				}
+				if (matches) return true;
+			}
+		}
+		return false;
+	};
+	return selected.holes.some((ring) => cycleMatches(ring.map((vertex) => projectPoint2(vectorAt(mesh.positions, vertex), drop))));
+}
+
 function candidateStrictlyInsideFace(
 	mesh: Mesh,
 	face: Face,
@@ -773,12 +796,29 @@ function upgradedFace(mesh: Mesh, face: Face, operationId: string): Face {
 	);
 }
 
+function upgradedFaceAllowOrientationFlip(mesh: Mesh, face: Face, operationId: string): Face {
+	return faceFromRing(
+		mesh,
+		face.id,
+		face.outer,
+		face.frontMaterialId!,
+		face.backMaterialId,
+		v2FaceLabel(face.id, 'push-pull', operationId),
+		undefined,
+		face.holes
+	);
+}
+
 function rejectOppositeBoundaryCrossing(mesh: Mesh, selected: Face, distance: number): void {
 	const anchor = vectorAt(mesh.positions, selected.outer[0]!);
 	const selectedVertices = new Set(selected.outer);
 	for (const face of mesh.faces) {
 		if (face.id === selected.id || face.outer.some((vertex) => selectedVertices.has(vertex))) continue;
 		if (Math.abs(Math.abs(dot3(face.normal, selected.normal)) - 1) > 1e-9) continue;
+		// A protruded/recessed child cap projects exactly into one of the selected
+		// surrounding face's holes. Crossing that cap is a nested Push/Pull edit
+		// (protrusion ↔ recess), not an unrelated opposite-shell collision.
+		if (projectedOuterMatchesHole(mesh, selected, face)) continue;
 		if (!projectedFaceRegionsOverlap(mesh, selected, face, selected.normal)) continue;
 		const offsets = face.outer.map((vertex) => {
 			const point = vectorAt(mesh.positions, vertex);
@@ -825,6 +865,12 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		? `${vertex}:${ring[(index + 1) % ring.length]!}`
 		: `${ring[(index + 1) % ring.length]!}:${vertex}`)?.faceIds.length ?? 0));
 	const incidentCounts = ringIncidentCounts.flat();
+	const holeAdjacentFaceIds = new Set<string>();
+	for (const hole of target.holes) for (let index = 0; index < hole.length; index += 1) {
+		const a = hole[index]!; const b = hole[(index + 1) % hole.length]!;
+		const edge = topology.edges.get(a < b ? `${a}:${b}` : `${b}:${a}`);
+		for (const adjacentFaceId of edge?.faceIds ?? []) if (adjacentFaceId !== target.id) holeAdjacentFaceIds.add(adjacentFaceId);
+	}
 	const operationId = `${graph.documentId}:op:${operationSequence}`;
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
@@ -914,7 +960,11 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		const adjacent = new Set(topology.adjacentFaceIds.get(target.id) ?? []);
 		const retained = mesh.faces
 			.filter((face) => face.id !== target.id)
-			.map((face) => adjacent.has(face.id) ? upgradedFace(expanded, face, operationId) : face);
+			.map((face) => adjacent.has(face.id)
+				? holeAdjacentFaceIds.has(face.id)
+					? upgradedFaceAllowOrientationFlip(expanded, face, operationId)
+					: upgradedFace(expanded, face, operationId)
+				: face);
 		const sides: Face[] = [];
 		for (let index = 0; index < target.outer.length; index += 1) {
 			const next = (index + 1) % target.outer.length;
@@ -1004,7 +1054,11 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	}
 	const movedMesh: Mesh = { ...mesh, positions };
 	const affected = new Set([target.id, ...(topology.adjacentFaceIds.get(target.id) ?? [])]);
-	const faces = mesh.faces.map((face) => affected.has(face.id) ? upgradedFace(movedMesh, face, operationId) : face);
+	const faces = mesh.faces.map((face) => affected.has(face.id)
+		? face.id !== target.id && holeAdjacentFaceIds.has(face.id)
+			? upgradedFaceAllowOrientationFlip(movedMesh, face, operationId)
+			: upgradedFace(movedMesh, face, operationId)
+		: face);
 	const nextMesh = withSortedFaces(movedMesh, faces);
 	const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
 	if (!validation.editable) invalid(`Push/Pull result is outside the supported topology: ${validation.reason}`);
