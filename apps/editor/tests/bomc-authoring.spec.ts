@@ -739,7 +739,7 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 				expect(childAfterParentMove.outer.map((vertex) => movedParentGraph.meshes[0]!.positions[vertex * 3 + 1]!)).toEqual(childBeforeY);
 			});
 
-			test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
+				test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
 				await createNew(page);
 				await ensureTopView(page);
 				await drawRectangle(page, 0.30, 0.30, 0.38, 0.34);
@@ -771,10 +771,64 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 					expect(delta[0] * parentBefore.normal[0] + delta[1] * parentBefore.normal[1] + delta[2] * parentBefore.normal[2]).toBeCloseTo(0.65, 9);
 				}
 				const childAfter = crossed.meshes[0]!.faces.find((face) => face.id === child.id)!;
-				expect(childAfter.outer.map((vertex) => crossed.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3))).toEqual(childBeforePoints);
-			});
+					expect(childAfter.outer.map((vertex) => crossed.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3))).toEqual(childBeforePoints);
+				});
 
-				test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
+				test('upper box side keeps a Push/Pull preview and can overhang beyond the lower slab footprint', async ({ page }) => {
+					await createNew(page);
+					await ensureTopView(page);
+					await drawRectangle(page, 0.24, 0.24, 0.52, 0.48);
+					const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					await pushPullProjectedFace(page, flat, rectangleEntityId(flat, 1), 0.55, 'top');
+
+					const slab = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const slabMaxZ = Math.max(...Array.from({ length: slab.meshes[0]!.positions.length / 3 }, (_value, index) => slab.meshes[0]!.positions[index * 3 + 2]!));
+					const slabTopId = topFaceId(slab);
+					const beforeChildIds = new Set(slab.meshes[0]!.faces.map((face) => face.id));
+					await drawRectangleOnFace(page, slab, slabTopId, 'top');
+					const split = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const child = split.meshes[0]!.faces.find((face) => !beforeChildIds.has(face.id) && face.label?.includes('"rectangle"'));
+					if (!child) throw new Error('Upper child rectangle did not create a canonical inset face.');
+					const beforeRaiseIds = new Set(split.meshes[0]!.faces.map((face) => face.id));
+					await pushPullProjectedFace(page, split, child.id, 0.65, 'top');
+
+					const stacked = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const upperFront = stacked.meshes[0]!.faces.find((face) => !beforeRaiseIds.has(face.id) && face.normal[2] > 0.9);
+					if (!upperFront) throw new Error('Raised upper box has no +Z side face for the overhang regression.');
+					const upperFrontPoints = upperFront.outer.map((vertex) => [
+						stacked.meshes[0]!.positions[vertex * 3]!,
+						stacked.meshes[0]!.positions[vertex * 3 + 1]!,
+						stacked.meshes[0]!.positions[vertex * 3 + 2]!
+					] as [number, number, number]);
+					const upperFrontMaxZ = Math.max(...upperFrontPoints.map((point) => point[2]));
+					const overhangDistance = slabMaxZ - upperFrontMaxZ + 0.35;
+					expect(overhangDistance).toBeGreaterThan(0);
+					const center = upperFrontPoints.reduce(
+						(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+						[0, 0, 0] as [number, number, number]
+					).map((value) => value / upperFrontPoints.length) as [number, number, number];
+					await ensureCameraView(page, 'iso');
+					const start = await projectWorldPoint(page, stacked, center, 'iso');
+					await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+					await page.mouse.click(start.x, start.y);
+					const canvas = page.locator('.viewport canvas');
+					const beforePreview = await canvas.screenshot();
+					await page.getByLabel('Distance (m)').fill(String(overhangDistance));
+					await page.waitForTimeout(100);
+					const beyondPreview = await canvas.screenshot();
+					expect(beyondPreview.equals(beforePreview), 'Push/Pull preview must remain visible after crossing the lower slab footprint').toBe(false);
+
+					const revision = (await currentCheckpoint(page)).snapshot.revision;
+					await page.getByRole('button', { name: 'Commit', exact: true }).click();
+					await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(revision + 1);
+					const overhung = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+					const moved = overhung.meshes[0]!.faces.find((face) => face.id === upperFront.id);
+					if (!moved) throw new Error('Upper-box overhang lost the selected face identity.');
+					const maxZ = Math.max(...moved.outer.map((vertex) => overhung.meshes[0]!.positions[vertex * 3 + 2]!));
+					expect(maxZ).toBeGreaterThan(slabMaxZ);
+				});
+
+					test('Tape Measure uses click-hold-drag and shows a dwell length tooltip without mutating canonical BOMC', async ({ page }) => {
 					await createNew(page);
 					await ensureTopView(page);
 				await drawRectangle(page, 0.38, 0.38, 0.20, 0.18);

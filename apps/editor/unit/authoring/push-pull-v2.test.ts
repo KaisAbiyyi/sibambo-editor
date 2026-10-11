@@ -265,6 +265,52 @@ describe('authoring topology v2 Push/Pull', () => {
 			} finally { document.dispose(); }
 		});
 
+	test('extends an upper child box side past the lower slab footprint instead of treating the slab wall as an opposite boundary', () => {
+		const { document, history, faceId } = createNeutralRectangle();
+		try {
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 0.55, 2)));
+			const slab = document.snapshot().graph;
+			const topFaceId = `${DOCUMENT_ID}:op:2:cap`;
+			const top = slab.meshes[0]!.faces.find((face) => face.id === topFaceId)!;
+			const topPoints = vertexPositions(slab, topFaceId) as [number, number, number][];
+			const center = topPoints.reduce(
+				(sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]] as [number, number, number],
+				[0, 0, 0] as [number, number, number]
+			).map((value) => value / topPoints.length) as [number, number, number];
+			const insetPoints = topPoints.map((point) => [
+				center[0] + (point[0] - center[0]) * 0.46,
+				center[1] + (point[1] - center[1]) * 0.46,
+				center[2] + (point[2] - center[2]) * 0.46
+			] as [number, number, number]);
+			const childId = `${DOCUMENT_ID}:face:3`;
+			history.execute(document, journalEntry(buildFaceLoopEdit(slab, childId, insetPoints, top.normal)));
+			history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, 0.65, 4)));
+
+			const stacked = document.snapshot().graph;
+			const upperFront = stacked.meshes[0]!.faces
+				.filter((face) => face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))
+				.find((face) => face.normal[2] > 0.9);
+			if (!upperFront) throw new Error('Raised child box has no +Z side face for overhang regression.');
+			const beforePoints = vertexPositions(stacked, upperFront.id);
+
+			// The upper cube side starts inside the lower slab footprint. Pull it far
+			// enough to cross the slab's +Z outer wall; touching only along the shared
+			// height boundary must not classify that lower wall as an opposite shell.
+			history.execute(document, journalEntry(buildPushPullFaceEdit(stacked, upperFront.id, 1.2, 5)));
+			const overhung = document.snapshot().graph;
+			const afterPoints = vertexPositions(overhung, upperFront.id);
+			for (let index = 0; index < beforePoints.length; index += 1) {
+				const before = beforePoints[index]!;
+				const moved = afterPoints[index]!;
+				const delta = moved.map((value, axis) => value - before[axis]!) as [number, number, number];
+				expect(delta[0] * upperFront.normal[0] + delta[1] * upperFront.normal[1] + delta[2] * upperFront.normal[2]).toBeCloseTo(1.2, 12);
+			}
+			expect(Math.max(...afterPoints.map((point) => point[2]!))).toBeGreaterThan(3);
+			expect(validateEditableSubset(overhung)).toMatchObject({ editable: true });
+			expect([...buildAuthoringTopology(overhung.meshes[0]!).edges.values()].every((edge) => edge.faceIds.length === 2)).toBe(true);
+		} finally { document.dispose(); }
+	});
+
 	test('moves a surrounding side face past its protruding child cap without capping at the prior cube extent', () => {
 		const { document, history, faceId } = createNeutralRectangle();
 		try {

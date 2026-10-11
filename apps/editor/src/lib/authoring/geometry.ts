@@ -459,23 +459,39 @@ function projectedFaceRegionsOverlap(mesh: Mesh, first: Face, second: Face, norm
 	const allPoints = [...firstOuter, ...firstHoles.flat(), ...secondOuter, ...secondHoles.flat()];
 	const scale = Math.max(1, ...allPoints.flatMap((point) => point.map(Math.abs)));
 	const tolerance = 1e-9 * scale;
-	const ringsTouchOrIntersect = (left: readonly Point2[], right: readonly Point2[]) => {
+	const ringsProperlyIntersect = (left: readonly Point2[], right: readonly Point2[]) => {
 		for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
 			const a = left[leftIndex]!; const b = left[(leftIndex + 1) % left.length]!;
 			for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
 				const c = right[rightIndex]!; const d = right[(rightIndex + 1) % right.length]!;
-				if (properSegmentsCross(a, b, c, d, tolerance)
-					|| pointOnSegment2(a, c, d, tolerance) || pointOnSegment2(b, c, d, tolerance)
-					|| pointOnSegment2(c, a, b, tolerance) || pointOnSegment2(d, a, b, tolerance)) return true;
+				if (properSegmentsCross(a, b, c, d, tolerance)) return true;
 			}
 		}
 		return false;
 	};
+	const triangleCentroids = (face: Face) => {
+		const centroids: Point2[] = [];
+		for (let index = 0; index + 2 < face.triangles.length; index += 3) {
+			const a = projectPoint2(vectorAt(mesh.positions, face.triangles[index]!), drop);
+			const b = projectPoint2(vectorAt(mesh.positions, face.triangles[index + 1]!), drop);
+			const c = projectPoint2(vectorAt(mesh.positions, face.triangles[index + 2]!), drop);
+			centroids.push([(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3]);
+		}
+		return centroids;
+	};
 	const firstRings = [firstOuter, ...firstHoles];
 	const secondRings = [secondOuter, ...secondHoles];
-	if (firstRings.some((left) => secondRings.some((right) => ringsTouchOrIntersect(left, right)))) return true;
+	// Boundary-only contact is not an opposite-shell collision. This matters for
+	// a raised child box whose side projects down to the top edge of the lower
+	// slab wall: the two regions touch in projection but have zero shared area.
+	if (firstRings.some((left) => secondRings.some((right) => ringsProperlyIntersect(left, right)))) return true;
 	if (firstOuter.some((point) => pointInsideFaceRegion(point, secondOuter, secondHoles, tolerance))) return true;
-	return secondOuter.some((point) => pointInsideFaceRegion(point, firstOuter, firstHoles, tolerance));
+	if (secondOuter.some((point) => pointInsideFaceRegion(point, firstOuter, firstHoles, tolerance))) return true;
+	// Coincident/projectively identical opposite faces have no proper boundary
+	// crossing and no strictly-inside boundary vertex, but their triangle
+	// interiors overlap. Centroids distinguish that case from edge-only contact.
+	if (triangleCentroids(first).some((point) => pointInsideFaceRegion(point, secondOuter, secondHoles, tolerance))) return true;
+	return triangleCentroids(second).some((point) => pointInsideFaceRegion(point, firstOuter, firstHoles, tolerance));
 }
 
 function projectedOuterMatchesHole(mesh: Mesh, selected: Face, candidate: Face): boolean {
@@ -849,6 +865,20 @@ function insetHostForFace(mesh: Mesh, target: Face): Face | null {
 	return hosts[0] ?? null;
 }
 
+function holeBoundaryHostForFace(mesh: Mesh, target: Face): Face | null {
+	const targetEdges = new Set<string>();
+	for (let index = 0; index < target.outer.length; index += 1) {
+		const a = target.outer[index]!; const b = target.outer[(index + 1) % target.outer.length]!;
+		targetEdges.add(a < b ? `${a}:${b}` : `${b}:${a}`);
+	}
+	const hosts = mesh.faces.filter((face) => face.id !== target.id && face.holes.some((hole) => hole.some((a, index) => {
+		const b = hole[(index + 1) % hole.length]!;
+		return targetEdges.has(a < b ? `${a}:${b}` : `${b}:${a}`);
+	})));
+	if (hosts.length > 1) invalid(`Face ${target.id} touches hole boundaries on more than one containing surface region.`);
+	return hosts[0] ?? null;
+}
+
 /** Push/Pull one canonical face. Open standalone faces become prisms; manifold faces move their shared boundary. */
 export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance: number, operationSequence: number): GeometryEdit {
 	if (!finite(distance) || Math.abs(distance) < MIN_AUTHORING_EDGE_METRES) invalid('Push/Pull distance must be finite and at least 1e-6 metres from zero.');
@@ -874,6 +904,7 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	const operationId = `${graph.documentId}:op:${operationSequence}`;
 	const oldMesh = mesh;
 	const insetHost = insetHostForFace(mesh, target);
+	const holeBoundaryHost = holeBoundaryHostForFace(mesh, target);
 
 	if (insetHost) {
 		rejectOppositeBoundaryCrossing(mesh, target, distance);
@@ -919,6 +950,59 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		const nextMesh = withSortedFaces(expanded, [...mesh.faces.filter((face) => face.id !== target.id), ...replacements]);
 		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
 		if (!validation.editable) invalid(`Inset Push/Pull result is outside the supported topology: ${validation.reason}`);
+		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+	}
+
+	if (!insetHost && holeBoundaryHost && target.holes.length === 0 && distance > 0 && incidentCounts.every((count) => count === 2)) {
+		// A side of a child box raised from a parent-face hole is allowed to grow
+		// beyond the parent's footprint. Moving its shared vertices would drag the
+		// parent's hole outside the parent ring and invalidate that surface. Instead,
+		// treat the outward Push/Pull as a face extrusion: keep the old perimeter as
+		// the attachment seam, move a duplicate cap, and bridge the two rings. This
+		// produces the same external solid (with bounded coplanar seams) and naturally
+		// creates the underside once the child overhangs its parent.
+		rejectOppositeBoundaryCrossing(mesh, target, distance);
+		const materialId = target.frontMaterialId;
+		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const movingStart = mesh.positions.length / 3;
+		const positions = [...mesh.positions];
+		for (const vertex of target.outer) {
+			const point = vectorAt(mesh.positions, vertex);
+			positions.push(
+				point[0] + target.normal[0] * distance,
+				point[1] + target.normal[1] * distance,
+				point[2] + target.normal[2] * distance
+			);
+		}
+		const moving = target.outer.map((_vertex, index) => movingStart + index);
+		const expanded: Mesh = { ...mesh, positions };
+		const replacements: Face[] = [
+			faceFromRing(expanded, target.id, moving, materialId, target.backMaterialId, v2FaceLabel(target.id, 'push-pull', operationId), target.normal)
+		];
+		for (let index = 0; index < target.outer.length; index += 1) {
+			const next = (index + 1) % target.outer.length;
+			const start = vectorAt(mesh.positions, target.outer[index]!);
+			const end = vectorAt(mesh.positions, target.outer[next]!);
+			const edge: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+			const outward: Point3 = [
+				edge[1] * target.normal[2] - edge[2] * target.normal[1],
+				edge[2] * target.normal[0] - edge[0] * target.normal[2],
+				edge[0] * target.normal[1] - edge[1] * target.normal[0]
+			];
+			const sideId = `${operationId}:side:${index}`;
+			replacements.push(faceFromRing(
+				expanded,
+				sideId,
+				[target.outer[index]!, target.outer[next]!, moving[next]!, moving[index]!],
+				materialId,
+				null,
+				v2FaceLabel(sideId, 'push-pull', operationId),
+				outward
+			));
+		}
+		const nextMesh = withSortedFaces(expanded, [...mesh.faces.filter((face) => face.id !== target.id), ...replacements]);
+		const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+		if (!validation.editable) invalid(`Nested side Push/Pull result is outside the supported topology: ${validation.reason}`);
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
