@@ -103,6 +103,20 @@ function setup() {
 	};
 }
 describe('canonical modeling pointer controller', () => {
+	test('Inset and free-ground Circle preview without mutation; replacing a checkpoint cancels their captured gesture', async()=>{
+		const s=setup();try{
+			const initial=s.doc.snapshot().graph;
+			s.controller.setMode('inset');s.click(2,.2);s.controller.move(s.pointer(2,.5));
+			expect(s.doc.snapshot().graph).toEqual(initial);s.click(2,.5);await Promise.resolve();await Promise.resolve();
+			expect(s.doc.snapshot().graph.meshes[0]!.faces).toHaveLength(2);expect(s.actions.at(-1)).toMatchObject({type:'offset',distance:expect.closeTo(.3)});
+			expect(s.controller.state.selection[0]?.type).toBe('face');
+			s.controller.setMode('circle');s.controller.setCurveOptions(12,90);s.click(-3,-3);s.controller.move(s.pointer(-2,-3));
+			const before=s.doc.snapshot().graph;expect(s.controller.state.anchor).toEqual([-3,0,-3]);s.click(-2,-3);await Promise.resolve();await Promise.resolve();
+			expect(s.doc.snapshot().graph.meshes[0]!.faces).toHaveLength(3);expect(s.doc.snapshot().graph).not.toEqual(before);
+			s.click(-6,-6);s.commit({type:'guide',start:[20,0,0],end:[21,0,0],guideKind:'line'});s.controller.refresh();
+			expect(s.controller.state.anchor).toBeNull();const count=s.actions.length;s.controller.up(s.pointer(-5,-6));expect(s.actions).toHaveLength(count);expect(s.errors).toEqual([]);
+		}finally{s.close();}
+	});
 	test('point selection distinguishes edge/face; window requires containment and crossing accepts intersection', () => {
 		const s = setup();
 		try {

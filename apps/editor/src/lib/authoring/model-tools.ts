@@ -1,4 +1,4 @@
-import { BufferGeometry, Float32BufferAttribute, Group, LineBasicMaterial, LineSegments, Vector3 } from 'three';
+import { BufferGeometry, Float32BufferAttribute, Group, LineBasicMaterial, LineSegments, Matrix4, Plane, Vector3 } from 'three';
 import type { BomcGraph } from '@sibambo/bomc-document';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
 import type { AuthoringCheckpoint, AuthoringPoint, ModelAction, ModelSelection } from './protocol.js';
@@ -9,12 +9,15 @@ import {
 	meshEdges,
 	modelMetadata,
 	modelOccurrences,
+	offsetLoop,
 	transformPoint,
 } from './model.js';
 import { nearestAuthoringFaceHit, resolveAuthoringInference } from './inference.js';
 import { closestAxisParameterToRay } from './axis-drag.js';
+import { curvePoints } from './curves.js';
+import { assertAffine } from './affine.js';
 
-export type ModelingMode = 'select' | 'erase' | 'move' | 'offset' | 'guide' | 'guidepoint';
+export type ModelingMode = 'select' | 'erase' | 'move' | 'offset' | 'inset' | 'circle' | 'polygon' | 'arc' | 'follow-me' | 'guide' | 'guidepoint';
 export type ModelingState = {
 	mode: ModelingMode;
 	path: string[];
@@ -57,6 +60,10 @@ export class ModelingController {
 		null;
 	private lastClick = { time: 0, id: '' };
 	private disposed = false;
+	private inset: { faceId: string; checkpoint: AuthoringCheckpoint; anchor: AuthoringPoint; normal: AuthoringPoint; inward: Vector3; distance: number } | null = null;
+	private curve: { checkpoint: AuthoringCheckpoint; center: AuthoringPoint; normal: AuthoringPoint; first: AuthoringPoint | null } | null = null;
+	private curveSegments = 24;
+	private curveSweep = 90;
 	constructor(private options: Options) {}
 	private publish() {
 		this.options.change({ ...this.state, path: [...this.state.path], selection: [...this.state.selection] });
@@ -65,6 +72,8 @@ export class ModelingController {
 		const checkpoint = this.options.checkpoint();
 		if (!checkpoint) return;
 		const graph = checkpoint.snapshot.graph;
+		if (this.inset && this.inset.checkpoint !== checkpoint) this.cancel();
+		if (this.curve && this.curve.checkpoint !== checkpoint) this.cancel();
 		if (graph.documentId !== this.documentId) {
 			this.documentId = graph.documentId;
 			this.state.path = [];
@@ -97,7 +106,9 @@ export class ModelingController {
 				? 'Select entities, then click a move origin and destination.'
 				: mode === 'guide' || mode === 'guidepoint'
 					? 'Click two inferred points to place a persistent guide.'
-					: '';
+					: mode === 'inset' ? 'Click a face near an edge, move inward or outward, then click to offset. Enter an exact distance in the panel.'
+					: ['circle','polygon','arc'].includes(mode) ? 'Click center, then radius. Arc: click its end point next (Alt chooses the complementary sweep).'
+					: mode === 'follow-me' ? 'Shift-select a continuous edge path, then activate Follow Me and click its perpendicular profile face.' : '';
 		this.publish();
 	}
 	setAxis(axis: 'x' | 'y' | 'z' | null) {
@@ -106,8 +117,11 @@ export class ModelingController {
 	}
 	cancel() {
 		this.pointer = null;
+		this.inset = null;
+		this.curve = null;
 		this.state.anchor = null;
 		this.state.delta = [0, 0, 0];
+		this.state.message = '';
 		this.options.viewport()?.setDomainOverlay(PREVIEW, null);
 		this.publish();
 	}
@@ -141,6 +155,10 @@ export class ModelingController {
 		this.options.contextChanged();
 		this.refresh();
 	}
+	selectOccurrence(path: readonly string[]) {
+		const graph=this.options.checkpoint()?.snapshot.graph;if(!graph||!path.length)return;
+		contextTransform(graph,path);this.cancel();this.state.path=[...path.slice(0,-1)];this.state.selection=[{type:'instance',id:path.at(-1)!}];this.options.contextChanged();this.refresh();
+	}
 	exit() {
 		if (!this.state.path.length) return;
 		this.state.path = this.state.path.slice(0, -1);
@@ -151,9 +169,14 @@ export class ModelingController {
 	}
 	async apply(action: ModelAction) {
 		if (!this.options.enabled()) return;
+		const oldFaces = new Set(contextGraph(this.options.checkpoint()!.snapshot.graph, this.state.path).meshes[0]?.faces.map(f => f.id));
 		try {
 			await this.options.submit([...this.state.path], action);
 			this.state.selection = [];
+			if (action.type === 'offset') {
+				const face = contextGraph(this.options.checkpoint()!.snapshot.graph, this.state.path).meshes[0]?.faces.find(f => !oldFaces.has(f.id) && !f.id.includes(':hole:'));
+				if (face) this.state.selection = [{ type: 'face', id: face.id }];
+			}
 			this.cancel();
 			this.refresh();
 		} catch (error) {
@@ -330,6 +353,8 @@ export class ModelingController {
 			};
 	}
 	move(event: PointerEvent) {
+		if (this.curve && this.options.enabled()) { this.previewCurve(event.clientX, event.clientY, event.altKey); return; }
+		if (this.inset && this.options.enabled()) { this.previewInset(event.clientX, event.clientY); return; }
 		if (!['move', 'guide', 'guidepoint'].includes(this.state.mode) || !this.state.anchor || !this.options.enabled())
 			return;
 		const point = this.inference(event.clientX, event.clientY);
@@ -349,6 +374,48 @@ export class ModelingController {
 		const pointer = this.pointer;
 		this.pointer = null;
 		if (!pointer || !this.options.enabled() || pointer.checkpoint !== this.options.checkpoint()) return;
+		if (['circle','polygon','arc'].includes(this.state.mode)) {
+			if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 5) return;
+			if (!this.curve) {
+				const viewport=this.options.viewport()!, graph=contextGraph(pointer.checkpoint.snapshot.graph,this.state.path,true);
+				const inferred=resolveAuthoringInference({graph,viewport,clientX:event.clientX,clientY:event.clientY,activePlane:{origin:[0,0,0],normal:[0,1,0]}});
+				if(!inferred)return;
+				this.curve={checkpoint:pointer.checkpoint,center:inferred.point,normal:inferred.plane.normal,first:null};
+				this.state.anchor=inferred.point;this.publish();
+			} else {
+				const point=this.curvePoint(event.clientX,event.clientY);if(!point)return;
+				if(this.state.mode==='arc'&&!this.curve.first){this.curve.first=point;this.publish();}
+				else this.commitCurve(this.curve.first??point,this.state.mode==='arc'?this.arcSweep(point,event.altKey):360);
+			}
+			return;
+		}
+		if(this.state.mode==='follow-me') {
+			const graph=contextGraph(pointer.checkpoint.snapshot.graph,this.state.path,true),ray=this.options.viewport()!.rayFromScreen(event.clientX,event.clientY),hit=ray&&nearestAuthoringFaceHit(graph,ray);
+			if(hit)void this.apply({type:'follow-me',faceId:hit.face.id,edges:this.state.selection.filter(s=>s.type==='edge').map(({start,end})=>({start,end}))});
+			return;
+		}
+		if (this.state.mode === 'inset') {
+			if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 5) return;
+			if (this.inset) {
+				this.previewInset(event.clientX, event.clientY);
+				this.commitInset(this.inset.distance);
+			} else {
+				const viewport = this.options.viewport()!, graph = contextGraph(pointer.checkpoint.snapshot.graph, this.state.path, true);
+				const ray = viewport.rayFromScreen(event.clientX, event.clientY), mesh = graph.meshes[0];
+				const hit = ray && nearestAuthoringFaceHit(graph, ray);
+				if (!hit || !mesh) return;
+				let best = Infinity, inward = new Vector3();
+				for (let i = 0; i < hit.face.outer.length; i++) {
+					const a = new Vector3(...xyz(mesh, hit.face.outer[i]!)), b = new Vector3(...xyz(mesh, hit.face.outer[(i + 1) % hit.face.outer.length]!));
+					const edge = b.sub(a), from = new Vector3(...hit.point).sub(a);
+					const distance = from.clone().addScaledVector(edge, -Math.max(0, Math.min(1, from.dot(edge) / edge.lengthSq()))).lengthSq();
+					if (distance < best) { best = distance; inward = new Vector3(...hit.face.normal).cross(edge).normalize(); }
+				}
+				this.inset = { faceId: hit.face.id, checkpoint: pointer.checkpoint, anchor: hit.point, normal: hit.face.normal, inward, distance: 0 };
+				this.state.selection = [{ type: 'face', id: hit.face.id }]; this.draw(); this.publish();
+			}
+			return;
+		}
 		if (
 			this.state.mode === 'guide' ||
 			this.state.mode === 'guidepoint' ||
@@ -468,7 +535,75 @@ export class ModelingController {
 		this.draw();
 		this.publish();
 	}
-	private draw(delta: AuthoringPoint = [0, 0, 0], overlay = OVERLAY) {
+	selectionBounds() {
+		const graph = this.options.checkpoint()?.snapshot.graph;
+		if (!graph) throw new Error('Open a writable document.');
+		const points = this.targets(graph).filter(t => this.state.selection.some(s => key(s) === key(t.selection))).flatMap(t => t.points);
+		for (const edge of this.state.selection) if (edge.type === 'edge') points.push(edge.start, edge.end);
+		if (!points.length) throw new Error('Select geometry first.');
+		const min = [0, 1, 2].map(i => Math.min(...points.map(p => p[i]!))), max = [0, 1, 2].map(i => Math.max(...points.map(p => p[i]!)));
+		return { center: min.map((v, i) => (v + max[i]!) / 2) as [number, number, number], size: min.map((v, i) => max[i]! - v) as [number, number, number] };
+	}
+	setCurveOptions(segments:number,sweepDegrees:number) { this.curveSegments=segments;this.curveSweep=sweepDegrees; }
+	curveRadius(radius:number) {
+		if(!this.curve)throw new Error('Click a curve center in the viewport first.');
+		if(!Number.isFinite(radius)||radius<1e-6)throw new Error('Radius must be at least 0.000001 m.');
+		const n=new Vector3(...this.curve.normal),direction=this.curve.first?new Vector3(...this.curve.first).sub(new Vector3(...this.curve.center)):new Vector3(...this.state.delta);
+		direction.addScaledVector(n,-direction.dot(n));
+		if(direction.length()<1e-6){direction.set(Math.abs(n.x)<.9?1:0,0,Math.abs(n.x)<.9?0:1);direction.addScaledVector(n,-direction.dot(n));}
+		this.commitCurve(tuple(new Vector3(...this.curve.center).addScaledVector(direction.normalize(),radius)),this.state.mode==='arc'?this.curveSweep:360);
+	}
+	private curvePoint(x:number,y:number) {
+		const curve=this.curve,viewport=this.options.viewport();if(!curve||!viewport)return null;
+		const plane={origin:curve.center,normal:curve.normal};
+		return resolveAuthoringInference({graph:contextGraph(curve.checkpoint.snapshot.graph,this.state.path,true),viewport,clientX:x,clientY:y,activePlane:plane,restrictToPlane:plane})?.point??null;
+	}
+	private arcSweep(point:AuthoringPoint,complement:boolean) {
+		const curve=this.curve!,a=new Vector3(...curve.first!).sub(new Vector3(...curve.center)).normalize(),b=new Vector3(...point).sub(new Vector3(...curve.center)).normalize();
+		let angle=Math.atan2(new Vector3(...curve.normal).dot(a.clone().cross(b)),a.dot(b))*180/Math.PI;
+		if(complement)angle-=Math.sign(angle||1)*360;return angle;
+	}
+	private commitCurve(first:AuthoringPoint,sweepDegrees:number) {
+		const curve=this.curve!;void this.apply({type:'curve',curveKind:this.state.mode as 'circle'|'polygon'|'arc',center:curve.center,normal:curve.normal,first,segments:this.curveSegments,sweepDegrees});
+	}
+	private previewCurve(x:number,y:number,complement:boolean) {
+		const curve=this.curve!,point=this.curvePoint(x,y);if(!point)return;
+		this.state.delta=tuple(new Vector3(...point).sub(new Vector3(...curve.center)));
+		try {
+			const sweep=this.state.mode==='arc'&&curve.first?this.arcSweep(point,complement):360,points=curvePoints(curve.center,curve.first??point,curve.normal,this.curveSegments,sweep);
+			const positions=points.slice(0,Math.abs(sweep)===360?points.length:points.length-1).flatMap((p,i)=>[...p,...points[(i+1)%points.length]!]);
+			positions.push(...curve.center,...point);this.previewLines(positions);
+			this.state.message=`Radius ${new Vector3(...(curve.first??point)).distanceTo(new Vector3(...curve.center)).toFixed(4)} m · ${this.curveSegments} segments · ${sweep.toFixed(1)}°`;
+		}catch(error){this.options.viewport()?.setDomainOverlay(PREVIEW,null);this.state.message=error instanceof Error?error.message:'Invalid curve.';}
+		this.publish();
+	}
+	private previewLines(positions:number[]) {
+		const group=new Group(),geometry=new BufferGeometry();geometry.setAttribute('position',new Float32BufferAttribute(positions,3));group.add(new LineSegments(geometry,new LineBasicMaterial({color:0x22aa77,depthTest:false})));this.options.viewport()?.setDomainOverlay(PREVIEW,group);
+	}
+	commitInset(distance: number) {
+		const faceId = this.inset?.faceId ?? this.state.selection.find(s => s.type === 'face')?.id;
+		if (!faceId) throw new Error('Click or select an active-context face first.');
+		if (!Number.isFinite(distance) || Math.abs(distance) < 1e-6) { this.options.error('Offset needs a nonzero distance of at least 0.000001 m.'); return; }
+		void this.apply({ type: 'offset', faceId, distance });
+	}
+	private previewInset(x: number, y: number) {
+		const inset = this.inset, viewport = this.options.viewport();
+		if (!inset || !viewport || inset.checkpoint !== this.options.checkpoint()) { this.cancel(); return; }
+		const ray = viewport.rayFromScreen(x, y), point = ray?.intersectPlane(new Plane().setFromNormalAndCoplanarPoint(new Vector3(...inset.normal), new Vector3(...inset.anchor)), new Vector3());
+		if (!point) return;
+		inset.distance = point.sub(new Vector3(...inset.anchor)).dot(inset.inward);
+		const mesh = contextGraph(inset.checkpoint.snapshot.graph, this.state.path, true).meshes[0]!, face = mesh.faces.find(f => f.id === inset.faceId)!;
+		try {
+			const loops = [offsetLoop(mesh, face.outer, face.normal, inset.distance), ...face.holes.map(h => offsetLoop(mesh, [...h].reverse(), face.normal, -inset.distance))];
+			const positions = loops.flatMap(loop => loop.flatMap((p, i) => [...p, ...loop[(i + 1) % loop.length]!]));
+			const group = new Group(), geometry = new BufferGeometry(); geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+			group.add(new LineSegments(geometry, new LineBasicMaterial({ color: 0x22aa77, depthTest: false })));
+			viewport.setDomainOverlay(PREVIEW, group); this.state.message = `Offset ${inset.distance.toFixed(4)} m · click to commit; positive inward`;
+		} catch (error) { viewport.setDomainOverlay(PREVIEW, null); this.state.message = error instanceof Error ? error.message : 'Offset rejected.'; }
+		this.publish();
+	}
+	previewTransform(matrix: Matrix4) { assertAffine(matrix.elements); this.draw([0, 0, 0], PREVIEW, matrix); }
+	private draw(delta: AuthoringPoint = [0, 0, 0], overlay = OVERLAY, matrix = new Matrix4()) {
 		const graph = this.options.checkpoint()?.snapshot.graph,
 			viewport = this.options.viewport();
 		if (!graph || !viewport) return;
@@ -482,6 +617,7 @@ export class ModelingController {
 			if (selected.type === 'edge')
 				positions.push(...selected.start.map((v, i) => v + delta[i]!), ...selected.end.map((v, i) => v + delta[i]!));
 		const group = new Group();
+		for (let i = 0; i < positions.length; i += 3) positions.splice(i, 3, ...new Vector3(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(matrix).toArray());
 		if (positions.length) {
 			const geometry = new BufferGeometry();
 			geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));

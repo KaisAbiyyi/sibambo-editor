@@ -28,6 +28,17 @@ export type ModelAction =
 	| { type: 'transform'; selection: readonly ModelSelection[]; delta: AuthoringPoint; copy: boolean; count: number; spacing: 'multiply' | 'divide'; radial: { axis: 'x' | 'y' | 'z'; pivot: AuthoringPoint; angleDegrees: number } | null }
 	| { type: 'unique' | 'explode'; instanceId: string }
 	| { type: 'offset'; faceId: string; distance: number }
+	| { type: 'scale'; selection: readonly ModelSelection[]; factors: AuthoringPoint; pivot: AuthoringPoint; copy: boolean }
+	| { type: 'curve'; curveKind: 'circle' | 'polygon' | 'arc'; center: AuthoringPoint; first: AuthoringPoint; normal: AuthoringPoint; segments: number; sweepDegrees: number }
+	| { type: 'follow-me'; faceId: string; edges: readonly { start: AuthoringPoint; end: AuthoringPoint }[] }
+	| { type: 'tag-create'; name: string }
+	| { type: 'tag-visibility'; tagId: string; visible: boolean }
+	| { type: 'tag-assign'; instanceIds: readonly string[]; tagId: string | null }
+	| { type: 'entity-info'; instanceId: string; name: string; visible: boolean }
+	| { type: 'asset-create'; instanceId: string; name: string }
+	| { type: 'asset-insert'; assetId: string; point: AuthoringPoint }
+	| { type: 'asset-delete'; assetId: string }
+	| { type: 'paint'; selection: readonly ModelSelection[]; name: string; rgba: readonly [number,number,number,number]; opacityU16: number; side: 'front' | 'back' | 'both' }
 	| { type: 'guide'; start: AuthoringPoint; end: AuthoringPoint; guideKind: 'line' | 'point' }
 	| { type: 'clear-guides' };
 export type AuthoringCommand = FlatAuthoringCommand | { kind: 'MODEL_EDIT'; path: readonly string[]; action: ModelAction };
@@ -226,6 +237,18 @@ function isModelAction(value: unknown): value is ModelAction {
 	if (value.type === 'erase') return hasExactKeys(value, ['type','selection']) && selection(value.selection);
 	if (value.type === 'unique' || value.type === 'explode') return hasExactKeys(value,['type','instanceId']) && typeof value.instanceId === 'string' && value.instanceId.length > 0;
 	if (value.type === 'offset') return hasExactKeys(value,['type','faceId','distance']) && typeof value.faceId === 'string' && typeof value.distance === 'number' && Number.isFinite(value.distance);
+	if (value.type === 'scale') return hasExactKeys(value,['type','selection','factors','pivot','copy']) && selection(value.selection) && isPoint(value.factors) && isPoint(value.pivot) && typeof value.copy === 'boolean';
+	if (value.type === 'curve') return hasExactKeys(value,['type','curveKind','center','first','normal','segments','sweepDegrees']) && ['circle','polygon','arc'].includes(String(value.curveKind)) && isPoint(value.center) && isPoint(value.first) && isPoint(value.normal) && Number.isInteger(value.segments) && Number(value.segments)>=3 && Number(value.segments)<=256 && typeof value.sweepDegrees==='number' && Number.isFinite(value.sweepDegrees);
+	if (value.type === 'follow-me') return hasExactKeys(value,['type','faceId','edges']) && typeof value.faceId==='string' && Array.isArray(value.edges) && value.edges.length>0 && value.edges.length<=256 && value.edges.every(e=>isRecord(e)&&hasExactKeys(e,['start','end'])&&isPoint(e.start)&&isPoint(e.end));
+	const name=(v:unknown)=>typeof v==='string'&&v.trim().length>0&&v.length<=128;
+	if(value.type==='tag-create')return hasExactKeys(value,['type','name'])&&name(value.name);
+	if(value.type==='tag-visibility')return hasExactKeys(value,['type','tagId','visible'])&&typeof value.tagId==='string'&&typeof value.visible==='boolean';
+	if(value.type==='tag-assign')return hasExactKeys(value,['type','instanceIds','tagId'])&&Array.isArray(value.instanceIds)&&value.instanceIds.length>0&&value.instanceIds.length<=4096&&value.instanceIds.every(id=>typeof id==='string')&&(value.tagId===null||typeof value.tagId==='string');
+	if(value.type==='entity-info')return hasExactKeys(value,['type','instanceId','name','visible'])&&typeof value.instanceId==='string'&&name(value.name)&&typeof value.visible==='boolean';
+	if(value.type==='asset-create')return hasExactKeys(value,['type','instanceId','name'])&&typeof value.instanceId==='string'&&name(value.name);
+	if(value.type==='asset-insert')return hasExactKeys(value,['type','assetId','point'])&&typeof value.assetId==='string'&&isPoint(value.point);
+	if(value.type==='asset-delete')return hasExactKeys(value,['type','assetId'])&&typeof value.assetId==='string';
+	if(value.type==='paint')return hasExactKeys(value,['type','selection','name','rgba','opacityU16','side'])&&selection(value.selection)&&name(value.name)&&Array.isArray(value.rgba)&&value.rgba.length===4&&value.rgba.every(v=>Number.isInteger(v)&&v>=0&&v<=255)&&Number.isInteger(value.opacityU16)&&Number(value.opacityU16)>=0&&Number(value.opacityU16)<=65535&&['front','back','both'].includes(String(value.side));
 	if (value.type === 'guide') return hasExactKeys(value,['type','start','end','guideKind']) && isPoint(value.start) && isPoint(value.end) && ['line','point'].includes(String(value.guideKind));
 	if (value.type === 'clear-guides') return hasExactKeys(value,['type']);
 	if (value.type === 'transform') {

@@ -121,6 +121,12 @@ export function isLegacyMaterial(graph: BomcGraph, material: SolidMaterial): boo
 	return material.id === defaultMaterialId(graph) && sameMaterial(material, defaultMaterial(graph));
 }
 
+export function isAuthoredMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
+	return material.id.startsWith(graph.documentId+':material:op:') && material.name.trim().length>0 && material.name.length<=128
+		&& material.displayName===null && material.rgba.length===4 && material.rgba.every(v=>Number.isInteger(v)&&v>=0&&v<=255)
+		&& Number.isInteger(material.opacityU16)&&material.opacityU16>=0&&material.opacityU16<=65535;
+}
+
 function currentNeutralMaterial(graph: BomcGraph): SolidMaterial | null {
 	return graph.materials.find((material) => isNeutralMaterial(graph, material)) ?? null;
 }
@@ -164,9 +170,9 @@ function validateFlatRootIdentity(graph: BomcGraph): { definitionIndex: number; 
 function validateRootForTopologyEditing(graph: BomcGraph): { definitionIndex: number; mesh: Mesh | null } {
 	const root = validateFlatRootIdentity(graph);
 	if (!root.mesh) return root;
-	if (graph.materials.length < 1 || graph.materials.length > 2
-		|| graph.materials.some((material) => !isLegacyMaterial(graph, material) && !isNeutralMaterial(graph, material))) {
-		invalid('Authoring topology supports only the legacy and neutral application materials.');
+	if (graph.materials.length < 1 || graph.materials.length > 512
+		|| graph.materials.some((material) => !isLegacyMaterial(graph, material) && !isNeutralMaterial(graph, material) && !isAuthoredMaterial(graph,material))) {
+		invalid('Authoring topology supports only owned solid materials (maximum 512).');
 	}
 	if (new Set(graph.materials.map((material) => material.id)).size !== graph.materials.length) invalid('Authoring material IDs must be unique.');
 	return root;
@@ -1758,10 +1764,12 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		const capRing = positive ? [...moving] : [...moving].reverse();
 		const materialId = target.frontMaterialId;
 		if (!materialId) invalid('Push/Pull target has no supported front material.');
+		const explicitBack = graph.materials.find(material=>material.id===target.backMaterialId&&isAuthoredMaterial(graph,material));
+		const reversedFront = explicitBack?.id ?? materialId;
 		const replacements: Face[] = [
-			faceFromRing(expanded, target.id, baseRing, materialId, null, v2FaceLabel(target.id, 'push-pull', operationId), positive
+			faceFromRing(expanded, target.id, baseRing, positive?reversedFront:materialId, explicitBack?(positive?materialId:explicitBack.id):null, v2FaceLabel(target.id, 'push-pull', operationId), positive
 				? [-target.normal[0], -target.normal[1], -target.normal[2]] : target.normal),
-			faceFromRing(expanded, `${operationId}:cap`, capRing, materialId, null, v2FaceLabel(`${operationId}:cap`, 'push-pull', operationId), positive
+			faceFromRing(expanded, `${operationId}:cap`, capRing, positive?materialId:reversedFront, explicitBack?(positive?explicitBack.id:materialId):null, v2FaceLabel(`${operationId}:cap`, 'push-pull', operationId), positive
 				? target.normal : [-target.normal[0], -target.normal[1], -target.normal[2]])
 		];
 		for (let index = 0; index < target.outer.length; index += 1) {

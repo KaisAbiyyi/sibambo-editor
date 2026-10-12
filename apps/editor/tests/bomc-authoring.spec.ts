@@ -6,6 +6,10 @@ import type { BomcGraph } from '@sibambo/bomc-document';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
 import type { AuthoringCommand } from '../src/lib/authoring/protocol';
 import { modelOccurrences, transformPoint, contextGraph, modelMetadata } from '../src/lib/authoring/model';
+import { organization } from '../src/lib/authoring/organization';
+import { BomcDocument } from '@sibambo/bomc-document/document';
+import { BomcWriter } from '@sibambo/bomc-document/writer';
+import { buildModelEdit } from '../src/lib/authoring/model';
 import { cameraPresetPose, nearestGroundBoundsAnchor, orbitCameraDrag, uprightCameraUp } from '../../../packages/viewport/src/camera-navigation';
 import { SIBAMBO_CAMERA_DEFAULTS } from '../../../packages/viewport/src/renderer-defaults';
 import { verifyDownloadedAuthoringBomc, type AuthoringInteropReport } from '../../../tooling/testing/authoring-interop';
@@ -200,7 +204,8 @@ async function authoringCommands(page: Page): Promise<AuthoringCommand[]> {
 		const observation = window.__editorAuthoringWorkerProbe as AuthoringWorkerProbe;
 		return observation.workers.flatMap((worker) => worker.requests)
 			.filter((request) => request.protocolVersion === 'sibambo-editor-authoring-1' && request.type === 'COMMAND')
-			.map((request) => request.data as AuthoringCommand);
+			.map((request) => request.data as AuthoringCommand)
+			.map(command=>command.kind==='MODEL_EDIT'&&command.action.type==='raw'?command.action.command:command);
 	});
 }
 
@@ -487,6 +492,60 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await installAuthoringWorkerProbe(page);
 		await page.goto('/?renderer=webgl2');
 		await expect(page.locator('main[data-app="editor"]')).toHaveAttribute('data-editor-ready', 'true');
+	});
+	test('Rotate Scale Flip, solid materials, Tags Outliner and the asset library survive real download and reopen',async({page},testInfo)=>{
+		const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+		await createNew(page);await ensureTopView(page);await drawRectangle(page,.2,.3,.32,.34);await ensureTopView(page);
+		const panel=page.locator('.modeling-panel');await panel.locator(':scope > summary').click();
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByText('Groups & Components',{exact:true}).click();await panel.getByLabel('Container name').fill('Desk');await panel.getByRole('button',{name:'Make Component',exact:true}).click();
+		await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.instances.length).toBe(2);
+		await panel.getByText('Rotate, Scale & Flip',{exact:true}).click();await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByRole('button',{name:'Use Selection Center',exact:true}).click();
+		const before=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		await panel.getByLabel('Scale X',{exact:true}).fill('2');await panel.getByLabel('Scale Z',{exact:true}).fill('.5');await panel.getByRole('button',{name:'Preview Scale',exact:true}).click();expect((await currentCheckpoint(page)).snapshot.graph).toEqual(before);
+		await panel.getByRole('button',{name:'Apply Scale',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBeGreaterThan(2);
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByLabel('Rotate angle').fill('30');let revision=(await currentCheckpoint(page)).snapshot.revision;await panel.getByRole('button',{name:'Apply Rotate',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBe(revision+1);
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();revision=(await currentCheckpoint(page)).snapshot.revision;await panel.getByRole('button',{name:'Flip X',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBe(revision+1);
+		const transformed=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;expect(transformed.meshes).toEqual(before.meshes);
+		await panel.getByText('Materials & Sampling',{exact:true}).click();await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByLabel('Paint color').fill('#3278ba');await panel.getByLabel('Paint opacity').fill('65');revision=(await currentCheckpoint(page)).snapshot.revision;await panel.getByRole('button',{name:'Apply Material',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBe(revision+1);
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByRole('button',{name:'Sample Selected Material',exact:true}).click();await expect(panel.getByLabel('Paint color')).toHaveValue('#3278ba');
+		await panel.getByText('Tags, Outliner & Entity Info',{exact:true}).click();await panel.getByRole('button',{name:'Add Tag',exact:true}).click();await expect.poll(async()=>organization((await currentCheckpoint(page)).snapshot.graph).tags.length).toBe(1);
+		const tag=organization((await currentCheckpoint(page)).snapshot.graph).tags[0]!;await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByLabel('Assign tag',{exact:true}).selectOption(tag.id);await panel.getByRole('button',{name:'Assign Tag',exact:true}).click();await expect.poll(async()=>organization((await currentCheckpoint(page)).snapshot.graph).assignments.length).toBe(1);
+		await panel.getByLabel('Show tag Furniture').uncheck();await expect.poll(async()=>modelOccurrences((await currentCheckpoint(page)).snapshot.graph).length).toBe(1);await expect(panel.getByRole('treeitem')).toContainText('Desk');await panel.getByLabel('Show tag Furniture').check();await expect.poll(async()=>modelOccurrences((await currentCheckpoint(page)).snapshot.graph).length).toBe(2);
+		await panel.getByRole('treeitem').click();await panel.getByRole('button',{name:'Read Entity Info',exact:true}).click();await panel.getByLabel('Entity name').fill('Desk north');revision=(await currentCheckpoint(page)).snapshot.revision;await panel.getByRole('button',{name:'Apply Entity Info',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBe(revision+1);
+		await panel.getByText('Document Asset Library',{exact:true}).click();await panel.getByRole('treeitem').click();await panel.getByLabel('Asset name').fill('Desk module');await panel.getByRole('button',{name:'Add Selection to Library',exact:true}).click();await expect.poll(async()=>organization((await currentCheckpoint(page)).snapshot.graph).assets.length).toBe(1);
+		await expect(panel.getByText(/faces ·.*vertices ·/)).toBeVisible();await panel.getByLabel('Asset insert X').fill('8m');await panel.getByLabel('Insert asset Desk module').click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.instances.length).toBe(3);
+		const final=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;expect(new Set(final.instances.filter(i=>i.kind==='component').map(i=>i.definitionId)).size).toBe(1);
+		await panel.locator(':scope > summary').click();await ensureTopView(page);await page.locator('.viewport canvas').screenshot({path:testInfo.outputPath('transforms-material-tags-library.png')});
+		const saved=await saveBomc(page,testInfo.outputPath('modeling-next.bomc')),independent=await readWebBomc(new Uint8Array(saved.bytes));try{expect(independent.snapshot().graph).toEqual(final);}finally{independent.dispose();}
+		await openFileMenu(page);await page.getByRole('button',{name:'Close Model',exact:true}).click();await uploadBytes(page,saved.bytes,'modeling-next-reopen.bomc');await expect(page.getByText('Writable BOMC',{exact:true}).first()).toBeVisible();expect((await currentCheckpoint(page)).snapshot.graph).toEqual(final);expect(errors).toEqual([]);
+	});
+
+	test('interactive Inset previews without mutation, commits a border, then Push/Pull edits its inner face',async({page},testInfo)=>{
+		await createNew(page);await ensureTopView(page);await drawRectangle(page,.2,.3,.32,.34);await ensureTopView(page);
+		const graph=(await currentCheckpoint(page)).snapshot.graph as BomcGraph,mesh=graph.meshes[0]!,face=mesh.faces[0]!;
+		const point=(i:number)=>new Vector3(...mesh.positions.slice(i*3,i*3+3) as [number,number,number]),center=face.outer.reduce((v,i)=>v.add(point(i)),new Vector3()).multiplyScalar(1/face.outer.length),edge=point(face.outer[0]!).lerp(point(face.outer[1]!),.5),start=edge.clone().lerp(center,.15),end=edge.clone().lerp(center,.5);
+		const a=await projectModelPoint(page,graph,start.toArray() as [number,number,number]),b=await projectModelPoint(page,graph,end.toArray() as [number,number,number]);
+		const panel=page.locator('.modeling-panel');await panel.locator(':scope > summary').click();await panel.getByRole('button',{name:'Inset / Offset',exact:true}).click();await panel.locator(':scope > summary').click();
+		await page.mouse.click(a.x,a.y);await page.mouse.move(b.x,b.y);expect((await currentCheckpoint(page)).snapshot.graph).toEqual(graph);await page.mouse.click(b.x,b.y);await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.meshes[0]!.faces.length).toBe(2);
+		const after=(await currentCheckpoint(page)).snapshot.graph as BomcGraph,inner=after.meshes[0]!.faces.find(f=>f.holes.length===0)!;await pushPullProjectedFace(page,after,inner.id,.3);expect((await currentCheckpoint(page)).snapshot.graph.meshes[0]!.faces.length).toBeGreaterThan(2);
+		const final=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;const saved=await saveBomc(page,testInfo.outputPath('interactive-inset.bomc')),independent=await readWebBomc(new Uint8Array(saved.bytes));try{expect(independent.snapshot().graph).toEqual(final);}finally{independent.dispose();}
+	});
+
+	test('Circle and Arc use real center/radius clicks and Follow Me consumes a real selected path',async({page},testInfo)=>{
+		await createNew(page);await ensureTopView(page);const panel=page.locator('.modeling-panel');await panel.locator(':scope > summary').click();await panel.getByText('Circle, Arc, Polygon & Follow Me',{exact:true}).click();await panel.getByLabel('Curve segments').fill('12');await panel.getByRole('button',{name:'Circle',exact:true}).click();await panel.locator(':scope > summary').click();
+		const box=(await page.locator('.viewport canvas').boundingBox())!;await page.mouse.click(box.x+box.width*.3,box.y+box.height*.5);await page.mouse.move(box.x+box.width*.38,box.y+box.height*.5);expect((await currentCheckpoint(page)).snapshot.graph.meshes).toHaveLength(0);await page.mouse.click(box.x+box.width*.38,box.y+box.height*.5);await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.meshes[0]?.faces[0]?.outer.length).toBe(12);
+		await page.mouse.click(box.x+box.width*.8,box.y+box.height*.8);await panel.locator(':scope > summary').click();
+		const panelBox=(await panel.boundingBox())!;await page.mouse.move(panelBox.x+panelBox.width/2,panelBox.y+panelBox.height/2);await page.mouse.wheel(0,500);await panel.getByLabel('Curve radius').fill('250mm');await panel.getByRole('button',{name:'Commit Radius',exact:true}).click();await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.meshes[0]!.faces.length).toBe(2);await expect(panel.locator('[role=status]')).toHaveCount(0);
+		await panel.getByRole('button',{name:'Arc',exact:true}).click();await panel.locator(':scope > summary').click();await page.mouse.click(box.x+box.width*.7,box.y+box.height*.5);await page.mouse.click(box.x+box.width*.76,box.y+box.height*.5);await page.mouse.click(box.x+box.width*.7,box.y+box.height*.6);await expect.poll(async()=>modelMetadata((await currentCheckpoint(page)).snapshot.graph).looseEdges.length).toBe(12);
+		const saved=await saveBomc(page,testInfo.outputPath('curves.bomc'));await openFileMenu(page);await page.getByRole('button',{name:'Close Model',exact:true}).click();
+		const fixture=BomcDocument.create({documentId:'7420c783-9aa5-4b1b-af99-72a16f789154',name:'Sweep fixture'});
+		let bytes:Uint8Array;try{fixture.transact(buildModelEdit(fixture.snapshot().graph,[],{type:'raw',command:{kind:'CREATE_FACE_LOOP',points:[[0,0,0],[2,0,0],[2,0,2],[0,0,2]],normal:[0,1,0]}},1).forward);fixture.transact(buildModelEdit(fixture.snapshot().graph,[],{type:'raw',command:{kind:'CREATE_FACE_LOOP',points:[[0,-.1,-.1],[0,.1,-.1],[0,.1,.1],[0,-.1,.1]],normal:[1,0,0]}},2).forward);const writer=new BomcWriter(fixture);try{bytes=(await writer.write()).bytes;}finally{writer.dispose();}}finally{fixture.dispose();}
+		await uploadBytes(page,bytes!,'sweep-fixture.bomc');await expect(page.getByText('Writable BOMC',{exact:true}).first()).toBeVisible();await ensureTopView(page);await page.getByRole('button',{name:'Select',exact:true}).first().click();
+		const sweepGraph=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		const e1=await projectModelPoint(page,sweepGraph,[1,0,0]),e2=await projectModelPoint(page,sweepGraph,[2,0,1]);await page.mouse.click(e1.x,e1.y);await page.keyboard.down('Shift');await page.mouse.click(e2.x,e2.y);await page.keyboard.up('Shift');
+		await panel.locator(':scope > summary').click();await panel.getByText('Circle, Arc, Polygon & Follow Me',{exact:true}).click();await panel.getByRole('button',{name:'Follow Me',exact:true}).click();await panel.locator(':scope > summary').click();
+		await ensureCameraView(page,'iso');const screen=await projectWorldPoint(page,sweepGraph,[0,.07,0],'iso');await page.mouse.click(screen.x,screen.y);await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.meshes[0]!.faces.length,{timeout:15000}).toBe(11);
+		const swept=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;const download=await saveBomc(page,testInfo.outputPath('follow-me.bomc')),reader=await readWebBomc(download.bytes);try{expect(reader.snapshot().graph).toEqual(swept);}finally{reader.dispose();}
 	});
 
 	test('Modeling controls group geometry, copy shared Components, edit a context with Offset and Push/Pull, then save/reopen guides',async({page},testInfo)=>{

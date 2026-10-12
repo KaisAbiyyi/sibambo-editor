@@ -4,6 +4,7 @@ import {
 	AuthoringGeometryError,
 	isNeutralMaterial,
 	isLegacyMaterial,
+	isAuthoredMaterial,
 	buildRectangleEdit,
 	buildPlanarRectangleEdit,
 	buildFaceLoopEdit,
@@ -17,6 +18,9 @@ import {
 import { preparePolygon } from './polygon.js';
 import type { AuthoringPoint, ModelAction, ModelSelection } from './protocol.js';
 import { constructionGuides } from './construction-guides.js';
+import { assertAffine, meshThrough, normalThrough } from './affine.js';
+import { curvePoints, orderedPath, sweepProfile } from './curves.js';
+import { organization, instanceVisible, structuralDefinitions, validateOrganization, type ModelOrganization } from './organization.js';
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const SCHEMA = 'sibambo-editor-model-v1';
@@ -25,6 +29,7 @@ export type ModelMetadata = {
 	schema: typeof SCHEMA;
 	guides: (Primitive & { kind: 'line' | 'point' })[];
 	looseEdges: Primitive[];
+	organization?: ModelOrganization;
 };
 type MutableGraph = Omit<BomcGraph, 'materials' | 'definitions' | 'meshes' | 'instances'> & {
 	materials: BomcGraph['materials'][number][];
@@ -64,9 +69,10 @@ export function modelMetadata(graph: BomcGraph): ModelMetadata {
 		metadata.schema !== SCHEMA ||
 		!Array.isArray(metadata.guides) ||
 		!Array.isArray(metadata.looseEdges) ||
-		Object.keys(metadata).sort().join(',') !== 'guides,looseEdges,schema'
+		!['guides,looseEdges,schema','guides,looseEdges,organization,schema'].includes(Object.keys(metadata).sort().join(','))
 	)
 		return fail('Unsupported authoring metadata schema.');
+	if(metadata.organization!==undefined)validateOrganization(metadata.organization,graph);
 	const ids = new Set<string>();
 	for (const item of [...metadata.guides, ...metadata.looseEdges]) {
 		if (
@@ -113,13 +119,7 @@ export function definitionGraph(graph: BomcGraph, definitionId: string, world?: 
 			? { ...source, id: graph.documentId + ':mesh:root', definitionId: rootDefinitionId }
 			: null;
 	if (mesh && world) {
-		const positions: number[] = [];
-		for (let i = 0; i < mesh.positions.length / 3; i++) positions.push(...transformPoint(point(mesh, i), world));
-		mesh = {
-			...mesh,
-			positions,
-			faces: mesh.faces.map((f) => ({ ...f, normal: toPoint(new Vector3(...f.normal).transformDirection(world)) })),
-		};
+		mesh = meshThrough(mesh, world);
 	}
 	return {
 		...graph,
@@ -166,24 +166,26 @@ export function contextGraph(graph: BomcGraph, path: readonly string[], world = 
 	);
 	return flat;
 }
-export function modelOccurrences(graph: BomcGraph): { definitionId: string; path: string[]; matrix: Matrix4 }[] {
-	const output: { definitionId: string; path: string[]; matrix: Matrix4 }[] = [];
-	const visit = (definitionId: string, path: string[], matrix: Matrix4, ancestors: Set<string>) => {
+export function modelOccurrences(graph: BomcGraph, includeHidden = false): { definitionId: string; path: string[]; matrix: Matrix4; materialId: string | null }[] {
+	const org=organization(graph);
+	const output: { definitionId: string; path: string[]; matrix: Matrix4; materialId: string | null }[] = [];
+	const visit = (definitionId: string, path: string[], matrix: Matrix4, ancestors: Set<string>, materialId: string | null) => {
 		if (output.length >= 10000 || path.length > 32 || ancestors.has(definitionId))
 			fail('Cyclic or excessive authoring hierarchy.');
-		output.push({ definitionId, path, matrix });
+		output.push({ definitionId, path, matrix, materialId });
 		const next = new Set(ancestors).add(definitionId);
 		for (const instance of graph.instances
-			.filter((i) => i.ownerDefinitionId === definitionId && i.visible)
+			.filter((i) => i.ownerDefinitionId === definitionId && (includeHidden || instanceVisible(graph,i.id,org)))
 			.sort((a, b) => cmp(a.id, b.id)))
 			visit(
 				instance.definitionId,
 				[...path, instance.id],
 				matrix.clone().multiply(new Matrix4().fromArray(instance.matrix)),
 				next,
+				instance.materialId ?? materialId,
 			);
 	};
-	visit(graph.rootDefinitionId, [], new Matrix4(), new Set());
+	visit(graph.rootDefinitionId, [], new Matrix4(), new Set(), null);
 	return output;
 }
 export function validateAuthoringDocument(graph: BomcGraph): ReturnType<typeof validateEditableSubset> {
@@ -207,11 +209,11 @@ export function validateAuthoringDocument(graph: BomcGraph): ReturnType<typeof v
 			fail('Unsupported authoring root.');
 		modelMetadata(graph);
 		if (
-			graph.materials.length > 2 ||
-			graph.materials.some((material) => !isNeutralMaterial(graph, material) && !isLegacyMaterial(graph, material))
+			graph.materials.length > 512 ||
+			graph.materials.some((material) => !isNeutralMaterial(graph, material) && !isLegacyMaterial(graph, material) && !isAuthoredMaterial(graph,material))
 		)
 			fail('Unsupported authoring material.');
-		const reachable = new Set(modelOccurrences(graph).map((o) => o.definitionId));
+		const reachable = structuralDefinitions(graph);
 		if (reachable.size !== graph.definitions.length) fail('Unreachable definitions cannot be edited.');
 		for (const instance of graph.instances.filter((i) => i.kind !== 'root')) {
 			let label: unknown;
@@ -227,8 +229,8 @@ export function validateAuthoringDocument(graph: BomcGraph): ReturnType<typeof v
 				!Number.isSafeInteger(label[1]) ||
 				label[1] < 1 ||
 				!instance.id.startsWith(graph.documentId + ':instance:op:') ||
-				instance.materialId !== null ||
-				!instance.visible ||
+				(instance.materialId !== null && !graph.materials.some(m=>m.id===instance.materialId)) ||
+				typeof instance.visible !== 'boolean' ||
 				instance.roleCode !== 0 ||
 				(instance.kind !== 'group' && instance.kind !== 'component') ||
 				graph.definitions.find((d) => d.id === instance.definitionId)?.kind !== instance.kind
@@ -241,15 +243,7 @@ export function validateAuthoringDocument(graph: BomcGraph): ReturnType<typeof v
 				instance.matrix[15] !== 1
 			)
 				fail('Projective container transforms are unsupported.');
-			const matrix = new Matrix4().fromArray(instance.matrix),
-				scale = new Vector3().setFromMatrixScale(matrix);
-			if (!scale.toArray().every((v) => Math.abs(v - 1) < 1e-8) || Math.abs(matrix.determinant() - 1) > 1e-8)
-				fail('Authoring containers require a rigid transform.');
-			const x = new Vector3().setFromMatrixColumn(matrix, 0),
-				y = new Vector3().setFromMatrixColumn(matrix, 1),
-				z = new Vector3().setFromMatrixColumn(matrix, 2);
-			if (Math.max(Math.abs(x.dot(y)), Math.abs(y.dot(z)), Math.abs(x.dot(z))) > 1e-8)
-				fail('Skewed container transforms are unsupported.');
+			assertAffine(instance.matrix);
 		}
 		const entities = [];
 		for (const definition of graph.definitions) {
@@ -265,13 +259,16 @@ export function validateAuthoringDocument(graph: BomcGraph): ReturnType<typeof v
 export function nextModelSequence(graph: BomcGraph): number {
 	let max = 0;
 	const metadata = modelMetadata(graph);
+	const org=organization(graph);
 	for (const id of [
 		...graph.definitions,
 		...graph.meshes,
 		...graph.instances,
+		...graph.materials,
 		...graph.meshes.flatMap((m) => m.faces),
 		...metadata.guides,
 		...metadata.looseEdges,
+		...org.tags,...org.assets,
 	].map((x) => x.id)) {
 		for (const match of id.matchAll(/:(?:rectangle|face|op):(\d+)/g)) max = Math.max(max, Number(match[1]));
 	}
@@ -321,7 +318,7 @@ export function meshEdges(mesh: Mesh): { start: AuthoringPoint; end: AuthoringPo
 			}
 	return [...map.values()];
 }
-function offsetLoop(mesh: Mesh, ring: readonly number[], normal: AuthoringPoint, distance: number): AuthoringPoint[] {
+export function offsetLoop(mesh: Mesh, ring: readonly number[], normal: AuthoringPoint, distance: number): AuthoringPoint[] {
 	const points = ring.map((i) => new Vector3(...point(mesh, i))),
 		n = new Vector3(...normal),
 		result: AuthoringPoint[] = [];
@@ -364,11 +361,16 @@ export function buildModelEdit(
 	action: ModelAction,
 	sequence: number,
 ): GeometryEdit & { entityId: string } {
+	if (action.type === 'curve' && action.curveKind !== 'arc') {
+		if (action.sweepDegrees !== 360) fail('Circle and Polygon use a closed 360-degree perimeter.');
+		return buildModelEdit(graph, path, { type: 'raw', command: { kind: 'CREATE_FACE_LOOP', points: curvePoints(action.center, action.first, action.normal, action.segments), normal: action.normal } }, sequence);
+	}
 	const validation = validateAuthoringDocument(graph);
 	if (!validation.editable) fail(validation.reason);
 	if (!Number.isSafeInteger(sequence) || sequence < 1) fail('Invalid operation sequence.');
 	const next = structuredClone(graph) as MutableGraph,
 		metadata = modelMetadata(graph);
+	const org=organization(graph);
 	const context = contextTransform(graph, path),
 		owner = context.definitionId,
 		world = context.matrix,
@@ -455,7 +457,8 @@ export function buildModelEdit(
 			});
 		for (const child of [...next.instances.filter((i) => i.ownerDefinitionId === definitionId)]) {
 			const childDefinition = child.kind === 'group' ? cloneDefinition(child.definitionId) : child.definitionId;
-			next.instances.push({ ...child, id: alloc('instance'), ownerDefinitionId: id, definitionId: childDefinition });
+			const childId=alloc('instance');next.instances.push({ ...child, id: childId, ownerDefinitionId: id, definitionId: childDefinition });
+			const assignment=org.assignments.find(a=>a.instanceId===child.id);if(assignment)org.assignments.push({...assignment,instanceId:childId});
 		}
 		for (const e of [...metadata.looseEdges.filter((e) => e.ownerDefinitionId === definitionId)])
 			metadata.looseEdges.push({ ...e, id: alloc('edge'), ownerDefinitionId: id });
@@ -464,7 +467,7 @@ export function buildModelEdit(
 		return id;
 	};
 	if (action.type === 'raw') {
-		const flat = contextGraph(graph, path),
+		const flat = contextGraph(graph, path, true),
 			command = action.command;
 		let edit: GeometryEdit;
 		if (command.kind === 'CREATE_RECTANGLE') {
@@ -474,22 +477,22 @@ export function buildModelEdit(
 					? buildPlanarRectangleEdit(
 							flat,
 							entityId,
-							command.points.map((p) => transformPoint(p, inverseWorld)),
-							toPoint(new Vector3(...command.normal).transformDirection(inverseWorld)),
+							command.points,
+							command.normal,
 						)
 					: buildRectangleEdit(
 							flat,
 							entityId,
-							transformPoint(command.first, inverseWorld),
-							transformPoint(command.opposite, inverseWorld),
+							command.first,
+							command.opposite,
 						);
 		} else if (command.kind === 'CREATE_FACE_LOOP') {
 			entityId = graph.documentId + ':face:' + sequence;
 			edit = buildFaceLoopEdit(
 				flat,
 				entityId,
-				command.points.map((p) => transformPoint(p, inverseWorld)),
-				toPoint(new Vector3(...command.normal).transformDirection(inverseWorld)),
+				command.points,
+				command.normal,
 				'line',
 			);
 		} else if (command.kind === 'PUSH_PULL_FACE') {
@@ -511,10 +514,11 @@ export function buildModelEdit(
 				next.materials = next.materials.filter((m) => m.id !== material.id);
 				next.materials.push(material);
 			}
-			if (item.type === 'put-mesh')
+			if (item.type === 'put-mesh') {
+				const localMesh = meshThrough(item.value, inverseWorld);
 				setMesh(owner, {
-					...item.value,
-					faces: item.value.faces.map((face) => ({
+					...localMesh,
+					faces: localMesh.faces.map((face) => ({
 						...face,
 						frontMaterialId:
 							face.frontMaterialId === null
@@ -524,6 +528,7 @@ export function buildModelEdit(
 							face.backMaterialId === null ? null : (materialRedirect.get(face.backMaterialId) ?? face.backMaterialId),
 					})),
 				});
+			}
 		}
 	} else if (action.type === 'group') {
 		if (!selectedFaces.size && !selectedInstances.size && !selectedEdges.length)
@@ -585,7 +590,7 @@ export function buildModelEdit(
 						expanded,
 						next.documentId + ':face:' + sequence + ':explode:' + ++counter,
 						face.outer.map((v) => v + start),
-						toPoint(new Vector3(...face.normal).transformDirection(matrix)),
+						normalThrough(face.normal, matrix),
 						face.holes.map((r) => r.map((v) => v + start)),
 						face,
 					),
@@ -704,11 +709,17 @@ export function buildModelEdit(
 			(e) => e.ownerDefinitionId !== owner || !selectedEdges.some((s) => edgeMatches(s.start, s.end, e.start, e.end)),
 		);
 		next.instances = next.instances.filter((i) => !selectedInstances.has(i.id));
-	} else if (action.type === 'transform') {
-		if (action.count < 1 || action.count > 100 || !Number.isInteger(action.count)) fail('Array count must be 1–100.');
-		if (!action.delta.every(Number.isFinite) || (action.radial && !Number.isFinite(action.radial.angleDegrees)))
+	} else if (action.type === 'transform' || action.type === 'scale') {
+		const scaling = action.type === 'scale' ? action : null;
+		const count = action.type === 'transform' ? action.count : 1;
+		const delta = action.type === 'transform' ? action.delta : [0, 0, 0] as const;
+		const radial = action.type === 'transform' ? action.radial : null;
+		if (count < 1 || count > 100 || !Number.isInteger(count)) fail('Array count must be 1–100.');
+		if (scaling && (!scaling.factors.every(v => Number.isFinite(v) && Math.abs(v) >= 1e-6 && Math.abs(v) <= 1e6) || !scaling.pivot.every(Number.isFinite)))
+			fail('Scale factors must be finite and between 0.000001 and 1000000 in magnitude.');
+		if (!delta.every(Number.isFinite) || (radial && !Number.isFinite(radial.angleDegrees)))
 			fail('Move/array input must be finite.');
-		if (!action.radial && new Vector3(...action.delta).length() < 1e-6)
+		if (!scaling && !radial && new Vector3(...delta).length() < 1e-6)
 			fail('Move distance must be at least 0.000001 m.');
 		const sourceMesh = ownerMesh(),
 			sourceInstances = next.instances.filter((i) => selectedInstances.has(i.id));
@@ -729,18 +740,23 @@ export function buildModelEdit(
 		const originalPositions = [...(sourceMesh?.positions ?? [])];
 		const positions = [...originalPositions],
 			faces = [...(sourceMesh?.faces ?? [])];
-		const iterations = action.copy ? action.count : 1;
+		const iterations = action.copy ? count : 1;
 		for (let iteration = 1; iteration <= iterations; iteration++) {
-			const factor = action.spacing === 'divide' ? iteration / action.count : iteration;
+			const factor = action.type === 'transform' && action.spacing === 'divide' ? iteration / count : iteration;
 			const global = new Matrix4().makeTranslation(
-				...(action.delta.map((v) => v * factor) as [number, number, number]),
+				...(delta.map((v) => v * factor) as [number, number, number]),
 			);
-			if (action.radial) {
-				const axis = { x: new Vector3(1, 0, 0), y: new Vector3(0, 1, 0), z: new Vector3(0, 0, 1) }[action.radial.axis],
-					p = action.radial.pivot;
+			if (scaling) {
+				const p = scaling.pivot;
+				global.multiply(new Matrix4().makeTranslation(...p)).multiply(new Matrix4().makeScale(...scaling.factors))
+					.multiply(new Matrix4().makeTranslation(-p[0], -p[1], -p[2]));
+			}
+			if (radial) {
+				const axis = { x: new Vector3(1, 0, 0), y: new Vector3(0, 1, 0), z: new Vector3(0, 0, 1) }[radial.axis],
+					p = radial.pivot;
 				global
 					.multiply(new Matrix4().makeTranslation(...p))
-					.multiply(new Matrix4().makeRotationAxis(axis, ((action.radial.angleDegrees * Math.PI) / 180) * factor))
+					.multiply(new Matrix4().makeRotationAxis(axis, ((radial.angleDegrees * Math.PI) / 180) * factor))
 					.multiply(new Matrix4().makeTranslation(-p[0], -p[1], -p[2]));
 			}
 			const local = inverseWorld.clone().multiply(global).multiply(world);
@@ -750,6 +766,7 @@ export function buildModelEdit(
 					const definitionId = source.kind === 'group' ? cloneDefinition(source.definitionId) : source.definitionId;
 					const clone = { ...source, id: alloc('instance'), definitionId, matrix };
 					next.instances.push(clone);
+					const assignment=org.assignments.find(a=>a.instanceId===source.id);if(assignment)org.assignments.push({...assignment,instanceId:clone.id});
 					entityId = clone.id;
 				} else {
 					source.matrix = matrix;
@@ -771,7 +788,7 @@ export function buildModelEdit(
 								expanded,
 								id,
 								face.outer.map((v) => remap.get(v)!),
-								toPoint(new Vector3(...face.normal).transformDirection(local)),
+								normalThrough(face.normal, local),
 								face.holes.map((r) => r.map((v) => remap.get(v)!)),
 								face,
 							),
@@ -785,7 +802,8 @@ export function buildModelEdit(
 					for (let i = 0; i < faces.length; i++) {
 						const face = faces[i]!;
 						if ([face.outer, ...face.holes].flat().some((v) => rawVertices.has(v))) {
-							const normal = preparePolygon(face.outer.map((v) => point(expanded, v))).normal;
+							const fullySelected = [face.outer, ...face.holes].flat().every(v => rawVertices.has(v));
+							const normal = fullySelected ? normalThrough(face.normal, local) : preparePolygon(face.outer.map((v) => point(expanded, v))).normal;
 							faces[i] = makeFace(expanded, face.id, face.outer, normal, face.holes, face);
 						}
 					}
@@ -817,7 +835,7 @@ export function buildModelEdit(
 	} else if (action.type === 'offset') {
 		if (!Number.isFinite(action.distance) || Math.abs(action.distance) < 1e-6)
 			fail('Offset must be finite and at least 0.000001 m.');
-		const mesh = ownerMesh(),
+		const localMesh = ownerMesh(), mesh = localMesh ? meshThrough(localMesh, world) : undefined,
 			face = mesh?.faces.find((f) => f.id === action.faceId);
 		if (!mesh || !face) fail('Select an active-context face for Offset.');
 		const positions = [...mesh.positions],
@@ -880,7 +898,50 @@ export function buildModelEdit(
 				);
 			});
 		}
-		setMesh(owner, expanded);
+		setMesh(owner, meshThrough(expanded, inverseWorld));
+	} else if(action.type==='paint') {
+		if(!selectedFaces.size&&!selectedInstances.size)fail('Paint needs active-context faces or containers.');
+		const material={id:alloc('material'),name:action.name.trim(),displayName:null,rgba:action.rgba,opacityU16:action.opacityU16};
+		if(!isAuthoredMaterial(next,material))fail('Invalid solid material.');next.materials.push(material);
+		const mesh=ownerMesh();if(mesh)setMesh(owner,{...mesh,faces:mesh.faces.map(f=>selectedFaces.has(f.id)?{...f,frontMaterialId:action.side==='back'?f.frontMaterialId:material.id,backMaterialId:action.side==='front'?f.backMaterialId:material.id}:f)});
+		for(const instance of next.instances)if(selectedInstances.has(instance.id))instance.materialId=material.id;
+	} else if(action.type==='tag-create') {
+		if(!action.name.trim()||action.name.length>128||org.tags.some(t=>t.name.toLowerCase()===action.name.trim().toLowerCase()))fail('Tag name must be nonempty and unique.');
+		org.tags.push({id:alloc('tag'),name:action.name.trim(),visible:true});metadata.organization=org;
+	} else if(action.type==='tag-visibility') {
+		const tag=org.tags.find(t=>t.id===action.tagId);if(!tag)fail('Unknown tag.');tag.visible=action.visible;metadata.organization=org;
+	} else if(action.type==='tag-assign') {
+		if(action.tagId!==null&&!org.tags.some(t=>t.id===action.tagId))fail('Unknown tag.');
+		for(const id of action.instanceIds){if(!next.instances.some(i=>i.id===id&&i.ownerDefinitionId===owner))fail('Tag assignment is outside the active context.');org.assignments=org.assignments.filter(a=>a.instanceId!==id);if(action.tagId)org.assignments.push({instanceId:id,tagId:action.tagId});}metadata.organization=org;
+	} else if(action.type==='entity-info') {
+		const instance=next.instances.find(i=>i.id===action.instanceId&&i.ownerDefinitionId===owner);if(!instance||!action.name.trim()||action.name.length>128)fail('Select an active-context container and enter its name.');instance.name=action.name.trim();instance.visible=action.visible;
+	} else if(action.type==='asset-create') {
+		const instance=next.instances.find(i=>i.id===action.instanceId&&i.ownerDefinitionId===owner);if(!instance||!action.name.trim()||action.name.length>128)fail('Select an active-context container to add to the library.');
+		const definitionId=instance.kind==='component'?instance.definitionId:cloneDefinition(instance.definitionId);
+		next.definitions.find(d=>d.id===definitionId)!.kind='component';
+		org.assets.push({id:alloc('asset'),name:action.name.trim(),definitionId});metadata.organization=org;
+	} else if(action.type==='asset-insert') {
+		const asset=org.assets.find(a=>a.id===action.assetId);if(!asset)fail('Unknown library asset.');
+		if(!action.point.every(Number.isFinite))fail('Asset position must be finite.');
+		entityId=alloc('instance');next.instances.push({id:entityId,name:asset.name,kind:'component',definitionId:asset.definitionId,ownerDefinitionId:owner,matrix:new Matrix4().makeTranslation(...transformPoint(action.point,inverseWorld)).toArray(),materialId:null,visible:true,roleCode:0,label:JSON.stringify(['sibambo-editor-container-v1',sequence])});
+	} else if(action.type==='asset-delete') {
+		if(!org.assets.some(a=>a.id===action.assetId))fail('Unknown library asset.');org.assets=org.assets.filter(a=>a.id!==action.assetId);metadata.organization=org;
+	} else if (action.type === 'curve') {
+		if (Math.abs(action.sweepDegrees) >= 360) fail('An open Arc must sweep less than 360 degrees. Use Circle for a closed loop.');
+		const points = curvePoints(action.center, action.first, action.normal, action.segments, action.sweepDegrees).map(p => transformPoint(p, inverseWorld));
+		for (let i = 0; i < points.length - 1; i++) metadata.looseEdges.push({ id: alloc('edge'), ownerDefinitionId: owner, start: points[i]!, end: points[i + 1]! });
+	} else if (action.type === 'follow-me') {
+		const source = ownerMesh(); if (!source) fail('Select a profile face.');
+		const mesh = meshThrough(source, world), profile = mesh.faces.find(f => f.id === action.faceId);
+		if (!profile) fail('Follow Me profile is outside the active context.');
+		const available = [...meshEdges(mesh), ...metadata.looseEdges.filter(e => e.ownerDefinitionId === owner).map(e => ({ start: transformPoint(e.start, world), end: transformPoint(e.end, world) }))];
+		if (!action.edges.every(e => available.some(a => edgeMatches(a.start, a.end, e.start, e.end)))) fail('Follow Me path includes an edge outside the active context.');
+		const center = profile.outer.reduce((v, i) => v.add(new Vector3(...point(mesh, i))), new Vector3()).multiplyScalar(1 / profile.outer.length);
+		const pathPoints = orderedPath(action.edges, toPoint(center));
+		const prefix = next.documentId + ':face:' + sequence + ':sweep';
+		const swept = sweepProfile(mesh, profile, pathPoints, prefix);
+		entityId = swept.faces.find(face=>face.id.startsWith(prefix+':'))!.id;
+		setMesh(owner, meshThrough(swept, inverseWorld));
 	} else if (action.type === 'guide') {
 		const start = transformPoint(action.start, inverseWorld),
 			end = transformPoint(action.end, inverseWorld);
@@ -904,6 +965,7 @@ export function buildModelEdit(
 		for (const child of next.instances.filter((i) => i.ownerDefinitionId === id)) collect(child.definitionId);
 	};
 	collect(next.rootDefinitionId);
+	for(const asset of org.assets)collect(asset.definitionId);
 	next.instances = next.instances.filter(
 		(i) => i.kind === 'root' || (i.ownerDefinitionId !== null && reachable.has(i.ownerDefinitionId)),
 	);
@@ -911,6 +973,7 @@ export function buildModelEdit(
 	next.meshes = next.meshes.filter((m) => reachable.has(m.definitionId));
 	metadata.guides = metadata.guides.filter((g) => reachable.has(g.ownerDefinitionId));
 	metadata.looseEdges = metadata.looseEdges.filter((g) => reachable.has(g.ownerDefinitionId));
+	if(metadata.organization){org.assignments=org.assignments.filter(a=>next.instances.some(i=>i.id===a.instanceId));metadata.organization=org;}
 	next.instances.find((i) => i.id === next.rootInstanceId)!.label = JSON.stringify(metadata);
 	for (const field of ['materials', 'definitions', 'meshes', 'instances'] as const)
 		next[field].sort((a, b) => cmp(a.id, b.id));

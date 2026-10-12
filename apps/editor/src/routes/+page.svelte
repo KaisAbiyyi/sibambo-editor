@@ -1091,7 +1091,7 @@
 		pointerGesture = null;
 	}
 	function handleViewportWheel(event: WheelEvent) {
-		if (!viewport || mode !== 'authoring') return;
+		if (!viewport || mode !== 'authoring' || event.target !== viewportHost?.querySelector('canvas')) return;
 		modeling.cancel();
 		authoringTools?.handleCameraChange();
 	}
@@ -1562,7 +1562,7 @@
 			<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onwheel={handleViewportWheel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace" tabindex="0">
 			<div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div>
 			{#if mode==='authoring'&&authoringCheckpoint}
-				<ModelingPanel controller={modeling} view={modelingState} disabled={!canAuthor()} onMode={setModelingMode} onError={message=>{editorNotice=message;}} onRectangle={(width,depth)=>authoringTools?.setRectangleDimensions(width,depth)}/>
+				<ModelingPanel controller={modeling} view={modelingState} graph={authoringCheckpoint?.snapshot.graph??null} disabled={!canAuthor()} onMode={setModelingMode} onError={message=>{editorNotice=message;}} onRectangle={(width,depth)=>authoringTools?.setRectangleDimensions(width,depth)}/>
 			{/if}
 			{#if !hasModel && !busy}
 				<div class="empty-workspace">

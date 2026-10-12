@@ -86,12 +86,16 @@ function materialForFace(face: Face, snapshot: BomcSnapshot, displayState: Displ
 	const material = snapshot.graph.materials.find((candidate) => candidate.id === face.frontMaterialId);
 	if (!material) throw new AuthoringSceneError(`Face ${face.id} references a missing front material.`);
 	const alpha = material.rgba[3] / 255 * material.opacityU16 / 65535;
+	const back = snapshot.graph.materials.find(candidate=>candidate.id===face.backMaterialId);
+	const defaultBack=!back||isNeutralMaterial(snapshot.graph,back);
+	const backColor=defaultBack?new Color('#9fb8c7'):new Color().setRGB(back.rgba[0]/255,back.rgba[1]/255,back.rgba[2]/255,SRGBColorSpace);
+	const backAlpha=back?back.rgba[3]/255*back.opacityU16/65535:1;
 	const original = new MeshStandardMaterial({
 		color: 0xffffff,
 		roughness: 0.88,
 		metalness: 0.02,
 		opacity: alpha,
-		transparent: alpha < 1,
+		transparent: alpha < 1 || backAlpha < 1,
 		side: doubleSided ? DoubleSide : FrontSide,
 		polygonOffset: true,
 		polygonOffsetFactor: 1,
@@ -102,18 +106,17 @@ function materialForFace(face: Face, snapshot: BomcSnapshot, displayState: Displ
 	manager.register(face.id, original, 'structure');
 	try {
 		const selected = manager.materialFor(face.id, displayState, false, false);
-		if (selected instanceof MeshStandardMaterial && isNeutralMaterial(snapshot.graph, material)
-			&& (face.backMaterialId === null || face.backMaterialId === material.id)) {
+		if (selected instanceof MeshStandardMaterial) {
 			// Render default backs blue-gray without changing canonical materials,
 			// adding duplicate meshes, or tinting explicitly painted legacy faces.
-			const backColor = new Color('#9fb8c7');
-			selected.userData.authoringBackFaceColor = '#9fb8c7';
+			if(defaultBack)selected.userData.authoringBackFaceColor = '#9fb8c7';
 			selected.onBeforeCompile = shader => {
 				shader.uniforms.authoringBackFaceColor = { value: backColor };
-				shader.fragmentShader = 'uniform vec3 authoringBackFaceColor;\n' + shader.fragmentShader.replace(
-					'#include <color_fragment>', '#include <color_fragment>\nif (!gl_FrontFacing) diffuseColor.rgb = authoringBackFaceColor;');
+				shader.uniforms.authoringBackFaceAlpha = { value: backAlpha };
+				shader.fragmentShader = 'uniform vec3 authoringBackFaceColor;\nuniform float authoringBackFaceAlpha;\n' + shader.fragmentShader.replace(
+					'#include <color_fragment>', '#include <color_fragment>\nif (!gl_FrontFacing) { diffuseColor.rgb = authoringBackFaceColor; diffuseColor.a = authoringBackFaceAlpha; }');
 			};
-			selected.customProgramCacheKey = () => 'editor-neutral-front-back-v1';
+			selected.customProgramCacheKey = () => 'editor-solid-front-back-v2';
 		}
 		manager.derivedMaterials.clear();
 		manager.originalMaterials.clear();
@@ -233,7 +236,11 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 	};
 	try {
 		for (const occurrence of modelOccurrences(snapshot.graph)) {
-			const flat = definitionGraph(snapshot.graph, occurrence.definitionId);
+			let flat = definitionGraph(snapshot.graph, occurrence.definitionId);
+			if(occurrence.materialId&&flat.meshes.length){
+				const unpainted=(id:string|null)=>id===null||flat.materials.some(m=>m.id===id&&isNeutralMaterial(flat,m));
+				flat={...flat,materials:[...flat.materials.filter(m=>m.id!==occurrence.materialId),snapshot.graph.materials.find(m=>m.id===occurrence.materialId)!],meshes:flat.meshes.map(mesh=>({...mesh,faces:mesh.faces.map(face=>({...face,frontMaterialId:unpainted(face.frontMaterialId)?occurrence.materialId:face.frontMaterialId,backMaterialId:unpainted(face.backMaterialId)?occurrence.materialId:face.backMaterialId}))}))};
+			}
 			const projected = projectFlatAuthoringScene({...snapshot,graph:flat},displayState);
 			projected.group.applyMatrix4(occurrence.matrix);
 			group.add(projected.group);
