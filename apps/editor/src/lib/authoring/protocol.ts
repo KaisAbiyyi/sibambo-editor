@@ -10,12 +10,27 @@ export const AUTHORING_PROTOCOL_VERSION = 'sibambo-editor-authoring-1' as const;
 
 export type AuthoringPoint = readonly [number, number, number];
 
-export type AuthoringCommand =
+export type FlatAuthoringCommand =
 	| { kind: 'CREATE_RECTANGLE'; first: AuthoringPoint; opposite: AuthoringPoint }
 	| { kind: 'CREATE_RECTANGLE'; points: readonly AuthoringPoint[]; normal: AuthoringPoint }
 	| { kind: 'CREATE_FACE_LOOP'; points: readonly AuthoringPoint[]; normal: AuthoringPoint }
 	| { kind: 'PUSH_PULL_FACE'; faceId: string; distance: number }
 	| { kind: 'EXTRUDE_RECTANGLE'; entityId: string; distance: number };
+
+export type ModelSelection =
+	| { type: 'face'; id: string }
+	| { type: 'instance'; id: string }
+	| { type: 'edge'; start: AuthoringPoint; end: AuthoringPoint };
+export type ModelAction =
+	| { type: 'raw'; command: FlatAuthoringCommand }
+	| { type: 'group'; selection: readonly ModelSelection[]; containerKind: 'group' | 'component'; name: string }
+	| { type: 'erase'; selection: readonly ModelSelection[] }
+	| { type: 'transform'; selection: readonly ModelSelection[]; delta: AuthoringPoint; copy: boolean; count: number; spacing: 'multiply' | 'divide'; radial: { axis: 'x' | 'y' | 'z'; pivot: AuthoringPoint; angleDegrees: number } | null }
+	| { type: 'unique' | 'explode'; instanceId: string }
+	| { type: 'offset'; faceId: string; distance: number }
+	| { type: 'guide'; start: AuthoringPoint; end: AuthoringPoint; guideKind: 'line' | 'point' }
+	| { type: 'clear-guides' };
+export type AuthoringCommand = FlatAuthoringCommand | { kind: 'MODEL_EDIT'; path: readonly string[]; action: ModelAction };
 
 export type AuthoringJournalEntry = {
 	forward: readonly DocumentEdit[];
@@ -200,7 +215,32 @@ function isPointLoop(value: unknown): value is readonly AuthoringPoint[] {
 	return Array.isArray(value) && value.length >= 3 && value.length <= 256 && value.every(isPoint);
 }
 
+function isModelAction(value: unknown): value is ModelAction {
+	if (!isRecord(value) || typeof value.type !== 'string') return false;
+	const selection = (items: unknown) => Array.isArray(items) && items.length > 0 && items.length <= 4096 && items.every(item =>
+		isRecord(item) && ((item.type === 'face' || item.type === 'instance')
+			? hasExactKeys(item, ['type','id']) && typeof item.id === 'string' && item.id.length > 0
+			: item.type === 'edge' && hasExactKeys(item, ['type','start','end']) && isPoint(item.start) && isPoint(item.end)));
+	if (value.type === 'raw') return hasExactKeys(value, ['type','command']) && isRecord(value.command) && value.command.kind !== 'MODEL_EDIT' && isAuthoringCommand(value.command);
+	if (value.type === 'group') return hasExactKeys(value, ['type','selection','containerKind','name']) && selection(value.selection) && ['group','component'].includes(String(value.containerKind)) && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 128;
+	if (value.type === 'erase') return hasExactKeys(value, ['type','selection']) && selection(value.selection);
+	if (value.type === 'unique' || value.type === 'explode') return hasExactKeys(value,['type','instanceId']) && typeof value.instanceId === 'string' && value.instanceId.length > 0;
+	if (value.type === 'offset') return hasExactKeys(value,['type','faceId','distance']) && typeof value.faceId === 'string' && typeof value.distance === 'number' && Number.isFinite(value.distance);
+	if (value.type === 'guide') return hasExactKeys(value,['type','start','end','guideKind']) && isPoint(value.start) && isPoint(value.end) && ['line','point'].includes(String(value.guideKind));
+	if (value.type === 'clear-guides') return hasExactKeys(value,['type']);
+	if (value.type === 'transform') {
+		const radial=value.radial;
+		return hasExactKeys(value,['type','selection','delta','copy','count','spacing','radial']) && selection(value.selection) && isPoint(value.delta) && typeof value.copy === 'boolean' && Number.isInteger(value.count) && Number(value.count)>=1 && Number(value.count)<=100 && ['multiply','divide'].includes(String(value.spacing))
+			&& (radial===null || isRecord(radial) && hasExactKeys(radial,['axis','pivot','angleDegrees']) && ['x','y','z'].includes(String(radial.axis)) && isPoint(radial.pivot) && typeof radial.angleDegrees==='number' && Number.isFinite(radial.angleDegrees));
+	}
+	return false;
+}
+
 export function isAuthoringCommand(value: unknown): value is AuthoringCommand {
+	if (isRecord(value) && value.kind === 'MODEL_EDIT') {
+		return hasExactKeys(value, ['kind', 'path', 'action']) && Array.isArray(value.path) && value.path.length <= 32
+			&& value.path.every(id => typeof id === 'string' && id.length > 0) && isModelAction(value.action);
+	}
 	if (!isRecord(value) || typeof value.kind !== 'string') return false;
 	if (value.kind === 'CREATE_RECTANGLE') {
 		if (hasExactKeys(value, ['kind', 'first', 'opposite'])) {

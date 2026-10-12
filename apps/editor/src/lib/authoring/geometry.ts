@@ -111,13 +111,13 @@ function neutralMaterial(graph: BomcGraph, useDefaultId = graph.materials.length
 	};
 }
 
-function isNeutralMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
+export function isNeutralMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
 	return (material.id === defaultMaterialId(graph) || material.id === neutralMaterialId(graph))
 		&& material.name === DEFAULT_AUTHORING_MATERIAL_NAME && material.displayName === null
 		&& sameTuple(material.rgba, NEUTRAL_RGBA) && material.opacityU16 === 65535;
 }
 
-function isLegacyMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
+export function isLegacyMaterial(graph: BomcGraph, material: SolidMaterial): boolean {
 	return material.id === defaultMaterialId(graph) && sameMaterial(material, defaultMaterial(graph));
 }
 
@@ -1511,7 +1511,13 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
-	if (target.holes.length > 0 && !incidentCounts.every((count) => count === 2)) {
+	// buildAuthoringTopology has already validated each three-face junction.
+	// A base ring can meet both upper and lower reveals. Moving that ring must
+	// move its hole vertices too, stretching both reveals while keeping caps fixed.
+	const supportedRevealRing = target.holes.length > 0
+		&& ringIncidentCounts[0]!.every((count) => count === 2)
+		&& ringIncidentCounts.slice(1).every((counts) => counts.every((count) => count === 2 || count === 3));
+	if (target.holes.length > 0 && !incidentCounts.every((count) => count === 2) && !supportedRevealRing) {
 		invalid('Push/Pull of a surrounding face requires either a closed manifold boundary or an open outer ring with manifold inset boundaries.');
 	}
 
@@ -1560,7 +1566,7 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 		return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
 	}
 
-	if (!incidentCounts.every((count) => count === 2)) invalid('Push/Pull supports standalone faces or faces on a closed manifold component.');
+	if (!incidentCounts.every((count) => count === 2) && !supportedRevealRing) invalid('Push/Pull supports standalone faces or faces on a closed manifold component.');
 	rejectOppositeBoundaryCrossing(mesh, target, distance);
 	const moved = new Set(boundaryRings.flatMap((ring) => [...ring]));
 	const positions = [...mesh.positions];
@@ -1973,6 +1979,8 @@ export function hasEntityId(graph: BomcGraph, entityId: string): boolean {
 export function hasFaceId(graph: BomcGraph, faceId: string): boolean {
 	return graph.meshes.some((mesh) => mesh.faces.some((face) => face.id === faceId));
 }
+
+export { faceFromRing, compactReferencedVertices };
 
 export function journalEntry(edit: GeometryEdit): AuthoringJournalEntry {
 	return { forward: edit.forward, inverse: edit.inverse };

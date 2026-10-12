@@ -144,6 +144,16 @@ function click(controller: AuthoringToolController, x: number, y: number, pointe
 async function flush() { await new Promise((resolve) => setTimeout(resolve, 0)); }
 
 describe('canonical authoring tools', () => {
+	test('numeric Rectangle dimensions commit the same canonical construction basis and Line locks one axis',async()=>{
+		const s=createHarness();try{
+			s.controller.setTool('rectangle');click(s.controller,0,0);s.controller.setRectangleDimensions(2,3);
+			await flush();const command=s.submitted[0]!;expect(command.kind).toBe('CREATE_RECTANGLE');
+			if(command.kind==='CREATE_RECTANGLE'&&'points' in command){const xs=command.points.map(p=>p[0]),zs=command.points.map(p=>p[2]);expect(Math.max(...xs)-Math.min(...xs)).toBe(2);expect(Math.max(...zs)-Math.min(...zs)).toBe(3);}
+			s.controller.setTool('line');click(s.controller,20,20);s.controller.setAxisLock('x');click(s.controller,30,23);s.controller.setAxisLock(null);click(s.controller,30,30);click(s.controller,20,20);await flush();
+			const line=s.submitted.find(c=>c.kind==='CREATE_FACE_LOOP');expect(line).toBeDefined();if(line?.kind==='CREATE_FACE_LOOP'){expect(line.points).toContainEqual([30,0,20]);expect(line.points).not.toContainEqual([30,0,23]);}
+			expect(s.errors).toEqual([]);
+		}finally{s.close();}
+	});
 	test('uses inferred rectangle points, transfers previews, and selects only after command ACK', async () => {
 		const harness = createHarness();
 		try {

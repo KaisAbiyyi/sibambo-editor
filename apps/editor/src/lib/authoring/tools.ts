@@ -10,9 +10,10 @@ import {
 	ShaderMaterial
 } from 'three';
 import type { BomcGraph, BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
+import { parseLength } from './dimensions.js';
 import type { PreparedSceneViewport } from '@sibambo/viewport';
 import { buildPushPullFaceEdit, hasEntityId, validateEditableSubset, type AuthoringEntity } from './geometry.js';
-import { captureAxisDrag, solveAxisDrag, type AxisDragCapture } from './axis-drag.js';
+import { captureAxisDrag, closestAxisParameterToRay, solveAxisDrag, type AxisDragCapture } from './axis-drag.js';
 import {
 	constructionBasis,
 	inferenceLabel,
@@ -81,11 +82,8 @@ function pointAt(mesh: BomcMesh, vertexIndex: number): [number, number, number] 
 }
 
 function parseDistance(text: string): ParsedDistance {
-	const valueText = text.trim();
-	if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(valueText)) {
-		return { error: 'Enter a complete finite Push/Pull distance in metres.' };
-	}
-	const value = Number(valueText);
+	let value:number;
+	try { value=parseLength(text); } catch { return { error: 'Enter a complete finite Push/Pull distance in metres or with a unit suffix.' }; }
 	if (!Number.isFinite(value)) return { error: 'Push/Pull distance must be finite.' };
 	if (Math.abs(value) < MIN_EXTRUSION_METRES) return { error: 'Push/Pull distance must be at least 0.000001 m from zero.' };
 	return { value };
@@ -445,6 +443,7 @@ export class AuthoringToolController {
 	private commandPending = false;
 	private disposed = false;
 	private inference = '';
+	private axisLock:'x'|'y'|'z'|null=null;
 	private previewFrame: number | null = null;
 	private pendingPreview: { x: number; y: number } | null = null;
 
@@ -456,6 +455,17 @@ export class AuthoringToolController {
 	get tool(): AuthoringTool { return this.activeTool; }
 	get selectedEntityId(): string | null { return this.selectedEntity; }
 	get inferenceLabel(): string { return this.inference; }
+	setAxisLock(axis:'x'|'y'|'z'|null):void { this.axisLock=this.axisLock===axis?null:axis;this.setStatus(this.axisLock?`Locked ${this.axisLock.toUpperCase()}`:''); }
+
+	setRectangleDimensions(width:number,depth:number):void {
+		const checkpoint=this.options.getCheckpoint(),rectangle=this.rectangle;
+		if(!checkpoint||!rectangle||this.activeTool!=='rectangle')throw new Error('Activate Rectangle and click its first corner before entering dimensions.');
+		if(!Number.isFinite(width)||!Number.isFinite(depth)||Math.abs(width)<1e-6||Math.abs(depth)<1e-6)throw new Error('Rectangle dimensions must be finite and at least 0.000001 m.');
+		const opposite=rectangle.first.map((v,i)=>v+rectangle.basis[0][i]!*width+rectangle.basis[1][i]!*depth) as unknown as AuthoringPoint;
+		const points=rectangleCorners(rectangle.first,opposite,rectangle.basis);
+		preparePolygon(points,rectangle.plane.normal);this.rectangle=null;this.clearPreviewOverlay();
+		void this.submit({kind:'CREATE_RECTANGLE',points,normal:rectangle.plane.normal},checkpoint);
+	}
 
 	setTool(tool: AuthoringTool): void {
 		if (this.disposed || tool === this.activeTool) return;
@@ -641,13 +651,15 @@ export class AuthoringToolController {
 
 	private rectangleInference(clientX: number, clientY: number, checkpoint: AuthoringCheckpoint): AuthoringInference | null {
 		if (!this.rectangle) {
-			return resolveAuthoringInference({
+			const inferred=resolveAuthoringInference({
 				graph: checkpoint.snapshot.graph,
 				viewport: this.options.viewport,
 				clientX,
 				clientY,
 				activePlane: GROUND_PLANE
 			});
+			if(!inferred||!this.axisLock)return inferred;
+			return {...inferred,plane:{origin:inferred.point,normal:this.axisLock==='x'?[1,0,0]:this.axisLock==='y'?[0,1,0]:[0,0,1]}};
 		}
 		const preferred = resolveAuthoringInference({
 			graph: checkpoint.snapshot.graph,
@@ -722,6 +734,12 @@ export class AuthoringToolController {
 			});
 		}
 		const anchor = this.linePoints.at(-1)!;
+		if(this.axisLock){
+			const axis:AuthoringPoint=this.axisLock==='x'?[1,0,0]:this.axisLock==='y'?[0,1,0]:[0,0,1],ray=this.options.viewport.rayFromScreen(clientX,clientY);
+			const amount=ray?closestAxisParameterToRay(ray,anchor,axis):null;
+			if(amount===null)return null;
+			return {point:anchor.map((v,i)=>v+axis[i]!*amount) as unknown as AuthoringPoint,kind:'axis',axis:this.axisLock,plane:this.linePlane??GROUND_PLANE,screenDistancePx:0};
+		}
 		const closurePoint = this.linePoints.length >= 3 ? this.linePoints[0]! : null;
 		const preferred = resolveAuthoringInference({
 			graph: checkpoint.snapshot.graph,

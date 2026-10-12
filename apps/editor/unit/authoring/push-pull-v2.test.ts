@@ -36,6 +36,35 @@ function vertexPositions(graph: ReturnType<BomcDocument['snapshot']>['graph'], f
 }
 
 describe('authoring topology v2 Push/Pull', () => {
+	test('moves the parent underside and its inner border after the nested child has been pulled', () => {
+		for (const direction of [1, -1]) {
+			const { document, history, faceId } = createNeutralRectangle();
+			try {
+				const childId = `${DOCUMENT_ID}:rectangle:2`;
+				history.execute(document, journalEntry(buildPlanarRectangleEdit(document.snapshot().graph, childId,
+					[[1, 0, 1], [2, 0, 1], [2, 0, 2], [1, 0, 2]], [0, 1, 0])));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, direction, 3)));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, -direction * 0.8, 4)));
+				const before = document.snapshot().graph;
+				const baseId = `${DOCUMENT_ID}:op:3:base`;
+				const childBefore = vertexPositions(before, childId);
+				const parentBefore = vertexPositions(before, faceId);
+				history.execute(document, journalEntry(buildPushPullFaceEdit(before, baseId, -direction * 0.2, 5)));
+				const after = document.snapshot().graph;
+				const mesh = after.meshes[0]!;
+				const base = mesh.faces.find(face => face.id === baseId)!;
+				for (const vertex of [...base.outer, ...base.holes.flat()]) expect(mesh.positions[vertex * 3 + 1]).toBeCloseTo(-direction * 0.2, 12);
+				expect(vertexPositions(after, childId)).toEqual(childBefore);
+				expect(vertexPositions(after, faceId)).toEqual(parentBefore);
+				expect(validateEditableSubset(after)).toMatchObject({ editable: true });
+				expect([...buildAuthoringTopology(mesh).edges.values()].every(edge => edge.faceIds.length >= 2)).toBe(true);
+				expect(history.undo(document)).toBe(true);
+				expect(document.snapshot().graph).toEqual(before);
+				expect(history.redo(document)).toBe(true);
+				expect(document.snapshot().graph).toEqual(after);
+			} finally { document.dispose(); }
+		}
+	});
 	test('new faces use neutral material while v1 maroon remains explicit and unchanged', () => {
 		const legacy = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Legacy' });
 		try {

@@ -5,6 +5,7 @@ import { PerspectiveCamera, Vector3 } from 'three';
 import type { BomcGraph } from '@sibambo/bomc-document';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
 import type { AuthoringCommand } from '../src/lib/authoring/protocol';
+import { modelOccurrences, transformPoint, contextGraph, modelMetadata } from '../src/lib/authoring/model';
 import { cameraPresetPose, nearestGroundBoundsAnchor, orbitCameraDrag, uprightCameraUp } from '../../../packages/viewport/src/camera-navigation';
 import { SIBAMBO_CAMERA_DEFAULTS } from '../../../packages/viewport/src/renderer-defaults';
 import { verifyDownloadedAuthoringBomc, type AuthoringInteropReport } from '../../../tooling/testing/authoring-interop';
@@ -416,6 +417,17 @@ async function projectWorldPoint(page: Page, graph: BomcGraph, point: readonly [
 	return { x: box.x + (projected.x + 1) * box.width / 2, y: box.y + (1 - projected.y) * box.height / 2 };
 }
 
+async function projectModelPoint(page:Page,graph:BomcGraph,point:readonly [number,number,number]){
+ const bounds={min:{x:Infinity,y:Infinity,z:Infinity},max:{x:-Infinity,y:-Infinity,z:-Infinity}};
+ for(const occurrence of modelOccurrences(graph)){
+  const mesh=graph.meshes.find(m=>m.definitionId===occurrence.definitionId);if(!mesh)continue;
+  for(let i=0;i<mesh.positions.length;i+=3){const p=transformPoint(mesh.positions.slice(i,i+3) as [number,number,number],occurrence.matrix);for(const [index,axis] of ['x','y','z'].entries()){bounds.min[axis as 'x']=Math.min(bounds.min[axis as 'x'],p[index]!);bounds.max[axis as 'x']=Math.max(bounds.max[axis as 'x'],p[index]!);}}
+ }
+ const box=(await page.locator('.viewport canvas').boundingBox())!,pose=cameraPresetPose(bounds,'top'),camera=new PerspectiveCamera(SIBAMBO_CAMERA_DEFAULTS.fov,box.width/box.height,SIBAMBO_CAMERA_DEFAULTS.near,SIBAMBO_CAMERA_DEFAULTS.far);
+ camera.position.copy(pose.position);camera.up.copy(uprightCameraUp(pose));camera.lookAt(pose.target);camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
+ const projected=new Vector3(...point).project(camera);return {x:box.x+(projected.x+1)*box.width/2,y:box.y+(1-projected.y)*box.height/2};
+}
+
 async function drawRectangleOnFace(page: Page, graph: BomcGraph, faceId: string, view: 'top' | 'front' | 'iso' = 'top') {
 	await ensureCameraView(page, view);
 	const points = insetFacePoints(graph, faceId);
@@ -477,6 +489,48 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 		await expect(page.locator('main[data-app="editor"]')).toHaveAttribute('data-editor-ready', 'true');
 	});
 
+	test('Modeling controls group geometry, copy shared Components, edit a context with Offset and Push/Pull, then save/reopen guides',async({page},testInfo)=>{
+		const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
+		await createNew(page);await ensureTopView(page);await drawRectangle(page,.2,.30,.32,.34);
+		const panel=page.locator('.modeling-panel');await panel.locator(':scope > summary').click();
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();
+		await panel.getByText('Groups & Components',{exact:true}).click();
+		await panel.getByRole('button',{name:'Make Component',exact:true}).click();
+		await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.instances.length).toBe(2);
+		const grouped=(await currentCheckpoint(page)).snapshot.graph as BomcGraph,original=grouped.instances.find(i=>i.kind==='component')!;
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();
+		await panel.getByText('Move, Copy & Arrays',{exact:true}).click();
+		await panel.getByLabel('Move X',{exact:true}).fill('5m');
+		await panel.getByLabel('Copy',{exact:true}).check();await panel.getByLabel('Array copies').fill('2');
+		await panel.getByRole('button',{name:'Apply Transform',exact:true}).click();
+		await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.graph.instances.length).toBe(4);
+		const copied=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		expect(new Set(copied.instances.filter(i=>i.kind==='component').map(i=>i.definitionId)).size).toBe(1);
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();await panel.getByRole('button',{name:'Edit Container',exact:true}).click();
+		await expect(panel.locator(':scope > summary')).toContainText('Editing container');
+		await panel.getByRole('button',{name:'Select All',exact:true}).click();
+		await panel.getByText('Offset, Guides & Dimensions',{exact:true}).click();
+		await panel.getByLabel('Offset distance').fill('100mm');await panel.getByRole('button',{name:'Apply Offset',exact:true}).click();
+		await expect.poll(async()=>contextGraph((await currentCheckpoint(page)).snapshot.graph,[original.id]).meshes[0]!.faces.length).toBe(2);
+		const offsetGraph=(await currentCheckpoint(page)).snapshot.graph as BomcGraph,local=contextGraph(offsetGraph,[original.id]).meshes[0]!,inner=local.faces.find(f=>f.holes.length===0)!;
+		await panel.locator(':scope > summary').click();await ensureTopView(page);
+		const center=inner.outer.reduce((v,i)=>v.add(new Vector3(...local.positions.slice(i*3,i*3+3) as [number,number,number])),new Vector3()).multiplyScalar(1/inner.outer.length);
+		const screen=await projectModelPoint(page,offsetGraph,[center.x,center.y,center.z]);
+		await page.getByRole('button',{name:'Push/Pull',exact:true}).click();await page.mouse.click(screen.x,screen.y);
+		await page.getByLabel('Distance (m)').fill('250mm');await page.getByRole('button',{name:'Commit',exact:true}).click();
+		await expect.poll(async()=>contextGraph((await currentCheckpoint(page)).snapshot.graph,[original.id]).meshes[0]!.faces.length).toBeGreaterThan(2);
+		await panel.locator(':scope > summary').click();await panel.getByRole('button',{name:'Close Context',exact:true}).click();
+		await panel.getByRole('button',{name:'Guide Line',exact:true}).click();await panel.locator(':scope > summary').click();
+		const box=(await page.locator('.viewport canvas').boundingBox())!;
+		await page.mouse.click(box.x+box.width*.16,box.y+box.height*.76);await page.mouse.click(box.x+box.width*.35,box.y+box.height*.76);
+		await expect.poll(async()=>modelMetadata((await currentCheckpoint(page)).snapshot.graph).guides.length).toBe(1);
+		const final=(await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+		await page.locator('.viewport canvas').screenshot({path:testInfo.outputPath('components-array-offset-guides.png')});
+		const saved=await saveBomc(page,testInfo.outputPath('modeling-priorities.bomc'));
+		const independent=await readWebBomc(new Uint8Array(saved.bytes));try{expect(independent.snapshot().graph).toEqual(final);}finally{independent.dispose();}
+		await openFileMenu(page);await page.getByRole('button',{name:'Close Model',exact:true}).click();await uploadBytes(page,saved.bytes,'modeling-reopen.bomc');
+		await expect(page.getByText('Writable BOMC',{exact:true}).first()).toBeVisible();expect((await currentCheckpoint(page)).snapshot.graph).toEqual(final);expect(errors).toEqual([]);
+	});
 	test('New downloads canonical bytes, reopens those bytes, then edits and downloads again', async ({ page }, testInfo) => {
 		test.setTimeout(180_000);
 		await createNew(page);
@@ -854,16 +908,30 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 				expect(pulled.meshes[0]!.faces.find((face) => face.id === retained.id)).toStrictEqual(retained);
 			}
 			await canvas.screenshot({ path: testInfo.outputPath('nested-child-pulled-underneath.png') });
+			const underside=pulled.meshes[0]!.faces.find(f=>f.id.includes(':base')&&f.holes.length===1)!;
+			expect(underside).toBeDefined();
+			const sourceMesh=pulled.meshes[0]!,at=(i:number)=>new Vector3(...sourceMesh.positions.slice(i*3,i*3+3) as [number,number,number]);
+			const ringCenter=underside.outer.reduce((v,i)=>v.add(at(i)),new Vector3()).multiplyScalar(1/underside.outer.length);
+			const basePoint=at(underside.outer[0]!).lerp(at(underside.outer[1]!),.5).lerp(ringCenter,.15).project(camera);
+			await page.mouse.click(box.x+(basePoint.x+1)*box.width/2,box.y+(1-basePoint.y)*box.height/2);
+			// Signed distances follow the canonical face normal, including a back-facing base.
+			await page.getByLabel('Distance (m)').fill('-150mm');
+			await page.getByRole('button',{name:'Commit',exact:true}).click();
+			await expect.poll(async()=>(await currentCheckpoint(page)).snapshot.revision).toBe(beforeRevision+2);
+			const movedBase=(await currentCheckpoint(page)).snapshot.graph as BomcGraph,baseAfter=movedBase.meshes[0]!.faces.find(f=>f.id===underside.id)!;
+			for(const ring of [baseAfter.outer,...baseAfter.holes])for(const vertex of ring)expect(movedBase.meshes[0]!.positions[vertex*3+1]!).toBeCloseTo(childY-.15,12);
+			for(const vertex of movedChild.outer)expect(movedBase.meshes[0]!.positions[vertex*3+1]!).toBeCloseTo(childY-.3,12);
+			await canvas.screenshot({path:testInfo.outputPath('parent-underside-border-follows.png')});
 			const saved = await saveBomc(page, testInfo.outputPath('nested-underside.bomc'));
 			const independent = await readWebBomc(new Uint8Array(saved.bytes));
-			try { expect(independent.snapshot().graph).toStrictEqual(pulled); } finally { independent.dispose(); }
+			try { expect(independent.snapshot().graph).toStrictEqual(movedBase); } finally { independent.dispose(); }
 			await openFileMenu(page);
 			await page.getByRole('button', { name: 'Close Model' }).click();
 			await expect(page.locator('.empty-workspace')).toBeVisible();
 			await uploadBytes(page, saved.bytes, 'nested-underside-reopen.bomc');
 			await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible();
-			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(pulled);
-			await pushPullProjectedFace(page, pulled, child.id, -0.1, 'top');
+			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(movedBase);
+			await pushPullProjectedFace(page, movedBase, child.id, -0.1, 'top');
 			expect(runtimeErrors).toEqual([]);
 		});
 

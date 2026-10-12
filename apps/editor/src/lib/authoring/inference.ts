@@ -3,13 +3,14 @@ import type { BomcGraph, Face, Mesh } from '@sibambo/bomc-document';
 import { closestAxisParameterToRay } from './axis-drag.js';
 import { buildAuthoringTopology } from './topology.js';
 import type { AuthoringPoint } from './protocol.js';
+import { constructionGuides } from './construction-guides.js';
 
 export const AUTHORING_SNAP_RADIUS_CSS_PX = 10;
 export const AUTHORING_AXIS_ANGLE_DEGREES = 8;
 
 export type AuthoringPlane = Readonly<{ origin: AuthoringPoint; normal: AuthoringPoint }>;
 export type AuthoringAxis = 'x' | 'y' | 'z';
-export type InferenceKind = 'endpoint' | 'edge' | 'closure' | 'face' | 'plane' | 'axis';
+export type InferenceKind = 'endpoint' | 'edge' | 'closure' | 'face' | 'plane' | 'axis' | 'guide';
 export type AuthoringInference = Readonly<{
 	point: AuthoringPoint;
 	kind: InferenceKind;
@@ -286,6 +287,19 @@ export function resolveAuthoringInference(options: ResolveInferenceOptions): Aut
 		const edge = edgeCandidate(options, mesh, faceHit?.face.id ?? null); if (edge) return edge;
 	}
 	const closure = closureCandidate(options); if (closure) return closure;
+	let guideCandidate:AuthoringInference|null=null;
+	for(const guide of constructionGuides.get(options.graph)??[]){
+		const direction=new Vector3(...guide.end).sub(new Vector3(...guide.start));
+		let amount=guide.kind!=='point'?closestAxisParameterToRay(ray,guide.start,[direction.x,direction.y,direction.z]):0;
+		if(amount===null)continue;
+		if(guide.kind==='edge')amount=Math.max(0,Math.min(direction.length(),amount));
+		const vector=new Vector3(...guide.start).addScaledVector(direction.normalize(),amount),point:AuthoringPoint=[vector.x,vector.y,vector.z];
+		if(!pointAllowed(point,options.restrictToPlane))continue;
+		const distance=screenDistance(options.viewport,point,options.clientX,options.clientY);
+		if(distance===null||distance>AUTHORING_SNAP_RADIUS_CSS_PX||guideCandidate&&distance>=guideCandidate.screenDistancePx)continue;
+		guideCandidate={point,kind:'guide',plane:options.activePlane??{origin:point,normal:[0,1,0]},screenDistancePx:distance};
+	}
+	if(guideCandidate)return guideCandidate;
 	if (mesh) {
 		const face = faceCandidate(options, mesh, faceHit); if (face) return face;
 	}
@@ -300,6 +314,7 @@ export function inferenceLabel(inference: AuthoringInference | null): string {
 	if (inference.kind === 'closure') return 'Close Loop';
 	if (inference.kind === 'face') return 'On Face';
 	if (inference.kind === 'axis') return `${inference.axis?.toUpperCase() ?? ''} Axis`.trim();
+	if (inference.kind === 'guide') return 'On Guide';
 	return Math.abs(inference.plane.normal[1]) > 0.999999 ? 'Ground' : 'On Plane';
 }
 

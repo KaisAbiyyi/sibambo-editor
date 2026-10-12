@@ -260,6 +260,8 @@ export class AuthoringClient {
 			ownedCommand = { kind: 'CREATE_FACE_LOOP', points: command.points.map(clonePoint), normal: clonePoint(command.normal) };
 		} else if (command.kind === 'PUSH_PULL_FACE') {
 			ownedCommand = { kind: 'PUSH_PULL_FACE', faceId: command.faceId, distance: command.distance };
+		} else if (command.kind === 'MODEL_EDIT') {
+			ownedCommand = structuredClone(command);
 		} else {
 			ownedCommand = { kind: 'EXTRUDE_RECTANGLE', entityId: command.entityId, distance: command.distance };
 		}
@@ -638,7 +640,7 @@ export class AuthoringClient {
 		const checkpoint = result.checkpoint;
 		const previous = this.checkpointValue;
 		if (entry.type === 'COMMAND') {
-			if (!result.commandResult || !hasEntityId(checkpoint.snapshot.graph, result.commandResult.entityId)) return false;
+			if (!result.commandResult || (!hasEntityId(checkpoint.snapshot.graph, result.commandResult.entityId) && !checkpoint.snapshot.graph.instances.some(i => i.id === result.commandResult!.entityId))) return false;
 			if (!previous || checkpoint.snapshot.revision !== previous.snapshot.revision + 1
 					|| checkpoint.sequence !== previous.sequence + (entry.sequenceIncrement ?? 0)
 					|| checkpoint.history.undo.length !== previous.history.undo.length + 1 || checkpoint.history.redo.length !== 0) return false;
@@ -650,6 +652,9 @@ export class AuthoringClient {
 				if (result.commandResult.entityId !== `${previous.snapshot.graph.documentId}:face:${previous.sequence}`) return false;
 			} else if (command.kind === 'PUSH_PULL_FACE') {
 				if (result.commandResult.entityId !== command.faceId || !hasEntityId(previous.snapshot.graph, command.faceId)) return false;
+			} else if (command.kind === 'MODEL_EDIT') {
+				// Canonical graph and reversible journal admission remain mandatory.
+				if (!checkpoint.snapshot.graph.instances.find(i => i.id === checkpoint.snapshot.graph.rootInstanceId)?.label?.includes('sibambo-editor-model-v1')) return false;
 			} else if (result.commandResult.entityId !== command.entityId || !hasEntityId(previous.snapshot.graph, command.entityId)) return false;
 		} else if (result.commandResult !== undefined) return false;
 		if (entry.type === 'UNDO' || entry.type === 'REDO') {

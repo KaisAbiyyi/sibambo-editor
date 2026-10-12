@@ -3,6 +3,7 @@ import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3, typ
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { buildPlanarRectangleEdit, buildPushPullFaceEdit } from '../../src/lib/authoring/geometry.js';
 import { resolveAuthoringInference } from '../../src/lib/authoring/inference.js';
+import { buildModelEdit,contextGraph } from '../../src/lib/authoring/model.js';
 
 const DOCUMENT_ID = '3ed35ead-9640-4e34-b10c-0983190ec99d';
 const WIDTH = 1000;
@@ -85,6 +86,18 @@ function offsetPerpendicular(
 }
 
 describe('authoring inference', () => {
+	test('persistent guides snap beyond their defining segment and point guides snap to the placed endpoint',()=>{
+		const document=BomcDocument.create({documentId:DOCUMENT_ID,name:'Guides'});
+		try{
+			document.transact(buildModelEdit(document.snapshot().graph,[],{type:'guide',guideKind:'line',start:[1,0,1],end:[2,0,1]},1).forward);
+			document.transact(buildModelEdit(document.snapshot().graph,[],{type:'guide',guideKind:'point',start:[0,0,0],end:[4,0,3]},2).forward);
+			const graph=contextGraph(document.snapshot().graph,[],true),viewport=topViewport(10),screen=viewport.projectWorldToScreen([5,0,1]);
+			const snapped=resolveAuthoringInference({graph,viewport,clientX:screen.x,clientY:screen.y+1,activePlane:{origin:[0,0,0],normal:[0,1,0]}});
+			expect(snapped?.kind).toBe('guide');expect(snapped?.point[0]).toBeCloseTo(5,12);expect(snapped?.point[2]).toBe(1);
+			const point=viewport.projectWorldToScreen([4,0,3]);
+			expect(resolveAuthoringInference({graph,viewport,clientX:point.x+1,clientY:point.y})?.point).toEqual([4,0,3]);
+		}finally{document.dispose();}
+	});
 	test('endpoint wins over the same edge and edge snap returns the exact segment point', () => {
 		const { document } = authoredRectangle();
 		try {

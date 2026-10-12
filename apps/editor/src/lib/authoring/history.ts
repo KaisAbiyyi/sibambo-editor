@@ -1,7 +1,7 @@
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import type { BomcGraph, BomcSnapshot, DocumentEdit } from '@sibambo/bomc-document';
 import { isAuthoringCheckpointShape, isRecord, type AuthoringCheckpoint, type AuthoringHistoryCheckpoint, type AuthoringJournalEntry } from './protocol.js';
-import { validateEditableSubset } from './geometry.js';
+import { validateAuthoringDocument as validateEditableSubset, nextModelSequence } from './model.js';
 
 export class AuthoringHistoryError extends Error {
 	constructor(message: string) { super(message); this.name = 'AuthoringHistoryError'; }
@@ -64,9 +64,11 @@ function assertJournalEntryShape(value: unknown): asserts value is AuthoringJour
 		throw new AuthoringHistoryError('History entry must contain paired forward and inverse edit arrays.');
 	}
 	if (value.forward.length !== value.inverse.length || ![1, 2, 3].includes(value.forward.length)) {
+		if (isModelJournal(value)) { for (const edit of [...value.forward, ...value.inverse]) assertSupportedJournalEdit(edit); return; }
 		throw new AuthoringHistoryError('History entries must use a supported authoring mesh/material/root transaction shape.');
 	}
 	for (const edit of [...value.forward, ...value.inverse]) assertSupportedJournalEdit(edit);
+	if (isModelJournal(value)) return;
 	if (value.forward.length === 1) {
 		if (value.forward[0]?.type !== 'put-mesh' || value.inverse[0]?.type !== 'put-mesh') {
 			throw new AuthoringHistoryError('Single-edit history entries must replace the root mesh in both directions.');
@@ -81,6 +83,18 @@ function assertJournalEntryShape(value: unknown): asserts value is AuthoringJour
 		|| value.inverse[1]?.type !== 'put-definition' || value.inverse[2]?.type !== 'delete-material') {
 		throw new AuthoringHistoryError('First-rectangle history edits must use the canonical ordered material/definition/mesh transaction.');
 	}
+}
+
+function isModelJournal(value: Record<string, unknown>): boolean {
+	if (!Array.isArray(value.forward) || !Array.isArray(value.inverse)) return false;
+	if (!value.forward.length || value.forward.length !== value.inverse.length || value.forward.length > 20000) return false;
+	const roots = [value.forward, value.inverse].map(edits => edits.find((edit) => isRecord(edit) && edit.type === 'put-instance' && isRecord(edit.value) && edit.value.kind === 'root'));
+	if (!roots.every(isRecord)) return false;
+	const values = roots.map(root => root.value);
+	return values.every(isRecord) && values[0].id === values[1].id && values.some(root => {
+		if (typeof root.label !== 'string') return false;
+		try { return JSON.parse(root.label)?.schema === 'sibambo-editor-model-v1'; } catch { return false; }
+	});
 }
 
 function assertSupportedJournalEdit(value: unknown): asserts value is DocumentEdit {
@@ -136,7 +150,7 @@ function sequenceFromOwnedValue(documentId: string, value: string): number | nul
 }
 
 function maxSequenceInGraph(graph: BomcGraph): number {
-	let max = 0;
+	let max = nextModelSequence(graph) - 1;
 	for (const mesh of graph.meshes) for (const face of mesh.faces) {
 		const candidates = [face.id];
 		if (face.label) {
@@ -155,6 +169,9 @@ function maxSequenceInGraph(graph: BomcGraph): number {
 
 function maxSequenceInEdits(edits: readonly DocumentEdit[], documentId: string): number {
 	let max = 0;
+	for (const edit of edits) {
+		for (const match of JSON.stringify(edit).matchAll(/:(?:rectangle|face|op):([1-9]\d*)/g)) max = Math.max(max, Number(match[1]));
+	}
 	for (const edit of edits) {
 		if (edit.type !== 'put-mesh') continue;
 		for (const face of edit.value.faces) {

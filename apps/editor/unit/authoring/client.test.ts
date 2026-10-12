@@ -75,6 +75,32 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('canonical authoring worker and client', () => {
+	test('model containers, arrays, guides and scoped edits survive worker recovery and actual write/reopen',async()=>{
+		const first=makeClient(),second=makeClient();
+		try{
+			await first.client.create();
+			await first.client.command({kind:'CREATE_RECTANGLE',first:[0,0,0],opposite:[2,0,3]});
+			const face=first.client.checkpoint!.snapshot.graph.meshes[0]!.faces[0]!;
+			const grouped=await first.client.command({kind:'MODEL_EDIT',path:[],action:{type:'group',selection:[{type:'face',id:face.id}],containerKind:'component',name:'Shared'}});
+			const id=grouped.commandResult!.entityId;
+			await first.client.command({kind:'MODEL_EDIT',path:[],action:{type:'transform',selection:[{type:'instance',id}],delta:[4,0,0],copy:true,count:2,spacing:'multiply',radial:null}});
+			await first.client.command({kind:'MODEL_EDIT',path:[id],action:{type:'raw',command:{kind:'PUSH_PULL_FACE',faceId:face.id,distance:1}}});
+			await first.client.command({kind:'MODEL_EDIT',path:[id],action:{type:'guide',guideKind:'line',start:[0,0,0],end:[1,0,0]}});
+			const canonical=first.client.checkpoint!.snapshot.graph;
+			first.workers.at(-1)!.crash();
+			await waitFor(()=>!first.client.isRestoring&&first.workers.length===2);
+			expect(first.client.checkpoint!.snapshot.graph).toEqual(canonical);
+			await first.client.undo();await first.client.redo();
+			expect(first.client.checkpoint!.snapshot.graph).toEqual(canonical);
+			const saved=await first.client.write(),opened=await second.client.open(saved.ownedBuffer.slice(0));
+			expect(opened.kind).toBe('authoring');
+			if(opened.kind!=='authoring')throw new Error(opened.reason);
+			expect(opened.checkpoint.snapshot.graph).toEqual(canonical);
+			const cap=opened.checkpoint.snapshot.graph.meshes[0]!.faces.find(f=>f.normal[1]===1)!;
+			await second.client.command({kind:'MODEL_EDIT',path:[id],action:{type:'raw',command:{kind:'PUSH_PULL_FACE',faceId:cap.id,distance:.25}}});
+			expect(second.client.checkpoint!.snapshot.graph.meshes[0]!.positions).toContain(1.25);
+		}finally{await first.client.close();await second.client.close();}
+	});
 	test('opens a valid E4 container without section 241 as viewer-only', async () => {
 		const { client } = makeClient();
 		const bytes = assembleContainer([{ type: 1, codec: 0, rawLength: 0, count: 0, bytes: new Uint8Array() }]);

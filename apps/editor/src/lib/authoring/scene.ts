@@ -10,11 +10,14 @@ import {
 	type Material,
 	Mesh,
 	MeshStandardMaterial,
+	Matrix4,
+	Vector3,
 	SRGBColorSpace
 } from 'three';
 import type { BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
 import { MaterialStateManager, sourceEdgeMaterialDescriptor, type DisplayState, type ViewportBounds } from '@sibambo/viewport';
 import { validateEditableSubset } from './geometry.js';
+import { definitionGraph, modelMetadata, modelOccurrences, validateAuthoringDocument } from './model.js';
 
 const EMPTY_AUTHORING_BOUNDS: ViewportBounds = {
 	min: { x: -5, y: 0, z: -5 },
@@ -140,7 +143,7 @@ function disposeUntransferred(group: Group): void {
 }
 
 /** Build a dedicated render-only projection from the acknowledged canonical snapshot. */
-export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: DisplayState): AuthoringSceneProjection {
+function projectFlatAuthoringScene(snapshot: BomcSnapshot, displayState: DisplayState): AuthoringSceneProjection {
 	const subset = validateEditableSubset(snapshot.graph);
 	if (!subset.editable) throw new AuthoringSceneError(`Canonical snapshot is outside the editable subset: ${subset.reason}`);
 	const group = new Group();
@@ -202,4 +205,45 @@ export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: Disp
 		if (error instanceof AuthoringSceneError) throw error;
 		throw new AuthoringSceneError(error instanceof Error ? error.message : 'Unable to project canonical authoring geometry.');
 	}
+}
+
+export function projectAuthoringScene(snapshot: BomcSnapshot, displayState: DisplayState): AuthoringSceneProjection {
+	if (snapshot.graph.instances.length === 1 && snapshot.graph.instances[0]?.label === null) return projectFlatAuthoringScene(snapshot, displayState);
+	const valid = validateAuthoringDocument(snapshot.graph);
+	if (!valid.editable) throw new AuthoringSceneError(valid.reason);
+	const group = new Group(); group.name = 'editor-authoring-content';
+	const metadata = modelMetadata(snapshot.graph);
+	const bounds: ViewportBounds = { min: {x:Infinity,y:Infinity,z:Infinity}, max: {x:-Infinity,y:-Infinity,z:-Infinity} };
+	const include = (point: readonly number[], matrix: Matrix4) => {
+		const p = new Vector3(point[0],point[1],point[2]).applyMatrix4(matrix);
+		for (const axis of ['x','y','z'] as const) { bounds.min[axis]=Math.min(bounds.min[axis],p[axis]);bounds.max[axis]=Math.max(bounds.max[axis],p[axis]); }
+	};
+	try {
+		for (const occurrence of modelOccurrences(snapshot.graph)) {
+			const flat = definitionGraph(snapshot.graph, occurrence.definitionId);
+			const projected = projectFlatAuthoringScene({...snapshot,graph:flat},displayState);
+			projected.group.applyMatrix4(occurrence.matrix);
+			group.add(projected.group);
+			for (const mesh of flat.meshes) for (let i=0;i<mesh.positions.length;i+=3) include(mesh.positions.slice(i,i+3),occurrence.matrix);
+			for (const [items,color,name] of [[metadata.looseEdges,'#343a40','loose-edges'],[metadata.guides,'#b87d00','construction-guides']] as const) {
+				const positions:number[]=[];
+				for (const item of items.filter(e=>e.ownerDefinitionId===occurrence.definitionId)) {
+					include(item.start,occurrence.matrix); include(item.end,occurrence.matrix);
+					if ('kind' in item && item.kind==='point') {
+						for (let axis=0;axis<3;axis++) { const a=[...item.start],b=[...item.start];a[axis]-=0.035;b[axis]+=0.035;positions.push(...a,...b); }
+					} else if ('kind' in item) {
+						const direction=new Vector3(...item.end).sub(new Vector3(...item.start)).normalize();
+						const extent=flat.meshes.reduce((max,mesh)=>mesh.positions.reduce((value,coordinate)=>Math.max(value,Math.abs(coordinate)),max),100)*2;
+						positions.push(...new Vector3(...item.start).addScaledVector(direction,-extent).toArray(),...new Vector3(...item.end).addScaledVector(direction,extent).toArray());
+					} else positions.push(...item.start,...item.end);
+				}
+				if (positions.length) {
+					const geometry=new BufferGeometry();geometry.setAttribute('position',new Float32BufferAttribute(positions,3));
+					const material=new LineBasicMaterial({color});material.toneMapped=false;
+					const lines=new LineSegments(geometry,material);lines.name=name;lines.renderOrder=9;lines.applyMatrix4(occurrence.matrix);group.add(lines);
+				}
+			}
+		}
+		return {group,bounds:Number.isFinite(bounds.min.x)?bounds:EMPTY_AUTHORING_BOUNDS};
+	} catch(error) { disposeUntransferred(group);throw error; }
 }

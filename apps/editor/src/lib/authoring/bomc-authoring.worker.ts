@@ -10,11 +10,10 @@ import {
 	buildPlanarRectangleEdit,
 	buildPushPullFaceEdit,
 	buildRectangleEdit,
-	nextAuthoringSequence,
-	validateEditableSubset,
 	validateRectangleInput,
 	type GeometryEdit
 } from './geometry.js';
+import { buildModelEdit, nextModelSequence as nextAuthoringSequence, validateAuthoringDocument as validateEditableSubset } from './model.js';
 import { AuthoringHistory, AuthoringHistoryError, validateAuthoringCheckpoint } from './history.js';
 import {
 	AUTHORING_PROTOCOL_VERSION,
@@ -270,7 +269,12 @@ export class AuthoringWorkerDispatcher {
 		let entityId: string;
 		let pair: GeometryEdit;
 		let consumesSequence = false;
-		if (request.data.kind === 'CREATE_RECTANGLE') {
+		if (request.data.kind === 'MODEL_EDIT') {
+			const edit = buildModelEdit(graph, request.data.path, request.data.action, this.sequence);
+			entityId = edit.entityId;
+			pair = { forward: edit.forward, inverse: edit.inverse };
+			consumesSequence = true;
+		} else if (request.data.kind === 'CREATE_RECTANGLE') {
 			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
 				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
 			}

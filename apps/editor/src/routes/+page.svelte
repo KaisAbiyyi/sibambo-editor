@@ -1,5 +1,8 @@
 <script lang="ts">
-	import { onDestroy, onMount, tick } from 'svelte';
+	import { onDestroy, onMount, tick, untrack } from 'svelte';
+	import ModelingPanel from '$lib/authoring/ModelingPanel.svelte';
+	import { ModelingController, type ModelingMode, type ModelingState } from '$lib/authoring/model-tools';
+	import { contextGraph } from '$lib/authoring/model';
 	import '$lib/ui/sibambo.css';
 	import '$lib/ui/editor-workspace.css';
 	import type { AdaptedBomcResult } from '@sibambo/e4-import';
@@ -47,6 +50,32 @@
 	let extrusionDistanceText = $state('');
 	let selectedEntityId = $state('');
 	let authoringBounds = $state.raw<ViewportBounds | null>(null);
+	let modelingState=$state.raw<ModelingState>({mode:'select',path:[],selection:[],axis:null,anchor:null,delta:[0,0,0],message:''});
+	let scopedCache:{checkpoint:AuthoringCheckpoint;path:string;value:AuthoringCheckpoint}|null=null;
+	const modeling=new ModelingController({
+		checkpoint:()=>authoringCheckpoint,viewport:()=>viewport,enabled:canAuthor,
+		change:state=>{modelingState=state;if(authoringTool==='select'){const selected=state.selection[0];selectedEntityId=selected&&selected.type!=='edge'?selected.id:'';}},contextChanged:()=>{scopedCache=null;authoringTools?.setCheckpoint(toolCheckpoint());},
+		error:message=>{editorNotice=message;},
+		submit:async(path,action)=>{
+			const client=authoringClient,target=viewport,request=generation;
+			if(!client||!target||!canAuthor())throw new Error('Authoring input is unavailable while the document is changing.');
+			authoringOperationBusy=true;
+			try{const acknowledged=await client.command({kind:'MODEL_EDIT',path,action});acceptAuthoringResult(client,acknowledged,request);}
+			finally{if(request===generation&&client===authoringClient)authoringOperationBusy=false;}
+		}
+	});
+	function toolCheckpoint(checkpoint=authoringCheckpoint):AuthoringCheckpoint|null {
+		if(!checkpoint)return null;
+		const path=JSON.stringify(modeling.state.path),graph=checkpoint.snapshot.graph;
+		if(!modeling.state.path.length&&graph.instances.length===1&&graph.instances[0]?.label===null)return checkpoint;
+		if(scopedCache?.checkpoint===checkpoint&&scopedCache.path===path)return scopedCache.value;
+		let scoped;
+		try{scoped=contextGraph(graph,modeling.state.path,true);}catch{scoped=contextGraph(graph,[],true);}
+		const value={...checkpoint,snapshot:{...checkpoint.snapshot,graph:scoped}};
+		scopedCache={checkpoint,path,value};return value;
+	}
+	function setModelingMode(mode:ModelingMode){if(!canAuthor())return;setAuthoringTool('select');modeling.setMode(mode);}
+	$effect(()=>{const checkpoint=authoringCheckpoint;if(checkpoint)untrack(()=>modeling.refresh());});
 	let activeSourceName = $state<string | null>(null);
 	let pendingTransition = $state<PendingTransition | null>(null);
 	let transitionTrigger: HTMLElement | null = null;
@@ -248,7 +277,7 @@
 				const checkpoint = owner.checkpoint;
 				if (!checkpoint) return;
 				authoringCheckpoint = checkpoint;
-				authoringTools?.setCheckpoint(checkpoint);
+				authoringTools?.setCheckpoint(toolCheckpoint(checkpoint));
 				modelTabTitle = authoringTitle(checkpoint);
 				refreshAuthoringProjection(false);
 			} else if (state.phase === 'restoring') {
@@ -263,16 +292,19 @@
 		let tools!: AuthoringToolController;
 		tools = new AuthoringToolController({
 			viewport: target,
-			getCheckpoint: () => authoringCheckpoint,
+			getCheckpoint: () => toolCheckpoint(),
 				submitCommand: async (command: AuthoringCommand) => {
 						const operationGeneration = generation;
 						if (!ownsAuthoringController(client, target, tools) || authoringRecovery.phase !== 'ready' || saveBusy || busy || authoringOperationBusy) throw new Error('Authoring input is unavailable while the document is changing.');
 						authoringOperationBusy = true;
 						try {
-							const acknowledged = await client.command(command);
+							const full=authoringCheckpoint;
+							const scopedCommand:AuthoringCommand=command.kind!=='MODEL_EDIT'&&full&&(modeling.state.path.length>0||full.snapshot.graph.instances[0]?.label!==null)
+								?{kind:'MODEL_EDIT',path:[...modeling.state.path],action:{type:'raw',command}}:command;
+							const acknowledged = await client.command(scopedCommand);
 							if (operationGeneration !== generation || !ownsAuthoringController(client, target, tools)) return acknowledged;
 						authoringCheckpoint = acknowledged.checkpoint;
-						tools.setCheckpoint(acknowledged.checkpoint);
+						tools.setCheckpoint(toolCheckpoint(acknowledged.checkpoint));
 						if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
 						modelTabTitle = authoringTitle(acknowledged.checkpoint);
 						try {
@@ -282,7 +314,7 @@
 							projectionError = cause instanceof Error ? cause.message : 'Canonical content could not be projected.';
 							editorNotice = 'The canonical edit was acknowledged, but its viewport projection failed. Retry render before continuing the visual proof.';
 						}
-						return acknowledged;
+						return {...acknowledged,checkpoint:toolCheckpoint(acknowledged.checkpoint)!};
 						} finally { if (operationGeneration === generation && ownsAuthoringController(client, target, tools)) authoringOperationBusy = false; }
 					},
 				onSelectionChange: (entityId: string | null) => { if (ownsAuthoringController(client, target, tools)) selectedEntityId = entityId ?? ''; },
@@ -290,7 +322,7 @@
 				onMeasureTooltipChange: (tooltip) => { if (ownsAuthoringController(client, target, tools)) measureTooltip = tooltip; },
 				onError: (message: string) => { if (ownsAuthoringController(client, target, tools)) editorNotice = message; }
 			});
-		tools.setCheckpoint(initial);
+		tools.setCheckpoint(toolCheckpoint(initial));
 		return tools;
 	}
 
@@ -332,7 +364,7 @@
 	function acceptAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation) {
 		if (request !== generation || client !== authoringClient || mode !== 'authoring') return false;
 		authoringCheckpoint = acknowledged.checkpoint;
-		authoringTools?.setCheckpoint(acknowledged.checkpoint);
+		authoringTools?.setCheckpoint(toolCheckpoint(acknowledged.checkpoint));
 		if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
 		else if (selectedEntityId && !hasEntityId(acknowledged.checkpoint.snapshot.graph, selectedEntityId)) selectedEntityId = '';
 		modelTabTitle = authoringTitle(acknowledged.checkpoint);
@@ -359,6 +391,7 @@
 
 	function setAuthoringTool(tool: AuthoringTool) {
 		if (!canAuthor()) return;
+		modeling.setMode('select');
 		authoringTools?.setTool(tool);
 		authoringTool = tool;
 		authoringInference = '';
@@ -935,10 +968,10 @@
 			return;
 		}
 		const middleTool = pointerCameraTool(mouseButtonsFromMask(event.buttons), event.shiftKey);
-		if (middleTool) { authoringTools?.handlePointerDown(event, true); startCameraGesture(event, middleTool); return; }
+		if (middleTool) { modeling.cancel();authoringTools?.handlePointerDown(event, true); startCameraGesture(event, middleTool); return; }
 		if (event.button !== 0) { authoringTools?.handlePointerDown(event, true); return; }
-		if (activeCameraTool) { authoringTools?.handlePointerDown(event, true); startCameraGesture(event, activeCameraTool); return; }
-			if (mode === 'authoring') { if (canAuthor()) authoringTools?.handlePointerDown(event, false); return; }
+		if (activeCameraTool) { modeling.cancel();authoringTools?.handlePointerDown(event, true); startCameraGesture(event, activeCameraTool); return; }
+			if (mode === 'authoring') { if (canAuthor()) {if(authoringTool==='select')modeling.down(event);else authoringTools?.handlePointerDown(event, false);} return; }
 		if (activeTool === 'move') {
 			const pick = viewport.pickAt(event.clientX, event.clientY);
 			const movingHandle = editorController?.occurrenceMovePreview?.occurrenceHandle;
@@ -955,7 +988,7 @@
 	}
 	function handleViewportPointerMove(event: PointerEvent) {
 		if (!viewport || busy || saveBusy || authoringOperationBusy) return;
-			if (!pointerGesture) { if (mode === 'authoring' && canAuthor()) authoringTools?.handlePointerMove(event, false); return; }
+			if (!pointerGesture) { if (mode === 'authoring' && canAuthor()) {if(authoringTool==='select')modeling.move(event);else authoringTools?.handlePointerMove(event, false);} return; }
 		if (event.pointerType === 'touch') activeTouchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (pointerGesture.kind === 'touch-pair' && activeTouchPoints.size >= 2) {
 			const points = [...activeTouchPoints.values()];
@@ -1003,7 +1036,7 @@
 		}
 		function handleViewportPointerUp(event: PointerEvent) {
 			if (mode === 'authoring' && !pointerGesture) {
-				if (canAuthor()) authoringTools?.handlePointerUp(event, false);
+				if (canAuthor()) {if(authoringTool==='select')modeling.up(event);else authoringTools?.handlePointerUp(event, false);}
 			try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch { /* capture may already be released */ }
 			return;
 		}
@@ -1043,6 +1076,7 @@
 		try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch { /* capture may already be released */ }
 	}
 	function handleViewportPointerCancel(event: PointerEvent) {
+		modeling.cancel();
 		if (mode === 'authoring') authoringTools?.handlePointerCancel();
 		activeTouchPoints.delete(event.pointerId);
 		selectionBox = null;
@@ -1058,6 +1092,7 @@
 	}
 	function handleViewportWheel(event: WheelEvent) {
 		if (!viewport || mode !== 'authoring') return;
+		modeling.cancel();
 		authoringTools?.handleCameraChange();
 	}
 	function handleViewportKeyDown(event: KeyboardEvent) {
@@ -1065,6 +1100,18 @@
 		const target = event.target as HTMLElement | null;
 		if (target?.closest('input, textarea, select, [contenteditable="true"]') || event.repeat || busy || saveBusy || authoringOperationBusy) return;
 		const key = event.key.toLowerCase();
+		if(mode==='authoring'&&canAuthor()){
+			const lockedAxis=({ArrowRight:'x',ArrowLeft:'z',ArrowUp:'y'} as const)[event.key as 'ArrowRight'];
+			if(lockedAxis&&!event.ctrlKey&&!event.metaKey){event.preventDefault();if(authoringTool==='line'||authoringTool==='rectangle')authoringTools?.setAxisLock(lockedAxis);else modeling.setAxis(lockedAxis);return;}
+			if((event.ctrlKey||event.metaKey)&&key==='a'){event.preventDefault();setAuthoringTool('select');modeling.selectAll();return;}
+			if(key==='delete'||key==='backspace'){event.preventDefault();modeling.erase();return;}
+			if(!event.ctrlKey&&!event.metaKey&&!event.altKey){
+				if(key==='m'){event.preventDefault();setModelingMode('move');return;}
+				if(key==='e'){event.preventDefault();setModelingMode('erase');return;}
+				if(key==='f'){event.preventDefault();setModelingMode('offset');return;}
+				if(modelingState.mode==='move'&&['x','y','z'].includes(key)){event.preventDefault();modeling.setAxis(key as 'x'|'y'|'z');return;}
+			}
+		}
 		if ((event.ctrlKey || event.metaKey) && key === 'z') {
 				const canChangeHistory = mode === 'authoring'
 					? canAuthor() && (event.shiftKey ? !!authoringCheckpoint?.history.redo.length : !!authoringCheckpoint?.history.undo.length)
@@ -1075,6 +1122,7 @@
 			return;
 		}
 		if (event.key === 'Escape') {
+			modeling.cancel();authoringTools?.setAxisLock(null);
 			event.preventDefault();
 			finishEditorCameraGesture(pointerGesture);
 			selectionBox = null;
@@ -1350,6 +1398,7 @@
 		};
 	});
 	onDestroy(() => {
+		modeling.dispose();
 			generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
 			unsubscribeAuthoringRecovery?.(); unsubscribeAuthoringRecovery = null;
 			unsubscribeOccurrenceTransforms?.(); authoringTools?.dispose(); viewport?.dispose(); session?.dispose();
@@ -1512,6 +1561,9 @@
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 			<div class="viewport-frame" onpointerdown={handleViewportPointerDown} onpointermove={handleViewportPointerMove} onpointerup={handleViewportPointerUp} onpointercancel={handleViewportPointerCancel} onwheel={handleViewportWheel} onkeydown={handleViewportKeyDown} role="application" aria-label="3D model workspace" tabindex="0">
 			<div class="viewport" bind:this={viewportHost} aria-label="3D viewport"></div>
+			{#if mode==='authoring'&&authoringCheckpoint}
+				<ModelingPanel controller={modeling} view={modelingState} disabled={!canAuthor()} onMode={setModelingMode} onError={message=>{editorNotice=message;}} onRectangle={(width,depth)=>authoringTools?.setRectangleDimensions(width,depth)}/>
+			{/if}
 			{#if !hasModel && !busy}
 				<div class="empty-workspace">
 				<div class="empty-dropzone">
