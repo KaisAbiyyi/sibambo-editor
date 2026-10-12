@@ -11,6 +11,8 @@ import {
 } from '../../src/lib/authoring/geometry.js';
 import { AuthoringHistory } from '../../src/lib/authoring/history.js';
 import { buildAuthoringTopology } from '../../src/lib/authoring/topology.js';
+import { nearestAuthoringFaceHit } from '../../src/lib/authoring/inference.js';
+import { Ray, Vector3 } from 'three';
 
 const DOCUMENT_ID = '6120c783-9aa5-4b1b-af99-72a16f789154';
 
@@ -460,6 +462,54 @@ describe('authoring topology v2 Push/Pull', () => {
 				expect(topology.edges.get(key)?.faceIds.length).toBe(3);
 			}
 		} finally { document.dispose(); }
+	});
+
+	test('pulls the stationary nested child from underneath without moving the surrounding rings', () => {
+		for (const direction of [1, -1]) {
+			const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Nested underside' });
+			const history = new AuthoringHistory(null);
+			try {
+				const parentId = `${DOCUMENT_ID}:rectangle:1`;
+				const childId = `${DOCUMENT_ID}:face:2`;
+				history.execute(document, journalEntry(buildPlanarRectangleEdit(
+					document.snapshot().graph, parentId,
+					[[0, 0, 0], [6, 0, 0], [6, 0, 6], [0, 0, 6]], [0, 1, 0]
+				)));
+				history.execute(document, journalEntry(buildFaceLoopEdit(
+					document.snapshot().graph, childId,
+					[[2, 0, 2], [4, 0, 2], [4, 0, 4], [2, 0, 4]], [0, 1, 0]
+				)));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, parentId, direction, 3)));
+				const raised = document.snapshot().graph;
+				const baseId = `${DOCUMENT_ID}:op:3:base`;
+				const hit = nearestAuthoringFaceHit(raised, new Ray(new Vector3(3, -2 * direction, 3), new Vector3(0, direction, 0)));
+				expect(hit?.face.id).toBe(childId);
+
+				history.execute(document, journalEntry(buildPushPullFaceEdit(raised, childId, -0.4 * direction, 4)));
+				const pulled = document.snapshot().graph;
+				expect(vertexPositions(pulled, childId).map((point) => point[1])).toEqual(Array(4).fill(-0.4 * direction));
+				expect(vertexPositions(pulled, parentId)).toEqual(vertexPositions(raised, parentId));
+				expect(vertexPositions(pulled, baseId)).toEqual(vertexPositions(raised, baseId));
+				expect(pulled.meshes[0]!.faces.find((face) => face.id === baseId)).toEqual(raised.meshes[0]!.faces.find((face) => face.id === baseId));
+				expect(pulled.meshes[0]!.faces).toHaveLength(15); // two rings, child cap, and twelve wall segments
+				expect(validateEditableSubset(pulled)).toMatchObject({ editable: true });
+				expect([...buildAuthoringTopology(pulled.meshes[0]!).edges.values()].every((edge) => edge.faceIds.length >= 2)).toBe(true);
+				expect(history.undo(document)).toBe(true);
+				expect(document.snapshot().graph).toEqual(raised);
+				expect(history.redo(document)).toBe(true);
+				expect(document.snapshot().graph).toEqual(pulled);
+
+				history.execute(document, journalEntry(buildPushPullFaceEdit(pulled, childId, -0.2 * direction, 5)));
+				const extended = document.snapshot().graph;
+				for (const point of vertexPositions(extended, childId)) expect(point[1]).toBeCloseTo(-0.6 * direction, 12);
+				history.execute(document, journalEntry(buildPushPullFaceEdit(extended, childId, 0.6 * direction, 6)));
+				const returned = document.snapshot().graph;
+				for (const point of vertexPositions(returned, childId)) expect(point[1]).toBeCloseTo(0, 12);
+				expect(validateEditableSubset(returned)).toMatchObject({ editable: true });
+				history.execute(document, journalEntry(buildPushPullFaceEdit(returned, childId, direction, 7)));
+				for (const point of vertexPositions(document.snapshot().graph, childId)) expect(point[1]).toBeCloseTo(direction, 12);
+			} finally { document.dispose(); }
+		}
 	});
 
 	test('lets a nested child return to the surrounding level and then continue above it', () => {

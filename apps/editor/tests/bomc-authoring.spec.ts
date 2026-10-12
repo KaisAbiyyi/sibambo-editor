@@ -5,7 +5,7 @@ import { PerspectiveCamera, Vector3 } from 'three';
 import type { BomcGraph } from '@sibambo/bomc-document';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
 import type { AuthoringCommand } from '../src/lib/authoring/protocol';
-import { cameraPresetPose, uprightCameraUp } from '../../../packages/viewport/src/camera-navigation';
+import { cameraPresetPose, nearestGroundBoundsAnchor, orbitCameraDrag, uprightCameraUp } from '../../../packages/viewport/src/camera-navigation';
 import { SIBAMBO_CAMERA_DEFAULTS } from '../../../packages/viewport/src/renderer-defaults';
 import { verifyDownloadedAuthoringBomc, type AuthoringInteropReport } from '../../../tooling/testing/authoring-interop';
 import { BOMC_PROFILE_FIXTURE_PINS, resolveBomcProfileFixture } from '../../../tooling/testing/bomc-profile-fixtures';
@@ -797,6 +797,75 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 						expect(protruded.meshes[0]!.positions[vertex * 3 + 1]!).toBeCloseTo(parentY + 0.35, 12);
 					}
 				});
+
+		test('pulls the recessed child from the underside and preserves it through Save and reopen', async ({ page }, testInfo) => {
+			const runtimeErrors: string[] = [];
+			page.on('pageerror', (error) => runtimeErrors.push(error.message));
+			await createNew(page);
+			await ensureTopView(page);
+			await drawRectangle(page, 0.24, 0.24, 0.50, 0.48);
+			const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const parentId = rectangleEntityId(flat, 1);
+			await drawRectangleOnFace(page, flat, parentId, 'top');
+			const split = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const child = split.meshes[0]!.faces.find((face) => face.id !== parentId)!;
+			const childY = split.meshes[0]!.positions[child.outer[0]! * 3 + 1]!;
+			await pushPullProjectedFace(page, split, parentId, 0.55, 'top');
+			const raised = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const mesh = raised.meshes[0]!;
+			const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+			for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+				const [x, y, z] = mesh.positions.slice(offset, offset + 3);
+				bounds.min.x = Math.min(bounds.min.x, x!); bounds.max.x = Math.max(bounds.max.x, x!);
+				bounds.min.y = Math.min(bounds.min.y, y!); bounds.max.y = Math.max(bounds.max.y, y!);
+				bounds.min.z = Math.min(bounds.min.z, z!); bounds.max.z = Math.max(bounds.max.z, z!);
+			}
+			await ensureCameraView(page, 'front');
+			const canvas = page.locator('.viewport canvas');
+			const box = (await canvas.boundingBox())!;
+			const startPose = cameraPresetPose(bounds, 'front');
+			const anchor = nearestGroundBoundsAnchor(startPose, bounds)!;
+			const deltaY = -340;
+			const belowPose = orbitCameraDrag(startPose, 0, deltaY, undefined, anchor);
+			expect(belowPose.position.y).toBeLessThan(childY);
+			await page.getByRole('button', { name: 'Orbit', exact: true }).click();
+			await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.8);
+			await page.mouse.down();
+			await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.8 + deltaY, { steps: 12 });
+			await page.mouse.up();
+			const camera = new PerspectiveCamera(SIBAMBO_CAMERA_DEFAULTS.fov, box.width / box.height, SIBAMBO_CAMERA_DEFAULTS.near, SIBAMBO_CAMERA_DEFAULTS.far);
+			camera.position.copy(belowPose.position); camera.up.copy(uprightCameraUp(belowPose)); camera.lookAt(belowPose.target);
+			camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+			const center = [0, 1, 2].map((axis) => child.outer.reduce((sum, vertex) => sum + mesh.positions[vertex * 3 + axis]!, 0) / child.outer.length);
+			const screen = new Vector3(center[0]!, center[1]!, center[2]!).project(camera);
+			expect(Math.abs(screen.x)).toBeLessThan(1); expect(Math.abs(screen.y)).toBeLessThan(1);
+			const beforeRevision = (await currentCheckpoint(page)).snapshot.revision;
+			await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+			await page.mouse.click(box.x + (screen.x + 1) * box.width / 2, box.y + (1 - screen.y) * box.height / 2);
+			await page.getByLabel('Distance (m)').fill('-0.3');
+			await page.getByRole('button', { name: 'Commit', exact: true }).click();
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(beforeRevision + 1);
+			const command = (await authoringCommands(page)).filter((entry) => entry.kind === 'PUSH_PULL_FACE').at(-1)!;
+			expect(command).toMatchObject({ faceId: child.id, distance: -0.3 });
+			const pulled = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const movedChild = pulled.meshes[0]!.faces.find((face) => face.id === child.id)!;
+			for (const vertex of movedChild.outer) expect(pulled.meshes[0]!.positions[vertex * 3 + 1]!).toBeCloseTo(childY - 0.3, 12);
+			for (const retained of mesh.faces.filter((face) => face.id !== child.id)) {
+				expect(pulled.meshes[0]!.faces.find((face) => face.id === retained.id)).toStrictEqual(retained);
+			}
+			await canvas.screenshot({ path: testInfo.outputPath('nested-child-pulled-underneath.png') });
+			const saved = await saveBomc(page, testInfo.outputPath('nested-underside.bomc'));
+			const independent = await readWebBomc(new Uint8Array(saved.bytes));
+			try { expect(independent.snapshot().graph).toStrictEqual(pulled); } finally { independent.dispose(); }
+			await openFileMenu(page);
+			await page.getByRole('button', { name: 'Close Model' }).click();
+			await expect(page.locator('.empty-workspace')).toBeVisible();
+			await uploadBytes(page, saved.bytes, 'nested-underside-reopen.bomc');
+			await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible();
+			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(pulled);
+			await pushPullProjectedFace(page, pulled, child.id, -0.1, 'top');
+			expect(runtimeErrors).toEqual([]);
+		});
 
 					test('side surrounding parent can pass its protruding child cap instead of stopping at the prior cube extent', async ({ page }) => {
 				await createNew(page);

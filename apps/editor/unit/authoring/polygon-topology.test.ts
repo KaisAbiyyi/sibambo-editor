@@ -102,4 +102,31 @@ describe('authoring polygon and topology', () => {
 		expect(topology.adjacentFaceIds.get('child')).toContain('base-ring');
 		expect(topology.adjacentFaceIds.get('child')).toContain('reveal');
 	});
+
+	test('admits a nested reveal continuation only on opposite sides of the base ring', () => {
+		const mesh: Mesh = {
+			id: 'mesh', definitionId: 'definition',
+			positions: [
+				1, 0, 1, 3, 0, 1, 3, 0, 3, 1, 0, 3,
+				0, 0, 0, 4, 0, 0, 4, 0, 4, 0, 0, 4,
+				1, 1, 1, 3, 1, 1, 1, -1, 1, 3, -1, 1
+			],
+			faces: [
+				{ ...face('base-ring', [4, 5, 6, 7], []), holes: [[0, 1, 2, 3]] },
+				face('upper-reveal', [0, 1, 9, 8], [], [0, 0, 1]),
+				face('lower-reveal', [0, 1, 11, 10], [], [0, 0, -1])
+			]
+		};
+		expect(buildAuthoringTopology(mesh).edges.get('0:1')?.faceIds).toEqual(['base-ring', 'lower-reveal', 'upper-reveal']);
+		const sameSidePositions = [...mesh.positions];
+		sameSidePositions[31] = 0.5; sameSidePositions[34] = 0.5;
+		expect(() => buildAuthoringTopology({ ...mesh, positions: sameSidePositions })).toThrow(/unsupported three-face/);
+		const overlappingPositions = [...mesh.positions];
+		overlappingPositions[34] = 0.5;
+		expect(() => buildAuthoringTopology({ ...mesh, positions: overlappingPositions })).toThrow(/unsupported three-face/);
+		const skewPositions = [...mesh.positions];
+		skewPositions[32] = 1.5;
+		expect(() => buildAuthoringTopology({ ...mesh, positions: skewPositions })).toThrow(/unsupported three-face/);
+		expect(() => buildAuthoringTopology({ ...mesh, faces: [...mesh.faces, face('extra', [0, 1, 2], [])] })).toThrow(/more than three/);
+	});
 });
