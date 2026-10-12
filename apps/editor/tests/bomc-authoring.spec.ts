@@ -852,7 +852,7 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 					}
 				});
 
-		test('pulls the recessed child from the underside and preserves it through Save and reopen', async ({ page }, testInfo) => {
+		test('pulls the recessed child, parent underside and lower side through reversal, Save and reopen', async ({ page }, testInfo) => {
 			const runtimeErrors: string[] = [];
 			page.on('pageerror', (error) => runtimeErrors.push(error.message));
 			await createNew(page);
@@ -922,16 +922,39 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 			for(const ring of [baseAfter.outer,...baseAfter.holes])for(const vertex of ring)expect(movedBase.meshes[0]!.positions[vertex*3+1]!).toBeCloseTo(childY-.15,12);
 			for(const vertex of movedChild.outer)expect(movedBase.meshes[0]!.positions[vertex*3+1]!).toBeCloseTo(childY-.3,12);
 			await canvas.screenshot({path:testInfo.outputPath('parent-underside-border-follows.png')});
+			const lowerSide = movedBase.meshes[0]!.faces.filter(face => Math.abs(face.normal[2]) > .9
+				&& face.outer.every(vertex => movedBase.meshes[0]!.positions[vertex * 3 + 1]! <= childY - .15 + 1e-9))
+				.sort((a, b) => movedBase.meshes[0]!.positions[b.outer[0]! * 3 + 2]! - movedBase.meshes[0]!.positions[a.outer[0]! * 3 + 2]!)[0]!;
+			expect(lowerSide).toBeDefined();
+			const sidePoints = lowerSide.outer.map(vertex => movedBase.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3));
+			await pushPullProjectedFace(page, movedBase, lowerSide.id, lowerSide.normal[2] * .12, 'front');
+			const wider = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			await pushPullProjectedFace(page, wider, lowerSide.id, -lowerSide.normal[2] * .20, 'front');
+			const sideEdited = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const editedSide = sideEdited.meshes[0]!.faces.find(face => face.id === lowerSide.id)!;
+			const editedPoints = editedSide.outer.map(vertex => sideEdited.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3));
+			for (const point of sidePoints) expect(editedPoints.some(after => after.every((value, axis) => Math.abs(value - point[axis]! - (axis === 2 ? -.08 : 0)) < 1e-9))).toBe(true);
+			for (const face of movedBase.meshes[0]!.faces.filter(face => face.id === parentId || face.id.includes(':hole:'))) {
+				const after = sideEdited.meshes[0]!.faces.find(candidate => candidate.id === face.id)!;
+				for (const vertex of face.outer) expect(after.outer.map(index => sideEdited.meshes[0]!.positions.slice(index * 3, index * 3 + 3)))
+					.toContainEqual(movedBase.meshes[0]!.positions.slice(vertex * 3, vertex * 3 + 3));
+			}
+			await page.keyboard.press('Control+z');
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.graph).toStrictEqual(wider);
+			await page.keyboard.press('Control+Shift+z');
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.graph).toStrictEqual(sideEdited);
+			await canvas.screenshot({path:testInfo.outputPath('lower-child-side-push-pull.png')});
 			const saved = await saveBomc(page, testInfo.outputPath('nested-underside.bomc'));
 			const independent = await readWebBomc(new Uint8Array(saved.bytes));
-			try { expect(independent.snapshot().graph).toStrictEqual(movedBase); } finally { independent.dispose(); }
+			try { expect(independent.snapshot().graph).toStrictEqual(sideEdited); } finally { independent.dispose(); }
 			await openFileMenu(page);
 			await page.getByRole('button', { name: 'Close Model' }).click();
 			await expect(page.locator('.empty-workspace')).toBeVisible();
 			await uploadBytes(page, saved.bytes, 'nested-underside-reopen.bomc');
 			await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible();
-			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(movedBase);
-			await pushPullProjectedFace(page, movedBase, child.id, -0.1, 'top');
+			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(sideEdited);
+			await pushPullProjectedFace(page, sideEdited, lowerSide.id, lowerSide.normal[2] * .04, 'front');
+			await pushPullProjectedFace(page, (await currentCheckpoint(page)).snapshot.graph as BomcGraph, child.id, -0.1, 'top');
 			expect(runtimeErrors).toEqual([]);
 		});
 

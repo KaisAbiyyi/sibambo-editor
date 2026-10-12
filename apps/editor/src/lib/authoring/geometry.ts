@@ -1094,6 +1094,124 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 	const holeBoundaryHost = holeBoundaryHostForFace(mesh, target);
 	const parallelBridge = parallelHoleBridgeForFace(mesh, target);
 
+	// Rebase an existing step before another edit of the same side, including
+	// crossing back over the original seam. This avoids collapsed/overlapping
+	// ledges and makes a reverse edit equivalent to one net displacement.
+	const ledges = (topology.adjacentFaceIds.get(target.id) ?? []).map(id => topology.faceById.get(id)!)
+		.filter(face => face.id.endsWith(':ledge') && face.outer.length === 4 && face.holes.length === 0
+			&& Math.abs(dot3(face.normal, target.normal)) <= 1e-9);
+	if (ledges.length === 1 && target.holes.length === 0 && target.outer.length === 4) {
+		const ledge = ledges[0]!;
+		const shared = ledge.outer.filter(vertex => target.outer.includes(vertex));
+		const fixed = ledge.outer.filter(vertex => !target.outer.includes(vertex));
+		if (shared.length === 2 && fixed.length === 2) {
+			const restore = new Map<number, number>();
+			const offsets: number[] = [];
+			for (const vertex of shared) {
+				const point = vectorAt(mesh.positions, vertex);
+				for (const original of fixed) {
+					const delta = subtract3(point, vectorAt(mesh.positions, original));
+					const offset = dot3(delta, target.normal);
+					if (Math.hypot(...delta.map((value, axis) => value - offset * target.normal[axis]!)) <= 1e-9) {
+						restore.set(vertex, original); offsets.push(offset); break;
+					}
+				}
+			}
+			if (restore.size === 2 && Math.abs(offsets[0]! - offsets[1]!) <= 1e-9) {
+				const offset = offsets[0]!;
+				const positions = [...mesh.positions];
+				for (const vertex of target.outer.filter(vertex => !restore.has(vertex))) for (let axis = 0; axis < 3; axis += 1) {
+					positions[vertex * 3 + axis] = positions[vertex * 3 + axis]! - target.normal[axis]! * offset;
+				}
+				const restoredMesh: Mesh = { ...mesh, positions };
+				const seamPoints = new Set(restore.values());
+				const simplify = (source: readonly number[]): number[] => {
+					const ring = source.map(vertex => restore.get(vertex) ?? vertex).filter((vertex, index, values) => vertex !== values[(index + 1) % values.length]);
+					let changed = true;
+					while (changed && ring.length > 3) {
+						changed = false;
+						for (let index = 0; index < ring.length; index += 1) if (seamPoints.has(ring[index]!) && pointOnSegmentInterior3(
+							vectorAt(positions, ring[index]!) as Point3,
+							vectorAt(positions, ring[(index - 1 + ring.length) % ring.length]!) as Point3,
+							vectorAt(positions, ring[(index + 1) % ring.length]!) as Point3)) {
+							ring.splice(index, 1); changed = true; break;
+						}
+					}
+					return ring;
+				};
+				const faces = mesh.faces.filter(face => face.id !== ledge.id).map(face => {
+					const outer = simplify(face.outer), holes = face.holes.map(simplify);
+					if (sameTuple(outer, face.outer) && holes.every((ring, index) => sameTuple(ring, face.holes[index]!))
+						&& [outer, ...holes].flat().every(vertex => sameTuple(vectorAt(positions, vertex), vectorAt(mesh.positions, vertex)))) return face;
+					return faceFromRing(restoredMesh, face.id, outer, face.frontMaterialId!, face.backMaterialId,
+						v2FaceLabel(face.id, 'push-pull', operationId), face.normal, holes);
+				});
+				const restored = compactReferencedVertices(withSortedFaces(restoredMesh, faces));
+				const restoredGraph = { ...graph, meshes: [restored] };
+				const validation = validateEditableSubset(restoredGraph);
+				if (!validation.editable) invalid(`Nested side seam cannot be restored safely: ${validation.reason}`);
+				const netDistance = offset + distance;
+				const forward = Math.abs(netDistance) < MIN_AUTHORING_EDGE_METRES
+					? [{ type: 'put-mesh' as const, value: restored }]
+					: buildPushPullFaceEdit(restoredGraph, faceId, netDistance, operationSequence).forward;
+				return { forward, inverse: [{ type: 'put-mesh', value: oldMesh }] };
+			}
+		}
+	}
+
+	// A lower reveal meets the stationary upper reveal and the perforated base
+	// at one three-face edge. Detach only this side of the seam: translating the
+	// shared vertices would tilt the upper cavity wall. A planar ledge joins the
+	// old and new seams, and the base hole grows only when the child grows.
+	const junctionEdges = target.outer.map((a, index) => {
+		const b = target.outer[(index + 1) % target.outer.length]!;
+		return topology.edges.get(a < b ? `${a}:${b}` : `${b}:${a}`)!;
+	}).filter(edge => edge.faceIds.length === 3);
+	if (holeBoundaryHost && target.holes.length === 0 && target.outer.length === 4 && junctionEdges.length === 1) {
+		const seam = junctionEdges[0]!;
+		const upper = seam.faceIds.map(id => topology.faceById.get(id)!)
+			.find(face => face.id !== target.id && face.id !== holeBoundaryHost.id
+				&& Math.abs(Math.abs(dot3(face.normal, target.normal)) - 1) <= 1e-9);
+		if (upper) {
+			rejectOppositeBoundaryCrossing(mesh, target, distance);
+			const seamVertices = new Set([seam.a, seam.b]);
+			const freeVertices = new Set(target.outer.filter(vertex => !seamVertices.has(vertex)));
+			const positions = [...mesh.positions];
+			const detached = new Map<number, number>();
+			for (const vertex of target.outer) {
+				const point = vectorAt(mesh.positions, vertex);
+				const moved = point.map((value, axis) => value + target.normal[axis]! * distance);
+				if (seamVertices.has(vertex)) {
+					detached.set(vertex, positions.length / 3);
+					positions.push(...moved);
+				} else positions.splice(vertex * 3, 3, ...moved);
+			}
+			const expanded: Mesh = { ...mesh, positions };
+			const drop = projectionAxis(holeBoundaryHost.normal as Point3);
+			const hole = holeBoundaryHost.holes.find(ring => ring.includes(seam.a) && ring.includes(seam.b))!;
+			const midpoint = [0, 1, 2].map(axis => (positions[detached.get(seam.a)! * 3 + axis]! + positions[detached.get(seam.b)! * 3 + axis]!) / 2) as [number, number, number];
+			const growsHole = !pointInPolygonStrict(projectPoint2(midpoint, drop), hole.map(vertex => projectPoint2(vectorAt(mesh.positions, vertex) as Point3, drop)), 1e-9);
+			const insertions = [...seamVertices, ...detached.values()];
+			const faces = mesh.faces.map(face => {
+				const moving = face.id === target.id || face.outer.some(vertex => freeVertices.has(vertex)) || (growsHole && face.id === holeBoundaryHost.id);
+				const remap = (ring: readonly number[]) => insertVerticesOnRing(expanded, moving ? ring.map(vertex => detached.get(vertex) ?? vertex) : ring, insertions);
+				const outer = remap(face.outer), holes = face.holes.map(remap);
+				if (!moving && canonicalRingCycle(outer) === canonicalRingCycle(face.outer)
+					&& holes.every((ring, index) => canonicalRingCycle(ring) === canonicalRingCycle(face.holes[index]!))) return face;
+				return faceFromRing(expanded, face.id, outer, face.frontMaterialId!, face.backMaterialId,
+					v2FaceLabel(face.id, 'push-pull', operationId), face.normal, holes);
+			});
+			const ledgeId = `${operationId}:ledge`;
+			faces.push(faceFromRing(expanded, ledgeId,
+				[seam.a, seam.b, detached.get(seam.b)!, detached.get(seam.a)!], target.frontMaterialId!, null,
+				v2FaceLabel(ledgeId, 'push-pull', operationId), holeBoundaryHost.normal));
+			const nextMesh = withSortedFaces(expanded, faces);
+			const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });
+			if (!validation.editable) invalid(`Nested side Push/Pull result is outside the supported topology: ${validation.reason}`);
+			return { forward: [{ type: 'put-mesh', value: nextMesh }], inverse: [{ type: 'put-mesh', value: oldMesh }] };
+		}
+	}
+
 	if (insetHost && !(parallelBridge && parallelBridge.offset * distance > 0)) {
 		rejectOppositeBoundaryCrossing(mesh, target, distance);
 		const movingStart = mesh.positions.length / 3;

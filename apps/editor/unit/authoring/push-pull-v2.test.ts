@@ -36,6 +36,45 @@ function vertexPositions(graph: ReturnType<BomcDocument['snapshot']>['graph'], f
 }
 
 describe('authoring topology v2 Push/Pull', () => {
+	test('Push/Pulls every lower child side without moving the upper cavity, before and after moving the underside', () => {
+		for (const direction of [1, -1]) for (const moveBase of [false, true]) for (const sideIndex of [0, 1, 2, 3]) for (const distance of [0.25, -0.25]) {
+			const { document, history, faceId } = createNeutralRectangle();
+			try {
+				const childId = `${DOCUMENT_ID}:rectangle:2`;
+				history.execute(document, journalEntry(buildPlanarRectangleEdit(document.snapshot().graph, childId,
+					[[1, 0, 1], [2, 0, 1], [2, 0, 2], [1, 0, 2]], [0, 1, 0])));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, direction, 3)));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, -direction * 0.8, 4)));
+				if (moveBase) history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, `${DOCUMENT_ID}:op:3:base`, -direction * 0.2, 5)));
+				const before = document.snapshot().graph;
+				const sideId = `${DOCUMENT_ID}:op:4:side:${sideIndex}`;
+				const side = before.meshes[0]!.faces.find(face => face.id === sideId)!;
+				const upperFaces = before.meshes[0]!.faces.filter(face => face.id === faceId || face.id.includes(':op:3:hole:'));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(before, sideId, distance, 6)));
+				const after = document.snapshot().graph;
+				const points = vertexPositions(after, sideId);
+				for (const point of vertexPositions(before, sideId)) expect(points).toContainEqual(point.map((value, axis) => value + side.normal[axis]! * distance));
+				for (const face of upperFaces) for (const point of vertexPositions(before, face.id)) expect(vertexPositions(after, face.id)).toContainEqual(point);
+				expect(validateEditableSubset(after)).toMatchObject({ editable: true });
+				expect([...buildAuthoringTopology(after.meshes[0]!).edges.values()].every(edge => edge.faceIds.length >= 2)).toBe(true);
+				const opposite = after.meshes[0]!.faces.find(face => face.id !== sideId && face.id.startsWith(`${DOCUMENT_ID}:op:4:side:`)
+					&& Math.abs(face.normal.reduce((sum, value, axis) => sum + value * side.normal[axis]!, 0)) > .99)!;
+				const oppositePoint = vertexPositions(after, opposite.id)[0]!;
+				const crossing = oppositePoint.reduce((sum, value, axis) => sum + (value - points[0]![axis]!) * side.normal[axis]!, 0);
+				expect(() => buildPushPullFaceEdit(after, sideId, crossing, 7)).toThrow(/cross|collapse/i);
+				expect(document.snapshot().graph).toEqual(after);
+				expect(history.undo(document)).toBe(true); expect(document.snapshot().graph).toEqual(before);
+				expect(history.redo(document)).toBe(true); expect(document.snapshot().graph).toEqual(after);
+				for (const [sequence, movement] of [[7, distance], [8, -3 * distance], [9, distance]] as const) {
+					history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, sideId, movement, sequence)));
+					expect(validateEditableSubset(document.snapshot().graph)).toMatchObject({ editable: true });
+				}
+				// Returning to the original plane removes the ledge rather than leaving a zero-area face.
+				expect(vertexPositions(document.snapshot().graph, sideId)).toEqual(vertexPositions(before, sideId));
+				expect(document.snapshot().graph.meshes[0]!.faces.some(face => face.id.endsWith(':ledge'))).toBe(false);
+			} finally { document.dispose(); }
+		}
+	});
 	test('moves the parent underside and its inner border after the nested child has been pulled', () => {
 		for (const direction of [1, -1]) {
 			const { document, history, faceId } = createNeutralRectangle();

@@ -118,6 +118,13 @@ describe('authoring polygon and topology', () => {
 			]
 		};
 		expect(buildAuthoringTopology(mesh).edges.get('0:1')?.faceIds).toEqual(['base-ring', 'lower-reveal', 'upper-reveal']);
+		const split: Mesh = { ...mesh, positions: [...mesh.positions, 2, 0, 1], faces: mesh.faces.map(face => ({
+			...face, outer: face.outer.flatMap(vertex => vertex === 0 ? [0, 12] : [vertex]),
+			holes: face.holes.map(ring => ring.flatMap(vertex => vertex === 0 ? [0, 12] : [vertex]))
+		})) };
+		expect(buildAuthoringTopology(split).edges.get('0:12')?.faceIds).toEqual(['base-ring', 'lower-reveal', 'upper-reveal']);
+		const bent = [...split.positions]; bent[37] = 0.3;
+		expect(() => buildAuthoringTopology({ ...split, positions: bent })).toThrow(/unsupported three-face/);
 		const sameSidePositions = [...mesh.positions];
 		sameSidePositions[31] = 0.5; sameSidePositions[34] = 0.5;
 		expect(() => buildAuthoringTopology({ ...mesh, positions: sameSidePositions })).toThrow(/unsupported three-face/);
