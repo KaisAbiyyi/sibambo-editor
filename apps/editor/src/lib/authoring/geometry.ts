@@ -299,16 +299,19 @@ function pointEqual(left: readonly number[], right: readonly number[]): boolean 
 }
 
 function rawRingNormal(mesh: Mesh, ring: readonly number[]): [number, number, number] {
+	// Sum the signed area of the complete ring. A first fan triangle can be
+	// almost collinear after an edge split, amplifying construction roundoff.
+	const origin = vectorAt(mesh.positions, ring[0]!);
+	const normal = [0, 0, 0];
 	for (let index = 1; index + 1 < ring.length; index += 1) {
-		const a = vectorAt(mesh.positions, ring[0]!);
-		const b = vectorAt(mesh.positions, ring[index]!);
-		const c = vectorAt(mesh.positions, ring[index + 1]!);
-		const ux = b[0] - a[0]; const uy = b[1] - a[1]; const uz = b[2] - a[2];
-		const vx = c[0] - a[0]; const vy = c[1] - a[1]; const vz = c[2] - a[2];
-		const nx = uy * vz - uz * vy; const ny = uz * vx - ux * vz; const nz = ux * vy - uy * vx;
-		const magnitude = Math.hypot(nx, ny, nz);
-		if (magnitude >= 1e-15 && Number.isFinite(magnitude)) return [nx / magnitude, ny / magnitude, nz / magnitude];
+		const a = subtract3(vectorAt(mesh.positions, ring[index]!), origin);
+		const b = subtract3(vectorAt(mesh.positions, ring[index + 1]!), origin);
+		normal[0]! += a[1] * b[2] - a[2] * b[1];
+		normal[1]! += a[2] * b[0] - a[0] * b[2];
+		normal[2]! += a[0] * b[1] - a[1] * b[0];
 	}
+	const magnitude = Math.hypot(...normal);
+	if (magnitude >= 1e-15 && Number.isFinite(magnitude)) return normal.map(value => value / magnitude) as [number, number, number];
 	invalid('Face ring is degenerate.');
 }
 
@@ -1066,6 +1069,65 @@ function holeBoundaryExitForFace(mesh: Mesh, target: Face, host: Face): HoleBoun
 	return exits[0]!;
 }
 
+/** Heal a step back into its coplanar host using canonical boundary cycles. */
+function mergeStepIntoHost(mesh: Mesh, host: Face, step: Face, operationId: string): Face {
+	const directed = new Map<string, readonly [number, number]>();
+	for (const face of [host, step]) for (const [ringIndex, source] of [face.outer, ...face.holes].entries()) {
+		let ring = [...source];
+		if ((dot3(rawRingNormal(mesh, ring), host.normal) > 0) !== (ringIndex === 0)) ring.reverse();
+		for (let index = 0; index < ring.length; index += 1) {
+			const a = ring[index]!, b = ring[(index + 1) % ring.length]!;
+			const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+			const previous = directed.get(key);
+			if (previous) {
+				if (previous[0] !== b || previous[1] !== a) invalid('Nested side step overlaps its containing face.');
+				directed.delete(key);
+			} else directed.set(key, [a, b]);
+		}
+	}
+	const loops: number[][] = [];
+	while (directed.size) {
+		const start = directed.values().next().value![0], ring = [start];
+		let current = start;
+		do {
+			const next = [...directed.entries()].filter(([, edge]) => edge[0] === current);
+			if (next.length !== 1) invalid('Nested side step would create a branching boundary.');
+			const [key, edge] = next[0]!;
+			directed.delete(key); current = edge[1];
+			if (current !== start) ring.push(current);
+		} while (current !== start);
+		loops.push(ring);
+	}
+	const area = (ring: readonly number[]) => {
+		let sum: Point3 = [0, 0, 0];
+		for (let index = 0; index < ring.length; index += 1) {
+			const a = vectorAt(mesh.positions, ring[index]!), b = vectorAt(mesh.positions, ring[(index + 1) % ring.length]!);
+			sum = [sum[0] + a[1] * b[2] - a[2] * b[1], sum[1] + a[2] * b[0] - a[0] * b[2], sum[2] + a[0] * b[1] - a[1] * b[0]];
+		}
+		return Math.abs(dot3(sum, host.normal));
+	};
+	loops.sort((a, b) => area(b) - area(a));
+	return faceFromRing(mesh, host.id, loops[0]!, host.frontMaterialId!, host.backMaterialId,
+		v2FaceLabel(host.id, 'push-pull', operationId), host.normal, loops.slice(1));
+}
+
+function openStepHost(mesh: Mesh, host: Face, exit: HoleBoundaryExit, boundaryStart: number, boundaryEnd: number, operationId: string): Face {
+	const hole = host.holes[exit.holeIndex]!;
+	const alternative: number[] = [];
+	let cursor = (exit.holeEdgeIndex - 1 + hole.length) % hole.length;
+	while (hole[cursor] !== exit.holeEnd) {
+		alternative.push(hole[cursor]!);
+		cursor = (cursor - 1 + hole.length) % hole.length;
+		if (alternative.length > hole.length) invalid('Unable to open the nested step host boundary.');
+	}
+	const notch = exit.startParameter <= exit.endParameter
+		? [boundaryStart, ...alternative, boundaryEnd] : [boundaryEnd, ...alternative.reverse(), boundaryStart];
+	return faceFromRing(mesh, host.id,
+		[...host.outer.slice(0, exit.outerEdgeIndex + 1), ...notch, ...host.outer.slice(exit.outerEdgeIndex + 1)],
+		host.frontMaterialId!, host.backMaterialId, v2FaceLabel(host.id, 'push-pull', operationId), host.normal,
+		host.holes.filter((_ring, index) => index !== exit.holeIndex));
+}
+
 /** Push/Pull one canonical face. Open standalone faces become prisms; manifold faces move their shared boundary. */
 export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance: number, operationSequence: number): GeometryEdit {
 	if (!finite(distance) || Math.abs(distance) < MIN_AUTHORING_EDGE_METRES) invalid('Push/Pull distance must be finite and at least 1e-6 metres from zero.');
@@ -1102,31 +1164,43 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 			&& Math.abs(dot3(face.normal, target.normal)) <= 1e-9);
 	if (ledges.length === 1 && target.holes.length === 0 && target.outer.length === 4) {
 		const ledge = ledges[0]!;
+		const stepPrefix = ledge.id.slice(0, ledge.id.lastIndexOf(':ledge'));
+		const steps = mesh.faces.filter(face => face.id === `${stepPrefix}:ledge` || face.id === `${stepPrefix}:ledge:inner`);
 		const shared = ledge.outer.filter(vertex => target.outer.includes(vertex));
-		const fixed = ledge.outer.filter(vertex => !target.outer.includes(vertex));
-		if (shared.length === 2 && fixed.length === 2) {
+		const fixed = [...new Set(steps.flatMap(face => face.outer))].filter(vertex => !shared.includes(vertex));
+		if (shared.length === 2) {
 			const restore = new Map<number, number>();
 			const offsets: number[] = [];
 			for (const vertex of shared) {
 				const point = vectorAt(mesh.positions, vertex);
-				for (const original of fixed) {
+				const candidates = fixed.map(original => {
 					const delta = subtract3(point, vectorAt(mesh.positions, original));
 					const offset = dot3(delta, target.normal);
-					if (Math.hypot(...delta.map((value, axis) => value - offset * target.normal[axis]!)) <= 1e-9) {
-						restore.set(vertex, original); offsets.push(offset); break;
-					}
-				}
+					return { original, offset, aligned: Math.hypot(...delta.map((value, axis) => value - offset * target.normal[axis]!)) <= 1e-9 };
+				}).filter(candidate => candidate.aligned).sort((a, b) => Math.abs(b.offset) - Math.abs(a.offset));
+				if (candidates[0]) { restore.set(vertex, candidates[0].original); offsets.push(candidates[0].offset); }
 			}
 			if (restore.size === 2 && Math.abs(offsets[0]! - offsets[1]!) <= 1e-9) {
 				const offset = offsets[0]!;
+				const innerStep = steps.find(face => face.id.endsWith(':inner')) ?? ledge;
+				const edgeKeys = (face: Face) => new Set([face.outer, ...face.holes].flatMap(ring => ring.map((a, index) => {
+					const b = ring[(index + 1) % ring.length]!; return a < b ? `${a}:${b}` : `${b}:${a}`;
+				})));
+				const stepEdges = edgeKeys(innerStep);
+				const hosts = mesh.faces.filter(face => !steps.includes(face) && Math.abs(Math.abs(dot3(face.normal, ledge.normal)) - 1) <= 1e-9
+					&& [...edgeKeys(face)].filter(key => stepEdges.has(key)).length >= 2);
+				if (hosts.length !== 1) invalid('Nested side step requires one coplanar containing face.');
+				const host = mergeStepIntoHost(mesh, hosts[0]!, innerStep, operationId);
 				const positions = [...mesh.positions];
 				for (const vertex of target.outer.filter(vertex => !restore.has(vertex))) for (let axis = 0; axis < 3; axis += 1) {
 					positions[vertex * 3 + axis] = positions[vertex * 3 + axis]! - target.normal[axis]! * offset;
 				}
 				const restoredMesh: Mesh = { ...mesh, positions };
-				const seamPoints = new Set(restore.values());
-				const simplify = (source: readonly number[]): number[] => {
-					const ring = source.map(vertex => restore.get(vertex) ?? vertex).filter((vertex, index, values) => vertex !== values[(index + 1) % values.length]);
+				const seamPoints = new Set(steps.flatMap(face => face.outer));
+				const simplify = (source: readonly number[], moving: boolean): number[] => {
+					const restoringSeam = moving && source.some(vertex => restore.has(vertex));
+					const ring = source.filter(vertex => !restoringSeam || !seamPoints.has(vertex) || restore.has(vertex))
+						.map(vertex => moving ? restore.get(vertex) ?? vertex : vertex).filter((vertex, index, values) => vertex !== values[(index + 1) % values.length]);
 					let changed = true;
 					while (changed && ring.length > 3) {
 						changed = false;
@@ -1139,8 +1213,11 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 					}
 					return ring;
 				};
-				const faces = mesh.faces.filter(face => face.id !== ledge.id).map(face => {
-					const outer = simplify(face.outer), holes = face.holes.map(simplify);
+				const freeVertices = target.outer.filter(vertex => !restore.has(vertex));
+				const faces = mesh.faces.filter(face => !steps.includes(face)).map(original => {
+					const face = original.id === host.id ? host : original;
+					const moving = face.id === target.id || face.outer.some(vertex => freeVertices.includes(vertex));
+					const outer = simplify(face.outer, moving), holes = face.holes.map(ring => simplify(ring, moving || face.id === host.id));
 					if (sameTuple(outer, face.outer) && holes.every((ring, index) => sameTuple(ring, face.holes[index]!))
 						&& [outer, ...holes].flat().every(vertex => sameTuple(vectorAt(positions, vertex), vectorAt(mesh.positions, vertex)))) return face;
 					return faceFromRing(restoredMesh, face.id, outer, face.frontMaterialId!, face.backMaterialId,
@@ -1191,9 +1268,28 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 			const hole = holeBoundaryHost.holes.find(ring => ring.includes(seam.a) && ring.includes(seam.b))!;
 			const midpoint = [0, 1, 2].map(axis => (positions[detached.get(seam.a)! * 3 + axis]! + positions[detached.get(seam.b)! * 3 + axis]!) / 2) as [number, number, number];
 			const growsHole = !pointInPolygonStrict(projectPoint2(midpoint, drop), hole.map(vertex => projectPoint2(vectorAt(mesh.positions, vertex) as Point3, drop)), 1e-9);
-			const insertions = [...seamVertices, ...detached.values()];
+			const motionNormal = target.normal.map(value => value * Math.sign(distance)) as [number, number, number];
+			const exit = growsHole ? holeBoundaryExitForFace(mesh, { ...target, normal: motionNormal }, holeBoundaryHost) : null;
+			const tolerance = 1e-9 * Math.max(1, Math.abs(distance));
+			const reachesBoundary = !!exit && Math.abs(distance) + tolerance >= exit.distance;
+			const boundary = new Map<number, number>();
+			if (exit && reachesBoundary) for (const vertex of seamVertices) {
+				if (Math.abs(Math.abs(distance) - exit.distance) <= tolerance) boundary.set(vertex, detached.get(vertex)!);
+				else {
+					const point = vectorAt(mesh.positions, vertex).map((value, axis) => value + motionNormal[axis]! * exit.distance) as [number, number, number];
+					const index = exactVertexIndex(positions, point) ?? positions.length / 3;
+					if (index === positions.length / 3) positions.push(...point);
+					boundary.set(vertex, index);
+				}
+			}
+			const openedHost = exit && reachesBoundary ? openStepHost(expanded, holeBoundaryHost, exit,
+				boundary.get(exit.holeStart)!, boundary.get(exit.holeEnd)!, operationId) : null;
+			const insertions = [...seamVertices, ...detached.values(), ...boundary.values()];
 			const faces = mesh.faces.map(face => {
-				const moving = face.id === target.id || face.outer.some(vertex => freeVertices.has(vertex)) || (growsHole && face.id === holeBoundaryHost.id);
+				if (openedHost && face.id === openedHost.id) return faceFromRing(expanded, face.id,
+					insertVerticesOnRing(expanded, openedHost.outer, insertions), face.frontMaterialId!, face.backMaterialId,
+					v2FaceLabel(face.id, 'push-pull', operationId), face.normal, openedHost.holes);
+				const moving = face.id === target.id || face.outer.some(vertex => freeVertices.has(vertex)) || (growsHole && !openedHost && face.id === holeBoundaryHost.id);
 				const remap = (ring: readonly number[]) => insertVerticesOnRing(expanded, moving ? ring.map(vertex => detached.get(vertex) ?? vertex) : ring, insertions);
 				const outer = remap(face.outer), holes = face.holes.map(remap);
 				if (!moving && canonicalRingCycle(outer) === canonicalRingCycle(face.outer)
@@ -1202,8 +1298,13 @@ export function buildPushPullFaceEdit(graph: BomcGraph, faceId: string, distance
 					v2FaceLabel(face.id, 'push-pull', operationId), face.normal, holes);
 			});
 			const ledgeId = `${operationId}:ledge`;
-			faces.push(faceFromRing(expanded, ledgeId,
-				[seam.a, seam.b, detached.get(seam.b)!, detached.get(seam.a)!], target.frontMaterialId!, null,
+			const overhang = reachesBoundary && exit && Math.abs(distance) - exit.distance > tolerance;
+			const innerId = overhang ? `${ledgeId}:inner` : ledgeId;
+			faces.push(faceFromRing(expanded, innerId,
+				[seam.a, seam.b, boundary.get(seam.b) ?? detached.get(seam.b)!, boundary.get(seam.a) ?? detached.get(seam.a)!], target.frontMaterialId!, null,
+				v2FaceLabel(innerId, 'push-pull', operationId), holeBoundaryHost.normal));
+			if (overhang) faces.push(faceFromRing(expanded, ledgeId,
+				[boundary.get(seam.a)!, boundary.get(seam.b)!, detached.get(seam.b)!, detached.get(seam.a)!], target.frontMaterialId!, null,
 				v2FaceLabel(ledgeId, 'push-pull', operationId), holeBoundaryHost.normal));
 			const nextMesh = withSortedFaces(expanded, faces);
 			const validation = validateEditableSubset({ ...graph, meshes: [nextMesh] });

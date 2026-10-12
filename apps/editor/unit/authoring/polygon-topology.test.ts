@@ -82,6 +82,17 @@ describe('authoring polygon and topology', () => {
 		expect(() => buildAuthoringTopology(mesh)).toThrow(/non-manifold/i);
 	});
 
+	test('admits the outer-ring shell step only with opposite coplanar regions and a perpendicular quad', () => {
+		const mesh: Mesh = { id: 'step', definitionId: 'definition',
+			positions: [0,0,0, 2,0,0, 2,1,0, 0,1,0, 2,-1,0, 0,-1,0, 2,0,1, 0,0,1],
+			faces: [face('upper',[0,1,2,3],[],[0,0,1]),face('lower',[0,1,4,5],[],[0,0,-1]),face('ledge',[0,1,6,7],[],[0,1,0])] };
+		expect(buildAuthoringTopology(mesh).edges.get('0:1')?.faceIds).toEqual(['ledge','lower','upper']);
+		const overlap = [...mesh.positions]; overlap[13] = .5; overlap[16] = .5;
+		expect(() => buildAuthoringTopology({...mesh,positions:overlap})).toThrow(/unsupported three-face/);
+		const tilted = [...mesh.positions]; tilted[14] = .5;
+		expect(() => buildAuthoringTopology({...mesh,positions:tilted})).toThrow(/unsupported three-face/);
+	});
+
 	test('admits only the bounded nested Push/Pull three-face junction pattern', () => {
 		const mesh: Mesh = {
 			id: 'mesh',

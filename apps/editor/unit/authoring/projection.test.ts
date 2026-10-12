@@ -87,6 +87,13 @@ describe('canonical authoring projection', () => {
 				const neutral = faces.find((face) => face.name === `${DOCUMENT_ID}:rectangle:2`)!;
 				expect((legacy.material as MeshStandardMaterial).color.getHexString()).toBe('9b1c31');
 				expect((neutral.material as MeshStandardMaterial).color.getHexString()).toBe('e2e2e2');
+				expect((neutral.material as MeshStandardMaterial).userData.authoringBackFaceColor).toBe('#9fb8c7');
+				expect((legacy.material as MeshStandardMaterial).userData.authoringBackFaceColor).toBeUndefined();
+				const shader = { uniforms: {}, fragmentShader: '#include <color_fragment>' } as Parameters<MeshStandardMaterial['onBeforeCompile']>[0];
+				(neutral.material as MeshStandardMaterial).onBeforeCompile(shader, null!);
+				expect(shader.fragmentShader).toContain('if (!gl_FrontFacing)');
+				expect(shader.uniforms.authoringBackFaceColor!.value.getHexString()).toBe('9fb8c7');
+				expect(document.snapshot().graph.materials.find(material => material.id.endsWith('authoring-neutral'))!.rgba).toEqual([226, 226, 226, 255]);
 			} finally { disposeProjection(projection.group); }
 		} finally { document.dispose(); }
 	});

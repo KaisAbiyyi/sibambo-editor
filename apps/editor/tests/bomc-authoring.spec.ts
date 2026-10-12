@@ -852,6 +852,95 @@ test.describe('canonical BOMC authoring through the real Editor page', () => {
 					}
 				});
 
+		test('renders blue back faces and soft-snaps a lower side before extending beyond the parent edge', async ({ page }, testInfo) => {
+			await createNew(page);
+			await ensureTopView(page);
+			await drawRectangle(page, .35, .35, .25, .25);
+			const flat = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const parentId = rectangleEntityId(flat, 1);
+			await drawRectangleOnFace(page, flat, parentId, 'top');
+			const split = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			const child = split.meshes[0]!.faces.find(face => face.id !== parentId)!;
+			await pushPullProjectedFace(page, split, parentId, 1, 'top');
+			await pushPullProjectedFace(page, (await currentCheckpoint(page)).snapshot.graph as BomcGraph, child.id, -.8, 'top');
+			const graph = (await currentCheckpoint(page)).snapshot.graph as BomcGraph, mesh = graph.meshes[0]!;
+			const lower = mesh.faces.filter(face => Math.abs(face.normal[2]) > .9 && face.outer.every(v => mesh.positions[v * 3 + 1]! <= 1e-9))
+				.sort((a, b) => mesh.positions[b.outer[0]! * 3 + 2]! - mesh.positions[a.outer[0]! * 3 + 2]!)[0]!;
+			const bounds = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+			for (let i = 0; i < mesh.positions.length; i += 3) for (const [axis, name] of ['x', 'y', 'z'].entries()) {
+				bounds.min[name as 'x' | 'y' | 'z'] = Math.min(bounds.min[name as 'x' | 'y' | 'z'], mesh.positions[i + axis]!);
+				bounds.max[name as 'x' | 'y' | 'z'] = Math.max(bounds.max[name as 'x' | 'y' | 'z'], mesh.positions[i + axis]!);
+			}
+			await ensureCameraView(page, 'iso');
+			const canvas = page.locator('.viewport canvas'), box = (await canvas.boundingBox())!;
+			const startPose = cameraPresetPose(bounds, 'iso');
+			const belowPose = orbitCameraDrag(startPose, 0, -340, undefined, nearestGroundBoundsAnchor(startPose, bounds)!);
+			expect(belowPose.position.y).toBeLessThan(-.8);
+			await page.getByRole('button', { name: 'Orbit', exact: true }).click();
+			await page.mouse.move(box.x + box.width / 2, box.y + box.height * .8);
+			await page.mouse.down();
+			await page.mouse.move(box.x + box.width / 2, box.y + box.height * .8 - 340, { steps: 12 });
+			await page.mouse.up();
+			const camera = new PerspectiveCamera(SIBAMBO_CAMERA_DEFAULTS.fov, box.width / box.height, SIBAMBO_CAMERA_DEFAULTS.near, SIBAMBO_CAMERA_DEFAULTS.far);
+			camera.position.copy(belowPose.position); camera.up.copy(uprightCameraUp(belowPose)); camera.lookAt(belowPose.target);
+			camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+			const center = lower.outer.reduce((sum, v) => sum.add(new Vector3(...mesh.positions.slice(v * 3, v * 3 + 3) as [number, number, number])), new Vector3()).multiplyScalar(1 / lower.outer.length);
+			const screen = (point: Vector3) => { const p = point.clone().project(camera); return { x: box.x + (p.x + 1) * box.width / 2, y: box.y + (1 - p.y) * box.height / 2 }; };
+			await page.getByRole('button', { name: 'Select', exact: true }).click();
+			await page.mouse.move(5, 5);
+			const sample = screen(center);
+			await expect.poll(async () => {
+				const png = await canvas.screenshot();
+				return page.evaluate(async ({ bytes, x, y }) => {
+					const bitmap = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
+					const surface = new OffscreenCanvas(bitmap.width, bitmap.height), context = surface.getContext('2d')!;
+					context.drawImage(bitmap, 0, 0); const pixel = context.getImageData(Math.round(x), Math.round(y), 1, 1).data;
+					bitmap.close(); return pixel[2]! - pixel[0]!;
+				}, { bytes: [...png], x: sample.x - box.x, y: sample.y - box.y });
+			}, { timeout: 10_000 }).toBeGreaterThan(8);
+			await canvas.screenshot({ path: testInfo.outputPath('blue-back-face.png') });
+			const parentEdge = bounds.max.z, travel = (parentEdge - center.z) / lower.normal[2];
+			await testInfo.attach('edge-snap-input', { body: JSON.stringify({ graph, faceId: lower.id, travel }), contentType: 'application/json' });
+			const at = (z: number) => screen(new Vector3(center.x, center.y, z));
+			const revision = (await currentCheckpoint(page)).snapshot.revision;
+			await page.getByRole('button', { name: 'Push/Pull', exact: true }).click();
+			await page.mouse.click(sample.x, sample.y);
+			await page.mouse.move(at(parentEdge - .01).x, at(parentEdge - .01).y);
+			await expect(page.locator('.footer-status')).toContainText('On Edge');
+			// The snap releases in the same gesture, without a canonical mutation.
+			await page.mouse.move(at(parentEdge + .5).x, at(parentEdge + .5).y);
+			await expect(page.locator('.footer-status')).not.toContainText('On Edge');
+			expect((await currentCheckpoint(page)).snapshot.revision).toBe(revision);
+			await page.mouse.move(at(parentEdge - .01).x, at(parentEdge - .01).y);
+			await expect(page.locator('.footer-status')).toContainText('On Edge');
+			await page.mouse.click(at(parentEdge - .01).x, at(parentEdge - .01).y);
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(revision + 1);
+			expect((await authoringCommands(page)).filter(c => c.kind === 'PUSH_PULL_FACE').at(-1)).toMatchObject({ faceId: lower.id, distance: travel });
+			const snapped = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			for (const v of snapped.meshes[0]!.faces.find(f => f.id === lower.id)!.outer) expect(snapped.meshes[0]!.positions[v * 3 + 2]!).toBeCloseTo(parentEdge, 9);
+			const again = at(parentEdge);
+			await page.mouse.click(again.x, again.y);
+			await page.mouse.move(at(parentEdge + .5).x, at(parentEdge + .5).y);
+			await expect(page.locator('.footer-status')).not.toContainText('On Edge');
+			await page.mouse.click(at(parentEdge + .5).x, at(parentEdge + .5).y);
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.revision).toBe(revision + 2);
+			const extended = (await currentCheckpoint(page)).snapshot.graph as BomcGraph;
+			for (const v of extended.meshes[0]!.faces.find(f => f.id === lower.id)!.outer) expect(extended.meshes[0]!.positions[v * 3 + 2]!).toBeGreaterThan(parentEdge + .3);
+			await page.keyboard.press('Control+z');
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.graph).toStrictEqual(snapped);
+			await page.keyboard.press('Control+Shift+z');
+			await expect.poll(async () => (await currentCheckpoint(page)).snapshot.graph).toStrictEqual(extended);
+			await canvas.screenshot({ path: testInfo.outputPath('beyond-parent-edge.png') });
+			const saved = await saveBomc(page, testInfo.outputPath('edge-extended.bomc'));
+			const independent = await readWebBomc(new Uint8Array(saved.bytes));
+			try { expect(independent.snapshot().graph).toStrictEqual(extended); } finally { independent.dispose(); }
+			await openFileMenu(page); await page.getByRole('button', { name: 'Close Model' }).click();
+			await uploadBytes(page, saved.bytes, 'edge-extended-reopen.bomc');
+			await expect(page.getByText('Writable BOMC', { exact: true }).first()).toBeVisible();
+			expect((await currentCheckpoint(page)).snapshot.graph).toStrictEqual(extended);
+			await pushPullProjectedFace(page, extended, lower.id, -lower.normal[2] * .7, 'front');
+		});
+
 		test('pulls the recessed child, parent underside and lower side through reversal, Save and reopen', async ({ page }, testInfo) => {
 			const runtimeErrors: string[] = [];
 			page.on('pageerror', (error) => runtimeErrors.push(error.message));

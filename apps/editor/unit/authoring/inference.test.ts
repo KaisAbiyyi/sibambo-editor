@@ -2,12 +2,36 @@ import { describe, expect, test } from 'bun:test';
 import { OrthographicCamera, PerspectiveCamera, Raycaster, Vector2, Vector3, type Camera } from 'three';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { buildPlanarRectangleEdit, buildPushPullFaceEdit } from '../../src/lib/authoring/geometry.js';
-import { resolveAuthoringInference } from '../../src/lib/authoring/inference.js';
+import { resolveAuthoringInference, resolvePushPullLevelSnap } from '../../src/lib/authoring/inference.js';
 import { buildModelEdit,contextGraph } from '../../src/lib/authoring/model.js';
 
 const DOCUMENT_ID = '3ed35ead-9640-4e34-b10c-0983190ec99d';
 const WIDTH = 1000;
 const HEIGHT = 1000;
+
+test('Push/Pull softly snaps below the parent edge and releases beyond its CSS pixel radius', () => {
+	const document = BomcDocument.create({ documentId: DOCUMENT_ID, name: 'Side edge snap' });
+	try {
+		document.transact(buildPlanarRectangleEdit(document.snapshot().graph, `${DOCUMENT_ID}:rectangle:1`, [[0,0,0],[4,0,0],[4,0,3],[0,0,3]], [0,1,0]).forward);
+		document.transact(buildPlanarRectangleEdit(document.snapshot().graph, `${DOCUMENT_ID}:rectangle:2`, [[1,0,1],[2,0,1],[2,0,2],[1,0,2]], [0,1,0]).forward);
+		document.transact(buildPushPullFaceEdit(document.snapshot().graph, `${DOCUMENT_ID}:rectangle:1`, 1, 3).forward);
+		document.transact(buildPushPullFaceEdit(document.snapshot().graph, `${DOCUMENT_ID}:rectangle:2`, -.8, 4).forward);
+		const graph = document.snapshot().graph, mesh = graph.meshes[0]!;
+		const side = mesh.faces.find(face => Math.abs(face.normal[0]) > .9 && face.outer.every(vertex => mesh.positions[vertex*3] === 2 && mesh.positions[vertex*3+1]! <= 0))!;
+		const camera = new OrthographicCamera(-5,5,5,-5,.1,100); camera.position.set(0,0,10); camera.lookAt(0,0,0); camera.updateProjectionMatrix();
+		const viewport = cameraViewport(camera), anchor = [2,-.4,1.5] as const;
+		const projected = viewport.projectWorldToScreen([3.99,-.4,1.5]);
+		const options = {graph,viewport,faceId:side.id,clientX:projected.x,clientY:projected.y,dragAnchor:anchor,dragDistance:1.99/side.normal[0]!};
+		const snap = resolvePushPullLevelSnap(options);
+		expect(snap?.distance).toBe(2/side.normal[0]!);
+		expect(snap?.inference.kind).toBe('edge');
+		expect(snap?.inference.point).toEqual([4,0,1.5]);
+		expect(resolvePushPullLevelSnap({...options,dragDistance:2.3/side.normal[0]!})).toBeNull();
+		const zoomed = new OrthographicCamera(-10,10,10,-10,.1,100); zoomed.position.copy(camera.position); zoomed.lookAt(0,0,0); zoomed.updateProjectionMatrix();
+		expect(resolvePushPullLevelSnap({...options,viewport:cameraViewport(zoomed),dragDistance:2.15/side.normal[0]!})?.distance).toBe(2/side.normal[0]!);
+		expect(resolvePushPullLevelSnap({...options,dragDistance:2.15/side.normal[0]!})).toBeNull();
+	} finally { document.dispose(); }
+});
 
 function cameraViewport(camera: Camera) {
 	const raycaster = new Raycaster();

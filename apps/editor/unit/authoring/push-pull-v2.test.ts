@@ -29,6 +29,30 @@ function createNeutralRectangle() {
 	return { document, history, faceId };
 }
 
+test('parent-edge snaps tolerate machine-roundoff in a child construction plane without accepting reversed normals', () => {
+	const { document, history, faceId } = createNeutralRectangle();
+	try {
+		const childId = `${DOCUMENT_ID}:rectangle:2`, y = 1.7763568394002505e-15;
+		history.execute(document, journalEntry(buildPlanarRectangleEdit(document.snapshot().graph, childId,
+			[[1.1,y,1.1],[2.3,y,1.1],[2.3,y,2.1],[1.1,y,2.1]], [0,1,0])));
+		history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, 1, 3)));
+		history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, -.8, 4)));
+		const before = document.snapshot().graph;
+		for (const side of before.meshes[0]!.faces.filter(f => f.id.startsWith(`${DOCUMENT_ID}:op:4:side:`))) {
+			const axis = Math.abs(side.normal[0]) > .9 ? 0 : 2;
+			const current = before.meshes[0]!.positions[side.outer[0]! * 3 + axis]!;
+			const boundary = current > 2 ? (axis === 0 ? 4 : 3) : 0;
+			const travel = (boundary - current) / side.normal[axis]!;
+			const edit = buildPushPullFaceEdit(before, side.id, travel, 5);
+			document.transact(edit.forward);
+			expect(validateEditableSubset(document.snapshot().graph)).toMatchObject({ editable: true });
+			const graph = document.snapshot().graph, mesh = graph.meshes[0]!, face = mesh.faces.find(f => f.id === side.id)!;
+			expect(validateEditableSubset({ ...graph, meshes: [{ ...mesh, faces: mesh.faces.map(f => f.id === face.id ? { ...f, normal: f.normal.map(n => -n) } : f) }] }).editable).toBe(false);
+			document.transact(edit.inverse);
+		}
+	} finally { document.dispose(); }
+});
+
 function vertexPositions(graph: ReturnType<BomcDocument['snapshot']>['graph'], faceId: string) {
 	const mesh = graph.meshes[0]!;
 	const face = mesh.faces.find((candidate) => candidate.id === faceId)!;
@@ -36,6 +60,39 @@ function vertexPositions(graph: ReturnType<BomcDocument['snapshot']>['graph'], f
 }
 
 describe('authoring topology v2 Push/Pull', () => {
+	test('snaps a lower side to the parent edge, extends beyond it, and reverses through the edge', () => {
+		for (const direction of [1, -1]) for (const sideIndex of [0, 1, 2, 3]) {
+			const { document, history, faceId } = createNeutralRectangle();
+			try {
+				const childId = `${DOCUMENT_ID}:rectangle:2`;
+				history.execute(document, journalEntry(buildPlanarRectangleEdit(document.snapshot().graph, childId,
+					[[1, 0, 1], [2, 0, 1], [2, 0, 2], [1, 0, 2]], [0, 1, 0])));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, faceId, direction, 3)));
+				history.execute(document, journalEntry(buildPushPullFaceEdit(document.snapshot().graph, childId, -direction * .8, 4)));
+				const start = document.snapshot().graph;
+				const sideId = `${DOCUMENT_ID}:op:4:side:${sideIndex}`;
+				const side = start.meshes[0]!.faces.find(face => face.id === sideId)!;
+				const axis = Math.abs(side.normal[0]) > .9 ? 0 : 2;
+				const coordinate = vertexPositions(start, sideId)[0]![axis]!;
+				const boundary = coordinate === 1 ? 0 : axis === 0 ? 4 : 3;
+				const travel = (boundary - coordinate) / side.normal[axis]!;
+				let sequence = 5;
+				for (const distance of [travel, Math.sign(travel) * .3, -Math.sign(travel) * .5, -(travel - Math.sign(travel) * .2)]) {
+					const before = document.snapshot().graph;
+					history.execute(document, journalEntry(buildPushPullFaceEdit(before, sideId, distance, sequence++)));
+					const after = document.snapshot().graph;
+					expect(validateEditableSubset(after)).toMatchObject({ editable: true });
+					expect([...buildAuthoringTopology(after.meshes[0]!).edges.values()].every(edge => edge.faceIds.length >= 2)).toBe(true);
+					expect(vertexPositions(after, faceId)).toEqual(vertexPositions(start, faceId));
+					expect(history.undo(document)).toBe(true); expect(document.snapshot().graph).toEqual(before);
+					expect(history.redo(document)).toBe(true); expect(document.snapshot().graph).toEqual(after);
+				}
+				expect(vertexPositions(document.snapshot().graph, sideId)).toEqual(vertexPositions(start, sideId));
+				const direct = buildPushPullFaceEdit(start, sideId, travel + Math.sign(travel) * .3, sequence);
+				expect(direct.forward.some(edit => edit.type === 'put-mesh')).toBe(true);
+			} finally { document.dispose(); }
+		}
+	});
 	test('Push/Pulls every lower child side without moving the upper cavity, before and after moving the underside', () => {
 		for (const direction of [1, -1]) for (const moveBase of [false, true]) for (const sideIndex of [0, 1, 2, 3]) for (const distance of [0.25, -0.25]) {
 			const { document, history, faceId } = createNeutralRectangle();

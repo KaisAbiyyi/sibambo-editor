@@ -128,6 +128,8 @@ export function resolvePushPullLevelSnap(options: Readonly<{
 	clientX: number;
 	clientY: number;
 	faceId: string;
+	dragAnchor?: AuthoringPoint;
+	dragDistance?: number | null;
 }>): PushPullLevelSnap | null {
 	if (!Number.isFinite(options.clientX) || !Number.isFinite(options.clientY)) return null;
 	const mesh = options.graph.meshes[0];
@@ -136,8 +138,51 @@ export function resolvePushPullLevelSnap(options: Readonly<{
 	const ray = options.viewport.rayFromScreen(options.clientX, options.clientY);
 	if (!ray) return null;
 	const hit = nearestAuthoringFaceHitWhere(options.graph, ray, (face) => face.id !== target.id);
-	if (!hit || Math.abs(Math.abs(dot(hit.face.normal as AuthoringPoint, target.normal as AuthoringPoint)) - 1) > 1e-9) return null;
 	const targetOrigin = pointAt(mesh, target.outer[0]!);
+	// Hovering a parallel reference face remains an explicit level inference,
+	// including views looking down the extrusion axis.
+	if (hit && Math.abs(Math.abs(dot(hit.face.normal as AuthoringPoint, target.normal as AuthoringPoint)) - 1) <= 1e-9) {
+		const distance = dot(subtract(pointAt(mesh, hit.face.outer[0]!), targetOrigin), target.normal as AuthoringPoint);
+		if (Number.isFinite(distance) && Math.abs(distance) >= 1e-6) return Object.freeze({ distance,
+			inference: Object.freeze({ point: hit.point, kind: 'face', faceId: hit.face.id, plane: planeForFace(mesh, hit.face), screenDistancePx: 0 }) });
+	}
+	// Soft alignment works below a shell edge as well as directly over a face.
+	// Compare planes at the captured drag anchor in CSS pixels; moving beyond
+	// the snap radius releases the inference instead of imposing a hard limit.
+	if (options.dragAnchor && options.dragDistance !== null && options.dragDistance !== undefined && Number.isFinite(options.dragDistance)) {
+		const anchor = options.dragAnchor, raw = options.dragDistance;
+		const displaced = (distance: number) => anchor.map((value, axis) => value + target.normal[axis]! * distance) as unknown as AuthoringPoint;
+		const pointerLevel = options.viewport.projectWorldToScreen(displaced(raw));
+		const projectedAnchor = options.viewport.projectWorldToScreen(anchor), projectedUnit = options.viewport.projectWorldToScreen(displaced(1));
+		const visibleAxis = Math.abs(ray.direction.dot(new Vector3(...target.normal))) < 0.995
+			&& projectedAnchor?.inFront && projectedUnit?.inFront && Math.hypot(projectedUnit.x - projectedAnchor.x, projectedUnit.y - projectedAnchor.y) > 1e-6;
+		let best: PushPullLevelSnap | null = null;
+		for (const face of mesh.faces) {
+			if (!visibleAxis) break;
+			if (face.id === target.id || Math.abs(Math.abs(dot(face.normal as AuthoringPoint, target.normal as AuthoringPoint)) - 1) > 1e-9) continue;
+			const distance = dot(subtract(pointAt(mesh, face.outer[0]!), targetOrigin), target.normal as AuthoringPoint);
+			if (Math.abs(distance) < 1e-6) continue;
+			const level = displaced(distance), projected = options.viewport.projectWorldToScreen(level);
+			if (!pointerLevel?.inFront || !projected?.inFront) continue;
+			const error = Math.hypot(projected.x - pointerLevel.x, projected.y - pointerLevel.y);
+			if (error > AUTHORING_SNAP_RADIUS_CSS_PX) continue;
+			let edgePoint: AuthoringPoint | null = null, nearest = Infinity, edgePair: readonly [number, number] | undefined;
+			for (const ring of [face.outer, ...face.holes]) for (let index = 0; index < ring.length; index += 1) {
+				const a = pointAt(mesh, ring[index]!), b = pointAt(mesh, ring[(index + 1) % ring.length]!);
+				const delta = subtract(b, a), length = dot(delta, delta);
+				const parameter = Math.max(0, Math.min(1, dot(subtract(level, a), delta) / length));
+				const point = a.map((value, axis) => value + delta[axis]! * parameter) as unknown as AuthoringPoint;
+				const separation = Math.hypot(...subtract(point, level));
+				if (separation < nearest) { nearest = separation; edgePoint = point; edgePair = [ring[index]!, ring[(index + 1) % ring.length]!]; }
+			}
+			if (!edgePoint || (best && (error > best.inference.screenDistancePx + 1e-9
+				|| Math.abs(error - best.inference.screenDistancePx) <= 1e-9 && codeUnitCompare(face.id, best.inference.faceId!) >= 0))) continue;
+			best = Object.freeze({ distance, inference: Object.freeze({ point: edgePoint, kind: 'edge', edge: edgePair,
+				faceId: face.id, plane: planeForFace(mesh, face), screenDistancePx: error }) });
+		}
+		if (visibleAxis) return best;
+	}
+	if (!hit || Math.abs(Math.abs(dot(hit.face.normal as AuthoringPoint, target.normal as AuthoringPoint)) - 1) > 1e-9) return null;
 	const candidateOrigin = pointAt(mesh, hit.face.outer[0]!);
 	const distance = dot(subtract(candidateOrigin, targetOrigin), target.normal as AuthoringPoint);
 	if (!Number.isFinite(distance) || Math.abs(distance) < 1e-6) return null;

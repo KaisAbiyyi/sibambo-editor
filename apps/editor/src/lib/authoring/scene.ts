@@ -16,7 +16,7 @@ import {
 } from 'three';
 import type { BomcSnapshot, Face, Mesh as BomcMesh } from '@sibambo/bomc-document';
 import { MaterialStateManager, sourceEdgeMaterialDescriptor, type DisplayState, type ViewportBounds } from '@sibambo/viewport';
-import { validateEditableSubset } from './geometry.js';
+import { isNeutralMaterial, validateEditableSubset } from './geometry.js';
 import { definitionGraph, modelMetadata, modelOccurrences, validateAuthoringDocument } from './model.js';
 
 const EMPTY_AUTHORING_BOUNDS: ViewportBounds = {
@@ -102,6 +102,19 @@ function materialForFace(face: Face, snapshot: BomcSnapshot, displayState: Displ
 	manager.register(face.id, original, 'structure');
 	try {
 		const selected = manager.materialFor(face.id, displayState, false, false);
+		if (selected instanceof MeshStandardMaterial && isNeutralMaterial(snapshot.graph, material)
+			&& (face.backMaterialId === null || face.backMaterialId === material.id)) {
+			// Render default backs blue-gray without changing canonical materials,
+			// adding duplicate meshes, or tinting explicitly painted legacy faces.
+			const backColor = new Color('#9fb8c7');
+			selected.userData.authoringBackFaceColor = '#9fb8c7';
+			selected.onBeforeCompile = shader => {
+				shader.uniforms.authoringBackFaceColor = { value: backColor };
+				shader.fragmentShader = 'uniform vec3 authoringBackFaceColor;\n' + shader.fragmentShader.replace(
+					'#include <color_fragment>', '#include <color_fragment>\nif (!gl_FrontFacing) diffuseColor.rgb = authoringBackFaceColor;');
+			};
+			selected.customProgramCacheKey = () => 'editor-neutral-front-back-v1';
+		}
 		manager.derivedMaterials.clear();
 		manager.originalMaterials.clear();
 		if (selected !== original) original.dispose();

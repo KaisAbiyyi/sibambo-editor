@@ -45,6 +45,37 @@ function supportedNestedThreeFaceJunction(entry: readonly EdgeFaceRef[], faceByI
 	if (entry.length !== 3) return false;
 	const holeRefs = entry.filter((ref) => ref.ringIndex > 0);
 	const outerRefs = entry.filter((ref) => ref.ringIndex === 0);
+	// At a shell edge the hole opens into a notch. Two coplanar regions
+	// (at least one quadrilateral step) must occupy opposite sides of the edge.
+	// The perpendicular face may be a notch when both coplanar faces are quads.
+	if (holeRefs.length === 0) {
+		return entry.some((ref, index) => {
+			const base = faceById.get(ref.faceId)!;
+			const others = entry.filter((_candidate, candidateIndex) => candidateIndex !== index).map(candidate => faceById.get(candidate.faceId)!);
+			if ((!isSubdividedQuad(base, mesh) && !others.every(face => isSubdividedQuad(face, mesh))) || !others.some(face => isSubdividedQuad(face, mesh))
+				|| others.some(face => Math.abs(dot(base.normal, face.normal)) > 1e-9)
+				|| Math.abs(Math.abs(dot(others[0]!.normal, others[1]!.normal)) - 1) > 1e-9) return false;
+			const anchor = mesh.positions.slice(a * 3, a * 3 + 3);
+			const point = (vertex: number) => [0, 1, 2].map(axis => mesh.positions[vertex * 3 + axis]! - anchor[axis]!);
+			const tolerance = 1e-9 * Math.max(1, ...others.flatMap(face => face.outer.map(vertex => Math.hypot(...point(vertex)))));
+			if (others.some(face => face.outer.some(vertex => Math.abs(dot(others[0]!.normal, point(vertex))) > tolerance))
+				|| base.outer.some(vertex => Math.abs(dot(base.normal, point(vertex))) > tolerance)) return false;
+			const interior = (face: Face) => {
+				const sum = [0, 0, 0]; let direction = 0;
+				for (let i = 0; i < face.outer.length; i += 1) {
+					const from = face.outer[i]!, to = face.outer[(i + 1) % face.outer.length]!;
+					if (from === a && to === b) direction = 1;
+					if (from === b && to === a) direction = -1;
+					const p = point(from), q = point(to);
+					sum[0]! += p[1]! * q[2]! - p[2]! * q[1]!;
+					sum[1]! += p[2]! * q[0]! - p[0]! * q[2]!;
+					sum[2]! += p[0]! * q[1]! - p[1]! * q[0]!;
+				}
+				return Math.sign(dot(sum, others[0]!.normal)) * direction;
+			};
+			return interior(others[0]!) * interior(others[1]!) === -1;
+		});
+	}
 	if (holeRefs.length !== 1 || outerRefs.length !== 2) return false;
 	const holeFace = faceById.get(holeRefs[0]!.faceId);
 	const outerFaces = outerRefs.map((ref) => faceById.get(ref.faceId));
