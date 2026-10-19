@@ -69,3 +69,6 @@ The package-level scripts are listed in [apps/editor/package.json](apps/editor/p
 - [Verification and release status](docs/verification.md)
 - [License](LICENSE)
 
+## Multi-agent orchestration
+
+Agents must follow [AGENTS.md](AGENTS.md) and the [shared orchestration protocol](docs/AGENT-ORCHESTRATION.md) for neutral task planning, exclusive claims, isolated branches, remote checkpoints, safe takeover, author attribution and four-repo Sibambo integration. These rules do not change existing validation claims.
