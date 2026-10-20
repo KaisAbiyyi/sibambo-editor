@@ -2,6 +2,16 @@
 
 Parent [Sibambo six-phase implementation roadmap](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/BIG-IMPLEMENTATION-PLAN.md) is the **canonical multi-repository DAG** and source of truth for exact complete acceptance criteria. This local index is only the sibambo-editor subset, not an alternative roadmap. A task is **unassigned** until an agent explicitly declares `CLAIM SIB-F... ` with its branch, session, base SHA, logical resource locks and expected checks.
 
+## P0 override: Editor E4 profile compatibility
+
+See [MASTER IMPLEMENTATION PLAN — EVOLUTION-DUAL-PROFILE-001 v1.0](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/implementation-plan/MASTER_IMPLEMENTATION_PLAN_2026-10-21_EVOLUTION-DUAL-PROFILE-001_v1.0.md) (**PROPOSED**, not frozen). Active E4 profiles are **Exact/Visual**; existing Research archive keeps its legacy profile enum 2 and importer. Editor must not silently treat a lossy Visual preview as Exact authoritative editable source.
+
+| P0 task | Scope | Prerequisite | Lock | Gate |
+|---|---|---|---|---|
+| `SIB-F1M` | E4 Exact/Visual UI+admission, legacy Research read-only support, prevent Visual→Exact silent authoring promotion | F1I frozen | `editor-profile-compat` | Cloud + independent review |
+
+F1M can proceed concurrently with independent producer/Benchmark/Rooms tasks after interface freeze, provided editor-authoring tasks do not own the same logical geometry/import contract. F1G existing E4 parity evidence is retained and only superseded by explicit new-runtime receipts. The 40-row future native matrix cannot reuse Research history as current PASS.
+
 | Task | Deliverable | Predecessor tasks | Resource lock |
 |---|---|---|---|
 | `SIB-F1G` | E4 BOMC import/save/reopen/scene behavior regression | `SIB-F1B` | `editor-evolution` |
