@@ -1,0 +1,173 @@
+{
+  "contractId": "EVOLUTION-DUAL-PROFILE-001",
+  "version": "2.0",
+  "task": "SIB-F1I",
+  "status": "FROZEN_REVIEWED",
+  "scope": "Target export/consumer contract; producer migration F1J held; not a runtime capability advertisement",
+  "engines": [
+    {
+      "engine": "e2",
+      "lineupId": "e2-canonical-gzip",
+      "slot": 2,
+      "format": "canonical-v3",
+      "extension": ".json.gz"
+    },
+    {
+      "engine": "e3",
+      "lineupId": "e3-cleanpkg",
+      "slot": 3,
+      "format": "cleanpkg",
+      "extension": ".cleanpkg"
+    },
+    {
+      "engine": "e4",
+      "lineupId": "e4-bomc",
+      "slot": 4,
+      "format": "bomc-1.2",
+      "extension": ".bomc"
+    }
+  ],
+  "activeProfiles": [
+    "exact",
+    "visual"
+  ],
+  "e4ProfileEnums": {
+    "exact": 1,
+    "research": 2,
+    "visual": 3
+  },
+  "historicalReadOnly": {
+    "engines": [
+      "e1"
+    ],
+    "profiles": [
+      "research"
+    ],
+    "e1MaxBytes": 268435456,
+    "preserveBytesReceiptsAndProvenance": true
+  },
+  "nativeQualification": {
+    "models": [
+      "house2",
+      "PROJECT SBOOST 2",
+      "presentation20",
+      "RUMAH L",
+      "RUMAH Y"
+    ],
+    "expectedNewRows": 30,
+    "newProducerSourceTreeSha256": null,
+    "newRbzSha256": null,
+    "installedRuntimeSha256": null,
+    "certified": false,
+    "historicalRowsCountAsNew": false
+  },
+  "sourceIdentity": {
+    "gitCommit": "40-hex repository snapshot; never a substitute for runtime source-tree hash",
+    "sourceTreeSha256": "64-hex producer-computed source tree; sidecar identity, not authentication",
+    "artifactSha256": "64-hex artifact bytes; compare independently",
+    "newRuntimeAdmission": "No wildcard or automatic allow-list expansion; consumers need explicit validated new producer identity under F1J/L/M"
+  },
+  "consumers": {
+    "benchmark": {
+      "activeEngines": [
+        "e2",
+        "e3",
+        "e4"
+      ],
+      "historicalReadOnly": [
+        "e1",
+        "research"
+      ]
+    },
+    "rooms": {
+      "activeEngines": [
+        "e4"
+      ],
+      "analyticalAuthority": "Captured authoritative geometry, all unknown/unclassified structures protected; never simplified render buffers",
+      "historicalReadOnly": [
+        "research"
+      ]
+    },
+    "editor": {
+      "activeEngines": [
+        "e4"
+      ],
+      "authoritativeAuthoringProfile": "exact",
+      "visualAuthority": "preview-only; never silently promote to lossless canonical edits",
+      "historicalReadOnly": [
+        "research"
+      ]
+    }
+  },
+  "quality": {
+    "exact": "Zero loss of supported captured geometry/topology/source/occurrences, transforms, scene/tag/visibility/clip, UV/front-back and decoded displayed RGBA/alpha. No quantization/omission; lossless fallback or fail closed.",
+    "visual": "Only measured render/texture loss; protected walls/floors/ceilings/openings/rooms/unknown, source/semantic IDs, dimensions, scenes/clips and review lineage stay lossless.",
+    "candidateBudgets": {
+      "positionMaxErrorMm": {
+        "A": 0.5,
+        "B": 1,
+        "C": 2
+      },
+      "texturePsnrMinDb": {
+        "A": 40,
+        "B": 38,
+        "C": 35
+      },
+      "humanAcceptanceStillRequired": true
+    }
+  },
+  "execution": {
+    "F1J": "HOLD_BY_USER",
+    "F1K": "ISOLATED_PROOF_ONLY_UNTIL_ROOMS_OWNER_RELEASE; native acceptance also waits F1J",
+    "F1N": "CANCELLED_NOT_PLANNED",
+    "F1O": "NOT_RUN"
+  },
+  "baselines": {
+    "sibambo-bom-engine-plugin": {
+      "repository": "KaisAbiyyi/sibambo-bom-engine-plugin",
+      "branch": "feat/evolution-profile-parity-001",
+      "gitCommit": "ba6cc9a42c30de956b44365ee900f268bff82964",
+      "files": {
+        "history/evolution-lineup.json": "e9ebda249dbf39debc9401da03edc1cfd32e1ede37038145f1ae87ecfa83bda1",
+        "bom_engine/evolution_exporter.rb": "4860fbe9ae65d24a4669347f292284868d3d465e6bf73b0958ac1fdfb9ba275f",
+        "bom_engine/evolution_document.rb": "88449fd854c5c42892a063f384f27ff9b2589980e3f2cefcff2c097546f384e5",
+        "bom_engine/bomc_extension.rb": "274aeba2c20ba0322ffe1a348b7cd4f8db5fb849dda05c78bef3d0da22af6703"
+      }
+    },
+    "sibambo-benchmark": {
+      "repository": "KaisAbiyyi/sibambo-benchmark",
+      "branch": "feat/evolution-profile-parity-001",
+      "gitCommit": "47d7178026d967553a986ec03d297fe0c9bc323d",
+      "files": {
+        "apps/benchmark/src/lib/research/historical-admission.ts": "e74ad01aed4e2411dff4cbd0531a95a93f811171d72539fe488755fde9077da8",
+        "packages/provenance/src/policies/e4-v1.ts": "43e89003996dc160fff30bd9c6a9d7ff45958a493b1a61726f1d42b211237ac1"
+      }
+    },
+    "sibambo-rooms": {
+      "repository": "KaisAbiyyi/sibambo-rooms",
+      "branch": "feat/rooms-render-learning-wp1-1-proof",
+      "gitCommit": "954019f6b15d33db1ee5135d2292e5c571e51adb",
+      "files": {
+        "packages/e4-import/src/types.ts": "67b791ba05981a64c9996ab6501eeb23900adde4a862f3b829d035e863f495c6",
+        "apps/rooms/src/lib/rooms-domain/room-detection-input.ts": "35a6238dd561ad20cad24698b321c9653ef4eed385d1eadc0a5a385e77b81d48",
+        "apps/rooms/src/lib/rooms-analysis.ts": "4cd5e3ef3e09ba17b20d1de175486f0adeef83a183cbbd1133185a4de2e448d7",
+        "packages/provenance/src/policies/e4-v1.ts": "2c54e55bd25598c24836ce81f61ca8cbc14443a28fb698db5e9aeada24bd67b6"
+      }
+    },
+    "sibambo-editor": {
+      "repository": "KaisAbiyyi/sibambo-editor",
+      "branch": "bench/bomc-loader-luna",
+      "gitCommit": "648e6ddb0d4fb8475ea342b483c4840e15807af6",
+      "files": {
+        "packages/e4-import/src/types.ts": "67b791ba05981a64c9996ab6501eeb23900adde4a862f3b829d035e863f495c6",
+        "packages/provenance/src/policies/e4-v1.ts": "2c54e55bd25598c24836ce81f61ca8cbc14443a28fb698db5e9aeada24bd67b6"
+      }
+    }
+  },
+  "review": {
+    "reviewer": "gpt-6.1-sol",
+    "independent": true,
+    "result": "NO_BLOCKING_FINDINGS",
+    "scope": "Documentation and 12 source-file pins at four Git snapshots only; no native/browser/human/runtime certification"
+  }
+}
