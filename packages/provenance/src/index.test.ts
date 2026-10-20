@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { validateProvenance, type EnginePolicy } from './index';
+import { E4_PROVENANCE_POLICY_V1 } from './policies/e4-v1';
 
 const policy: EnginePolicy = {
 	engine: 'e4', format: 'bomc-1.2', profiles: ['exact', 'research', 'visual'],
@@ -31,5 +32,12 @@ describe('provenance leaf package', () => {
 		expect(() => validateProvenance(wrongProducer, policy)).toThrow('Unrecognized E4 producer');
 		const wrongProfile = provenance(); wrongProfile.artifact.profile = 'legacy';
 		expect(() => validateProvenance(wrongProfile, policy)).toThrow('Profile is not valid');
+	});
+	test('recognizes the verified corrective E4 candidate identity without accepting unknown trees', () => {
+		const current = provenance();
+		current.producer.sourceTreeSha256 = 'de4f463f5e2cac478fbcc2c9f815ea0b25abf6bba2dbd459fd0232e5d06e76d9';
+		expect(validateProvenance(current, E4_PROVENANCE_POLICY_V1).producer.sourceTreeSha256).toBe(current.producer.sourceTreeSha256);
+		current.producer.sourceTreeSha256 = 'f'.repeat(64);
+		expect(() => validateProvenance(current, E4_PROVENANCE_POLICY_V1)).toThrow('Unrecognized E4 producer');
 	});
 });
