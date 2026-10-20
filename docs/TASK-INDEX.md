@@ -4,13 +4,13 @@ Parent [Sibambo six-phase implementation roadmap](https://github.com/KaisAbiyyi/
 
 ## P0 override: Editor E4 profile compatibility
 
-See [MASTER IMPLEMENTATION PLAN — EVOLUTION-DUAL-PROFILE-001 v1.0](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/implementation-plan/MASTER_IMPLEMENTATION_PLAN_2026-10-21_EVOLUTION-DUAL-PROFILE-001_v1.0.md) (**PROPOSED**, not frozen). Active E4 profiles are **Exact/Visual**; existing Research archive keeps its legacy profile enum 2 and importer. Editor must not silently treat a lossy Visual preview as Exact authoritative editable source.
+See [MASTER IMPLEMENTATION PLAN — EVOLUTION-DUAL-PROFILE-001 v2.0](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/implementation-plan/MASTER_IMPLEMENTATION_PLAN_2026-10-21_EVOLUTION-DUAL-PROFILE-001_v2.0.md) (**PROPOSED**, not frozen). Active exports are only **E2/E3/E4 × Exact/Visual**, with Editor continuing to consume **E4 only**. E1 and Research are retired from new exports; existing Research archive keeps legacy profile enum 2/import, Visual enum 3 unchanged. Editor must not silently treat lossy Visual preview as Exact authoritative editable source.
 
 | P0 task | Scope | Prerequisite | Lock | Gate |
 |---|---|---|---|---|
 | `SIB-F1M` | E4 Exact/Visual UI+admission, legacy Research read-only support, prevent Visual→Exact silent authoring promotion | F1I frozen | `editor-profile-compat` | Cloud + independent review |
 
-F1M can proceed concurrently with independent producer/Benchmark/Rooms tasks after interface freeze, provided editor-authoring tasks do not own the same logical geometry/import contract. F1G existing E4 parity evidence is retained and only superseded by explicit new-runtime receipts. The 40-row future native matrix cannot reuse Research history as current PASS.
+F1M can proceed concurrently with independent producer/Benchmark/Rooms tasks after interface freeze, provided editor-authoring tasks do not own the same logical geometry/import contract. F1G existing E4 parity evidence is retained and only superseded by explicit new-runtime receipts. The **30-row** future native matrix cannot reuse Research/E1 history as current PASS.
 
 | Task | Deliverable | Predecessor tasks | Resource lock |
 |---|---|---|---|
