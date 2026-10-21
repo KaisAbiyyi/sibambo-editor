@@ -206,7 +206,9 @@ export class AuthoringWorkerDispatcher {
 			// Inspect encoded authority before considering any embedded BWEB authoring graph.
 			// The canonical reader below still validates the complete zero-loss contract.
 			if (container.has(20)) {
-				const contract = await container.load(20);
+				let contract: Uint8Array | undefined;
+				try { contract = await container.load(20); }
+				catch (cause) { throw new BomcDocumentError('INVALID_SOURCE', `BOMC encoding contract is invalid: ${safeMessage(cause)}`, cause); }
 				if (!contract || contract.byteLength !== 76 || new DataView(contract.buffer, contract.byteOffset, contract.byteLength).getUint16(0, true) !== 1) {
 					throw new BomcDocumentError('INVALID_SOURCE', 'BOMC encoding contract is invalid.');
 				}

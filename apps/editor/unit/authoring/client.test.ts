@@ -4,7 +4,7 @@ import { AuthoringClient } from '../../src/lib/authoring/bomc-authoring-client.j
 import { AUTHORING_PROTOCOL_VERSION, type AuthoringRequest, type AuthoringWorkerMessage } from '../../src/lib/authoring/protocol.js';
 import { withEncodingProfile } from '../../tests/helpers/authoring-fixtures';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
-import { assembleContainer } from '../../../../packages/bomc-document/src/binary.js';
+import { assembleContainer, parseDirectory } from '../../../../packages/bomc-document/src/binary.js';
 
 const SESSION_ID = 'd7f7e62a-d503-4cb7-9e46-706fc8c06132';
 const DOCUMENT_ID = 'a4f2d141-64e1-4c62-8d0d-53623f71a220';
@@ -124,6 +124,19 @@ describe('canonical authoring worker and client', () => {
 			} finally { await source.client.close(); await candidate.client.close(); }
 		});
 	}
+
+	test('rejects a corrupt encoded-profile checksum as invalid source before canonical admission', async () => {
+		const source = makeClient(), candidate = makeClient();
+		try {
+			await source.client.create();
+			const output = await source.client.write();
+			const bytes = new Uint8Array(output.ownedBuffer);
+			const contract = parseDirectory(bytes, 'web-core').sections.find(section => section.type === 20)!;
+			bytes[contract.offset] = bytes[contract.offset]! ^ 1;
+			await expect(candidate.client.open(bytes.buffer)).rejects.toMatchObject({ code: 'INVALID_SOURCE' });
+			expect(candidate.client.checkpoint).toBeNull();
+		} finally { await source.client.close(); await candidate.client.close(); }
+	});
 
 	test('opens a valid E4 container without section 241 as viewer-only', async () => {
 		const { client } = makeClient();

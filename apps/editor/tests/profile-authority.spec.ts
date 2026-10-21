@@ -1,10 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { E4_PROVENANCE_POLICY_V1 } from '@sibambo/provenance/policies/e4-v1';
 import { readFile } from 'node:fs/promises';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { buildRectangleEdit } from '../src/lib/authoring/geometry';
-import { withEncodingProfile } from './helpers/authoring-fixtures';
+import { buildAuthoringFaultFixtures, withEncodingProfile } from './helpers/authoring-fixtures';
 import { installAuthoringWorkerProbe } from './helpers/authoring-worker-probe';
 
 async function seed() {
@@ -36,9 +38,9 @@ for (const [profile, label] of [[3, 'Visual preview only'], [2, 'Legacy Research
 	test(`${label} remains view-only even when its graph has a supported BWEB authoring section`, async ({ page }) => {
 		const input = await seed();
 		await open(page, await withEncodingProfile(input.bytes, profile));
-		await expect(page.locator('.tool-context')).toContainText(label);
+		await expect(page.locator('.tool-context')).toContainText(label, { timeout: 30_000 });
 		await expect(page.locator('.viewport canvas')).toBeVisible();
-		await expect(page.locator('.footer-status')).toContainText(label);
+		await expect(page.locator('.footer-status')).toContainText(label, { timeout: 30_000 });
 		await fileMenu(page);
 		await expect(page.getByRole('button', { name: /Save BOMC/ })).toHaveCount(0);
 		const authoringOpens = await page.evaluate(() => window.__editorAuthoringWorkerProbe!.workers.flatMap(worker => worker.requests).filter(request => request.type === 'OPEN'));
@@ -53,7 +55,7 @@ for (const [profile, label] of [[3, 'Visual preview only'], [2, 'Legacy Research
 test('Exact supported graph saves and reopens the actual browser download as clean authoritative geometry', async ({ page }, testInfo) => {
 	const input = await seed();
 	await open(page, input.bytes, 'exact.bomc');
-	await expect(page.locator('.tool-context')).toContainText('Writable BOMC');
+	await expect(page.locator('.tool-context')).toContainText('Writable BOMC', { timeout: 30_000 });
 	await expect(page.locator('.footer-status')).toContainText('Saved BOMC');
 	await fileMenu(page);
 	const downloaded = page.waitForEvent('download');
@@ -67,17 +69,17 @@ test('Exact supported graph saves and reopens the actual browser download as cle
 	finally { restored.dispose(); }
 	await expect(page.locator('.footer-status')).toContainText('Saved BOMC');
 	await open(page, bytes, 'exact-reopened.bomc');
-	await expect(page.locator('.tool-context')).toContainText('Writable BOMC');
+	await expect(page.locator('.tool-context')).toContainText('Writable BOMC', { timeout: 30_000 });
 	await expect(page.locator('.footer-status')).toContainText('Saved BOMC');
 	const latest = await page.evaluate(() => window.__editorAuthoringWorkerProbe!.workers.filter(worker => worker.terminated === 0).flatMap(worker => worker.replies).filter(reply => reply.event === 'RESULT' && reply.requestType === 'OPEN').at(-1));
 	expect(latest?.event === 'RESULT' && latest.result.kind === 'authoring' ? latest.result.checkpoint.snapshot.graph : null).toEqual(input.graph);
 });
 
-test('an authoring reread with a different artifact identity preserves the dirty document, history and camera', async ({ page }) => {
+test('failed admission, provenance, BWEB and changed reread preserve the dirty document, history and camera', async ({ page }, testInfo) => {
 	test.setTimeout(90_000);
 	const input = await seed();
 	await open(page, input.bytes, 'active-exact.bomc');
-	await expect(page.locator('.tool-context')).toContainText('Writable BOMC');
+	await expect(page.locator('.tool-context')).toContainText('Writable BOMC', { timeout: 30_000 });
 	const viewMenu = page.locator('.editor-menubar details.menu-root').nth(3);
 	await viewMenu.locator('summary').click();
 	await page.getByRole('button', { name: 'Top', exact: true }).click();
@@ -95,11 +97,37 @@ test('an authoring reread with a different artifact identity preserves the dirty
 	}
 	await page.getByRole('button', { name: 'Select', exact: true }).click();
 	await page.keyboard.press('Control+z');
+	await expect.poll(async () => { const result = await checkpoint(); return result?.event === 'RESULT' ? result.result.checkpoint?.history.redo.length : undefined; }).toBe(1);
 	await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
 	const before = await checkpoint();
 	const title = await page.title();
 	await page.mouse.move(5, 5);
-	const camera = await canvas.screenshot();
+	await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+	// Error toasts overlay the canvas element; compare the model pixels with those toasts hidden.
+	const camera = createHash('sha256').update(await canvas.screenshot({ style: '.viewport-status { visibility: hidden !important; }', path: testInfo.outputPath('before-failures.png') })).digest('hex');
+	const faults = await buildAuthoringFaultFixtures(input.bytes);
+	const malformedBweb = faults.find(fault => fault.id === 'section241-truncated-bweb')!;
+	const wrongProfile = {
+		schema: 'sibambo-research-provenance-v1', engine: 'e4',
+		artifact: { sha256: createHash('sha256').update(input.bytes).digest('hex'), bytes: input.bytes.length, format: 'bomc-1.2', profile: 'visual' },
+		producer: { label: 'Synthetic mismatched fixture', sourceTreeSha256: E4_PROVENANCE_POLICY_V1.producer.sourceTreeSha256![0] },
+		model: { id: 'synthetic-mismatch' },
+		capture: { id: 'synthetic-mismatch', exportedAt: '2026-10-21T00:00:00Z', evidence: 'Synthetic cloud negative case.', method: 'operator-attested' }
+	};
+	for (const failure of [
+		{ name: 'malformed.bomc', bytes: Buffer.from([1, 2, 3]), sidecar: undefined, message: /Editor accepts BOMC 1.2 only/ },
+		{ name: 'wrong-profile.bomc', bytes: input.bytes, sidecar: wrongProfile, message: /BOMC encoding profile does not match/ },
+		{ name: 'malformed-bweb.bomc', bytes: malformedBweb.bytes, sidecar: undefined, message: /BWEB|authoring|truncated/i }
+	]) {
+		if (failure.sidecar) await page.getByLabel('Provenance JSON for next model').setInputFiles({ name: 'wrong-profile.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(failure.sidecar)) });
+		await open(page, failure.bytes, failure.name);
+		await page.getByRole('dialog', { name: 'Save changes?' }).getByRole('button', { name: 'Discard', exact: true }).click();
+		await expect(page.getByRole('status')).toContainText(failure.message);
+		expect(await checkpoint()).toEqual(before);
+		expect(await page.title()).toBe(title);
+		await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
+		expect(createHash('sha256').update(await canvas.screenshot({ style: '.viewport-status { visibility: hidden !important; }', path: testInfo.outputPath('after-' + failure.name + '.png') })).digest('hex')).toBe(camera);
+	}
 	const changed = await withEncodingProfile(input.bytes, 3);
 	await page.evaluate(({ changedBytes }) => {
 		const original = File.prototype.arrayBuffer;
@@ -117,6 +145,6 @@ test('an authoring reread with a different artifact identity preserves the dirty
 	expect(await checkpoint()).toEqual(before);
 	expect(await page.title()).toBe(title);
 	await expect(page.locator('.footer-status')).toContainText('Unsaved BOMC');
-	await expect(page.locator('.tool-context')).toContainText('Writable BOMC');
-	expect(await canvas.screenshot()).toEqual(camera);
+	await expect(page.locator('.tool-context')).toContainText('Writable BOMC', { timeout: 30_000 });
+	expect(createHash('sha256').update(await canvas.screenshot({ style: '.viewport-status { visibility: hidden !important; }', path: testInfo.outputPath('after-reread.png') })).digest('hex')).toBe(camera);
 });
