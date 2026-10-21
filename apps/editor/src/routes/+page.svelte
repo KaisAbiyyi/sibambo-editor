@@ -12,6 +12,7 @@
 	import { pinchZoomDelta, pointerCameraTool, selectionDragMode, selectionModifierMode, type EditorSelectionModifier } from '$lib/editor/camera-navigation';
 	import { loadE4InWorker } from '$lib/e4-worker-client';
 	import { type CameraDragSnapshot, type FaceStyle, type PreparedSceneViewport, type ViewEffects, type ViewportPick } from '@sibambo/viewport';
+	import { authoringProfileReason } from '$lib/profile-authority';
 	import { admitE4File } from '$lib/e4-admission';
 	import { readBoundedJsonText } from '@sibambo/provenance';
 	import type { ResearchProvenance } from '@sibambo/contracts';
@@ -699,12 +700,23 @@
 			await waitForPreparedViewportReady(importedViewport, request);
 			if (request !== generation || importController.signal.aborted) return;
 
-			loadStatus = 'Inspecting the real file for the exact writable BOMC subset…';
-			candidateClient = new AuthoringClient({ sessionId: crypto.randomUUID() });
-			pendingCandidateClient = candidateClient;
-			const inspection: OpenResult = await candidateClient.open(await file.arrayBuffer());
+			const profileReason = authoringProfileReason(loaded.encodingContract?.profile);
+			let inspection: OpenResult;
+			if (profileReason) {
+				inspection = { kind: 'viewer', reason: profileReason, authoringValidationPerformed: false };
+			} else {
+				loadStatus = 'Inspecting lossless Exact data for the supported writable BOMC subset…';
+				// The import transferred its buffer. Bind the authoring reread to those admitted bytes.
+				const authoringInput = await admitE4File(file);
+				if (authoringInput.artifactSha256 !== admitted.artifactSha256) throw new Error('BOMC artifact changed after admission; the current document is preserved.');
+				if (request !== generation || importController.signal.aborted) return;
+				candidateClient = new AuthoringClient({ sessionId: crypto.randomUUID() });
+				pendingCandidateClient = candidateClient;
+				inspection = await candidateClient.open(authoringInput.buffer);
+			}
 			if (request !== generation || importController.signal.aborted) return;
 			if (inspection.kind === 'authoring') {
+				if (loaded.encodingContract?.profile !== 'exact' || !candidateClient) throw new Error('Canonical authoring requires validated Exact input.');
 				const checkpoint = inspection.checkpoint;
 				await waitForViewportLayout(request);
 					writableViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
@@ -722,7 +734,7 @@
 				activeTool = 'select'; activeCameraTool = null; selectionBox = null; pointerGesture = null; activeTouchPoints.clear();
 					ready = true; authoringTools = makeAuthoringTools(candidateClient, writableViewport, checkpoint);
 					bindAuthoringRecovery(candidateClient);
-				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · This file is inside the supported Editor planar-face topology subset.';
+				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · Lossless Exact data inside the supported Editor planar-face topology subset.';
 				writableViewport.setOnReady(() => { if (viewport === writableViewport && request === generation) ready = true; });
 				pendingCandidateViewports.delete(writableViewport); pendingCandidateViewports.delete(importedViewport);
 				importedViewport.dispose(); importedViewport = null;
@@ -730,7 +742,7 @@
 				disposePreviousOwners(previous, writableViewport);
 				activeLoadSnapshot = null;
 			} else {
-				await candidateClient.close(); candidateClient = null; pendingCandidateClient = null;
+				if (candidateClient) await candidateClient.close(); candidateClient = null; pendingCandidateClient = null;
 				candidateSession = new EditorSession(file, admitted.provenance, admitted.artifactSha256, loaded.encodingContract?.profile ?? null);
 				pendingCandidateSession = candidateSession;
 				mode = 'imported'; result = loaded; session = candidateSession; editorController = new EditorController(candidateSession.editableGeometry);
@@ -1542,8 +1554,8 @@
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><circle cx="11" cy="11" r="3.5"/><path d="m13.7 13.7 3 3"/></svg>
 			</button>
 		</div>
-		{#if mode === 'authoring' && authoringCheckpoint}<div class="tool-context"><span>{authoringCheckpoint.snapshot.graph.name || 'Untitled'}</span><span class="mode-badge">Writable BOMC</span><span>{isAuthoringDirty() ? 'Unsaved' : 'Saved'}</span></div>
-		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span title="BOMC editing is limited to the validated Editor-authored planar-face topology subset.">Viewer · supported authoring subset only</span></div>{/if}
+		{#if mode === 'authoring' && authoringCheckpoint}<div class="tool-context"><span>{authoringCheckpoint.snapshot.graph.name || 'Untitled'}</span><span class="mode-badge">Writable BOMC</span><span>EXACT</span><span>{isAuthoringDirty() ? 'Unsaved' : 'Saved'}</span></div>
+		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span title="Canonical editing requires lossless Exact data in the supported Editor authoring subset.">{authoringProfileReason(result.encodingContract?.profile) ?? 'Exact viewer · unsupported authoring graph'}</span></div>{/if}
 	</nav>
 
 	{#if result?.scenes.length}
