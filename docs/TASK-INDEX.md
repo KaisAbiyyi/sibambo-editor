@@ -34,3 +34,9 @@ For a parent unit involving multiple repositories, record SHA and CI for **all f
 ## F1I contract checkpoint and user execution override
 
 [Dual-profile v2 contract](contracts/evolution-dual-profile-v2.md) and [machine-readable pins](contracts/evolution-dual-profile-v2.json) define the six target choices and historical-read boundary. F1I documentation contract is FROZEN_REVIEWED; no runtime migration is implied. F1J is **HOLD BY USER**. F1K proceeds only with isolated proof tooling until Rooms resource release; its native acceptance also waits F1J. [Coordination record](https://github.com/KaisAbiyyi/sibambo/issues/2).
+
+## F1M authorized execution — 2026-10-21
+
+`CLAIM SIB-F1M`: Codex implementer, session `sib-f1jlm-20261021`, generation `1`, issue [#4](https://github.com/KaisAbiyyi/sibambo-editor/issues/4), branch `codex/sib-f1m-profile-authority-20261021`, base `9e64a26417088d4a78625dc5dc2dd4fd0f9fc138`, logical lock `editor-profile-compat`. The user subsequently authorized J → L/M execution; the frozen F1I JSON retains its historical HOLD record unchanged. Root coordinates the cross-repository claims and producer identity handoff.
+
+F1M enforces parsed E4 Exact eligibility before lossless supported-subset authoring; Visual is preview-only and Research is historical read-only. See [execution receipt](F1M-PROFILE-AUTHORITY-2026-10-21.md). Cloud tests do not certify producer/native fidelity or human acceptance; E4 remains `candidate_pending_cross_model_validation`.

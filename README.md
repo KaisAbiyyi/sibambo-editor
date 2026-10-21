@@ -18,7 +18,7 @@ Sibambo Editor is a browser-based E4 viewport with a bounded BOMC authoring work
 - Supports owned Groups/Components, Move/Copy/arrays, numeric Rotate/Scale/Flip, Inset/Offset, segmented Circle/Polygon/center Arc, and planar Follow Me.
 - Paints solid front/back colors and opacity, samples selected materials, and inherits container paint on unpainted faces.
 - Organizes containers with Tags, a searchable Outliner, basic Entity Info and an in-document Component library with geometry cost preview.
-- Keeps imported documents read-only unless their graph matches the application-owned editable subset.
+- Allows imported Exact documents to become writable only after their lossless encoding and graph match the application-owned editable subset. Visual stays preview-only; legacy Research stays read-only.
 - Downloads edited BOMC bytes and can reopen the downloaded file for further edits.
 
 This is a constrained authoring phase. Foreign or textured graphs remain view-only; application-owned nested instances support bounded affine edits. Texture authoring/UV/PBR, general Boolean geometry, nonplanar Follow Me and a library shared across documents are not implemented. A successful BOMC download does not establish native SketchUp compatibility or certification.

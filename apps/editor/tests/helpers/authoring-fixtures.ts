@@ -81,3 +81,12 @@ export async function buildAuthoringFaultFixtures(validDownloadedBytes: Uint8Arr
 
 	return outputs.map((fixture) => ({ ...fixture, sha256: sha256(fixture.bytes) }));
 }
+
+/** Synthetic byte mutation only; never evidence of a native producer capture. */
+export async function withEncodingProfile(bytes: Uint8Array, profile: 1 | 2 | 3): Promise<Buffer> {
+	const sections = await unpackWebCore(bytes);
+	const contract = sections.find((section) => section.type === 20);
+	if (!contract || contract.bytes.byteLength !== 76) throw new Error('Missing encoding contract.');
+	contract.bytes[2] = profile;
+	return pack(sections);
+}

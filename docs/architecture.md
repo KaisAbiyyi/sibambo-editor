@@ -46,7 +46,7 @@ The Editor package declares dependencies on these shared workspace packages:
 - scene preparation
 - viewport and rendering
 
-The application-specific route and authoring worker live under apps/editor. `authoring/{protocol,geometry,history,scene,tools}.ts` owns the canonical flat-shape command model, undo journal, viewport projection, and pointer controller. `bomc-authoring-client.ts` owns the persistent worker and acknowledged checkpoints; `bomc-authoring.worker.ts` owns the document and writer. Imported rendering still uses the shared PreparedSceneViewport. An imported graph becomes editable only when it passes the explicit flat rectangle/prism subset check; other valid graphs stay view-only.
+The application-specific route and authoring worker live under apps/editor. `authoring/{protocol,geometry,history,scene,tools}.ts` owns the canonical flat-shape command model, undo journal, viewport projection, and pointer controller. `bomc-authoring-client.ts` owns the persistent worker and acknowledged checkpoints; `bomc-authoring.worker.ts` owns the document and writer. Imported rendering still uses the shared PreparedSceneViewport. An imported graph becomes editable only when its parsed encoding profile is Exact and it passes the complete lossless BWEB encoding and supported authoring subset checks. The route skips authoring OPEN for Visual, legacy Research and unavailable profiles; the authoring worker independently checks the encoded profile. Exact authoring rereads must match the initially admitted artifact SHA-256 before replacing the current checkpoint. Other valid graphs stay view-only.
 
 ## Build identity and routes
 

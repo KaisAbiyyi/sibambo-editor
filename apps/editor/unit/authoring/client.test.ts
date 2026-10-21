@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { AuthoringWorkerDispatcher } from '../../src/lib/authoring/bomc-authoring.worker.js';
 import { AuthoringClient } from '../../src/lib/authoring/bomc-authoring-client.js';
 import { AUTHORING_PROTOCOL_VERSION, type AuthoringRequest, type AuthoringWorkerMessage } from '../../src/lib/authoring/protocol.js';
+import { withEncodingProfile } from '../../tests/helpers/authoring-fixtures';
+import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { assembleContainer } from '../../../../packages/bomc-document/src/binary.js';
 
 const SESSION_ID = 'd7f7e62a-d503-4cb7-9e46-706fc8c06132';
@@ -101,6 +103,28 @@ describe('canonical authoring worker and client', () => {
 			expect(second.client.checkpoint!.snapshot.graph.meshes[0]!.positions).toContain(1.25);
 		}finally{await first.client.close();await second.client.close();}
 	});
+	for (const [profile, label] of [[3, 'Visual preview only'], [2, 'Legacy Research read-only']] as const) {
+		test(`${label} cannot promote a supported BWEB graph through direct OPEN or WRITE`, async () => {
+			const source = makeClient();
+			const candidate = makeClient();
+			try {
+				await source.client.create();
+				await source.client.command({ kind: 'CREATE_RECTANGLE', first: [0, 0, 0], opposite: [2, 0, 3] });
+				const checkpoint = source.client.checkpoint;
+				const output = await source.client.write();
+				const bytes = await withEncodingProfile(new Uint8Array(output.ownedBuffer), profile);
+				await expect(readWebBomc(bytes)).rejects.toMatchObject({ code: 'UNSUPPORTED_FEATURE' });
+				const result = await candidate.client.open(Uint8Array.from(bytes).buffer);
+				expect(result).toMatchObject({ kind: 'viewer', reason: expect.stringContaining(label) });
+				expect(candidate.client.checkpoint).toBeNull();
+				await expect(candidate.client.write()).rejects.toMatchObject({ code: 'CLOSED' });
+				await expect(candidate.client.command({ kind: 'CREATE_RECTANGLE', first: [0, 0, 0], opposite: [1, 0, 1] }))
+					.rejects.toMatchObject({ code: 'CLOSED' });
+				expect(source.client.checkpoint).toBe(checkpoint);
+			} finally { await source.client.close(); await candidate.client.close(); }
+		});
+	}
+
 	test('opens a valid E4 container without section 241 as viewer-only', async () => {
 		const { client } = makeClient();
 		const bytes = assembleContainer([{ type: 1, codec: 0, rawLength: 0, count: 0, bytes: new Uint8Array() }]);

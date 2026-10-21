@@ -3,6 +3,7 @@ import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import type { BomcGraph } from '@sibambo/bomc-document';
 import { BomcContainer } from '@sibambo/e4-import';
+import { authoringProfileReason } from '../profile-authority.js';
 import {
 	AuthoringGeometryError,
 	buildExtrusionEdit,
@@ -202,6 +203,18 @@ export class AuthoringWorkerDispatcher {
 		}
 
 		try {
+			// Inspect encoded authority before considering any embedded BWEB authoring graph.
+			// The canonical reader below still validates the complete zero-loss contract.
+			if (container.has(20)) {
+				const contract = await container.load(20);
+				if (!contract || contract.byteLength !== 76 || new DataView(contract.buffer, contract.byteOffset, contract.byteLength).getUint16(0, true) !== 1) {
+					throw new BomcDocumentError('INVALID_SOURCE', 'BOMC encoding contract is invalid.');
+				}
+				const profile = ({ 1: 'exact', 2: 'research', 3: 'visual' } as Record<number, string>)[contract[2]!];
+				if (!profile) throw new BomcDocumentError('INVALID_SOURCE', 'BOMC encoding contract profile is invalid.');
+				const reason = authoringProfileReason(profile);
+				if (reason) return { kind: 'viewer', reason, authoringValidationPerformed: false };
+			}
 			if (!container.has(241)) {
 				return { kind: 'viewer', reason: 'BOMC has no Editor authoring section.', authoringValidationPerformed: false };
 			}
@@ -248,6 +261,7 @@ export class AuthoringWorkerDispatcher {
 				this.attachDocument(document, new AuthoringHistory(snapshot.graph), nextAuthoringSequence(snapshot.graph));
 			return this.authoringResult();
 		} finally {
+			container.release(20);
 			container.release(241);
 		}
 	}
