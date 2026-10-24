@@ -1,3 +1,5 @@
+import { preparePngPixelDecodeInput } from './png-pixel-decode-input';
+
 export type SemanticImageMedia = 1 | 2 | 3;
 
 export type PixelFrame = {
@@ -64,7 +66,8 @@ export const defaultImagePixelCodec: ImagePixelCodec = {
 		if (source.media === 1) {
 			const png = await getPngCodec();
 			checkCancelled(isCancelled);
-			decoded = await png.decode(encoded, { bitDepth: 8 });
+			const pixelInput = await preparePngPixelDecodeInput(source.bytes, source.width, source.height, isCancelled);
+			decoded = await png.decode(exactArrayBuffer(pixelInput), { bitDepth: 8 });
 		} else if (source.media === 2) {
 			decoded = await decodeJpeg(encoded, isCancelled);
 		} else if (source.media === 3) {
