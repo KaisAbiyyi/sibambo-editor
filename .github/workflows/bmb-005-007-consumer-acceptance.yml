@@ -1,0 +1,38 @@
+name: BMB-005-007 true-consumer acceptance
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout private consumer
+        uses: actions/checkout@v4
+      - name: Checkout immutable public BMB-007 fixture harness
+        uses: actions/checkout@v4
+        with:
+          repository: KaisAbiyyi/sibambo-bomc-builder
+          ref: eafc5270abfab27c7f73d78b5ff7f3274e1180f8
+          path: bmb-public
+      - name: Prepare verified synthetic container inputs
+        run: |
+          python bmb-public/tools/bomc_fixture_harness.py --selftest
+          python -m unittest discover -s bmb-public/tests -p test_fixture_harness.py -v
+          python bmb-public/tools/bomc_fixture_harness.py --write "$GITHUB_WORKSPACE/bmb-generated"
+          python bmb-public/tools/bomc_fixture_harness.py --check "$GITHUB_WORKSPACE/bmb-generated"
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Run actual consumer tests
+        env:
+          BMB_FIXTURE_DIR: ${{ github.workspace }}/bmb-generated
+        run: bun test packages/bomc-document/src/bmb005-007-consumer-admission.test.ts packages/bomc-document/src/roundtrip.test.ts packages/bomc-document/src/binary.test.ts
