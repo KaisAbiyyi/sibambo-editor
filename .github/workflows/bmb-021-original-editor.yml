@@ -19,6 +19,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     env:
       BMB021_BUILDER_DIR: ${{ github.workspace }}/bmb021-public
+      BMB021_RUBY_FIXTURE_DIR: ${{ github.workspace }}/packages/e4-import/src/bmb021-fixtures/ruby-original
       EXPECTED_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       BMB021_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
