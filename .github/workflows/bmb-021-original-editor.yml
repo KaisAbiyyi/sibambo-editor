@@ -46,11 +46,13 @@ jobs:
       - name: Run REAL E4 and strict editable section 241 tests
         run: bun test packages/e4-import/src/bmb021-original-consumer.test.ts packages/bomc-document/src/bmb021-strict-editable.test.ts
       - name: Generate original Editor synthetic writer 241 output
+        if: always()
         env:
           BMB021_EDITOR_EXPORT_DIR: ${{ runner.temp }}/bmb021-editor-original
           BMB021_PRINT_BASE64: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
         run: bun scripts/bmb021-export-original-editor.ts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
           name: bmb021-editor-writer-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/bmb021-editor-original/
