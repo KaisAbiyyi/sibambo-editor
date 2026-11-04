@@ -1,0 +1,93 @@
+name: BMB-021 original Editor E4 and strict editable qualification
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/bmb-021-original-editor.yml"
+      - "packages/e4-import/src/bmb021-original-consumer.test.ts"
+      - "packages/bomc-document/src/bmb021-strict-editable.test.ts"
+      - "scripts/bmb021-export-original-editor.ts"
+  push:
+    branches: [test/bmb-021-original-e4-20261104]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  original-editor:
+    name: Original Editor E4 + strict 241 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      BMB021_EXPECTED_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BMB021_BUILDER_DIR: ${{ github.workspace }}/bmb021-public
+      BMB021_EDITOR_EXPORT_DIR: ${{ runner.temp }}/bmb021-editor-writer
+      BMB021_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Read-only original Editor exact HEAD
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Read-only public Builder frozen semantic fixtures
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: KaisAbiyyi/sibambo-bomc-builder
+          ref: 0e3ec262e98762969da66088d412f8beebb63523
+          path: bmb021-public
+          persist-credentials: false
+      - name: Assert original consumer and fixture SHAs, then SHA256 every binary
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$BMB021_EXPECTED_CONSUMER_SHA"
+          test "$(git -C bmb021-public rev-parse HEAD)" = "0e3ec262e98762969da66088d412f8beebb63523"
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ["BMB021_BUILDER_DIR"]) / "tests/interop/goldens"
+          m = json.loads((root/"manifest.json").read_text())
+          assert len(m["fixtures"]) == 7, "Missing pinned goldens"
+          for f in m["fixtures"]:
+              blob = (root/f["file"]).read_bytes()
+              actual = hashlib.sha256(blob).hexdigest()
+              assert len(blob) == f["byteSize"] and actual == f["sha256"], f["file"]
+              print(f"VERIFIED {f['name']} binary={actual} bytes={len(blob)}")
+          PY
+      - name: Setup pinned Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2 resolved
+        with:
+          bun-version: "1.3.0"
+      - name: Install original Editor dependencies
+        run: bun install --frozen-lockfile
+      - name: Run real E4, strict 241, corruption and baseline-independent acceptance
+        run: bun test packages/e4-import/src/bmb021-original-consumer.test.ts packages/bomc-document/src/bmb021-strict-editable.test.ts
+      - name: Export real original Editor-writer synthetic 241 binary and manifest
+        env:
+          BMB021_PRINT_BASE64: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
+        run: bun scripts/bmb021-export-original-editor.ts
+      - name: Upload verified private synthetic Editor original-writer output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 resolved
+        with:
+          name: bmb021-original-editor-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/bmb021-editor-writer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record exact SHA and scope
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## BMB-021 original Editor consumer"
+            echo "- Original Editor SHA: \`$BMB021_EXPECTED_CONSUMER_SHA\`"
+            echo "- Pinned Builder fixture SHA: \`0e3ec262e98762969da66088d412f8beebb63523\`"
+            echo "- Runner: ${{ matrix.os }}"
+            echo "- CI: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- E4 loader: packages/e4-import/src/bomc-loader.ts (actual BomcLoader.load)"
+            echo "- Strict authoring: packages/bomc-document/src/reader.ts (readWebBomc); original writer emitted 241"
+            echo "- Legacy BMB-005/007 workflow unchanged. Ruby and original Model-Eval pairing are not proven by this job."
+            echo "- Check preceding steps/logs for PASS/FAIL; a job summary is not automatically an acceptance receipt."
+          } >> "$GITHUB_STEP_SUMMARY"
