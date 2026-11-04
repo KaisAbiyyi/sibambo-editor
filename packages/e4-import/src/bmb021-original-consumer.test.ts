@@ -180,3 +180,37 @@ describe('BMB-021 hostile input at ORIGINAL Editor E4 loader', () => {
     console.log('EDITOR_E4_POLICY unknown header bit: ACCEPTED (not a strict-Builder profile assertion)');
   });
 });
+
+
+describe('BMB-021 ORIGINAL pure-Ruby producer -> ORIGINAL Editor E4', () => {
+  test('reads exact producer SHA + binary hash via real E4 semantic import', async () => {
+    const dir = process.env.BMB021_RUBY_FIXTURE_DIR;
+    if (!dir) throw new Error('BMB021_RUBY_FIXTURE_DIR is mandatory for this consumer acceptance gate');
+    const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as {
+      file: string; byteSize: number; sha256: string; sourceSha: string; sourceRepository: string;
+      expected: { materials: number; meshes: number; faces: number; triangles: number; definitions: number; instances: number; frontBackDistinctFaces: number };
+    };
+    expect(manifest.sourceRepository).toBe('KaisAbiyyi/sibambo-bom-engine-plugin');
+    expect(manifest.sourceSha).toBe('34f6b795b701209bb1b3262efbccf0d79fedb458');
+    expect(manifest.file).toBe('ruby-producer-synthetic.bomc');
+    const bytes = new Uint8Array(readFileSync(join(dir, manifest.file)));
+    expect(bytes.byteLength).toBe(manifest.byteSize);
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe(manifest.sha256);
+    const value = await load(bytes, 'original-ruby-synthetic.bomc');
+    expect(value.version).toBe('1.2');
+    for (const key of ['materials', 'meshes', 'faces', 'definitions', 'instances'] as const) {
+      expect(value.counts[key], key).toBe(manifest.expected[key]);
+    }
+    expect(value.diagnostics.triangleOwnership.frontDefinitionTriangles).toBe(manifest.expected.triangles);
+    expect(value.diagnostics.triangleOwnership.explicitBackMaterialFaces).toBe(manifest.expected.frontBackDistinctFaces);
+    expect(value.preparedRuntimeScene.groups.length).toBeGreaterThan(0);
+    for (const group of value.preparedRuntimeScene.groups) {
+      const mesh = value.preparedRuntimeScene.meshes[group.sourceMeshIndex]!;
+      expect(mesh).toBeDefined();
+      for (const i of group.indices) expect(i).toBeLessThan(mesh.positions.length / 3);
+    }
+    console.log(JSON.stringify({gate:'ORIGINAL_RUBY_TO_ORIGINAL_EDITOR_E4',result:'PASS',
+      rubySHA:manifest.sourceSha,sha256:manifest.sha256,counts:value.counts,
+      triangles:value.diagnostics.triangleOwnership.frontDefinitionTriangles,coverage:value.diagnostics.coverage}));
+  });
+});
