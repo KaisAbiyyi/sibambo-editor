@@ -69,9 +69,19 @@ describe('BMB-021 pinned Builder -> ORIGINAL Editor E4 loader (not editable)', (
         expect(value.diagnostics.coverage[coverageKeys[i]!], f.name + ' coverage ' + coverageKeys[i]).toBe(f.reader.coverage[i]);
       }
       expect(value.diagnostics.occurrences.hierarchyNodeCount, f.name + ' hierarchy nodes').toBe(f.reader.nodes.length);
-      expect(value.faces.length, f.name + ' decoded render surfaces').toBe(f.reader.counts.faces);
-      expect(value.faces.map(face => face.semanticLabel || face.name).sort(), f.name + ' face semantics')
-        .toEqual([...f.reader.faceLabels].sort());
+      // RenderFaceRecord is the analytics-filtered subset (e.g. faces under 0.35m2 are
+      // intentionally omitted); model.counts.faces and runtime source triangle indices
+      // retain the full original geometry. Do NOT equate analytical faces to source faces.
+      expect(value.faces.length, f.name + ' analytical render surface subset').toBeLessThanOrEqual(f.reader.counts.faces);
+      if (f.reader.counts.faces > 0) expect(value.faces.length).toBeGreaterThan(0);
+      for (const face of value.faces) {
+        expect(f.reader.faceLabels, f.name + ' preserved analytical semantic label')
+          .toContain(face.semanticLabel || face.name);
+      }
+      const sourceFaceIds = new Set(value.preparedRuntimeScene.groups.flatMap(group =>
+        [...(group.sourceFaceIndicesByTriangle || [])]));
+      expect(sourceFaceIds.size, f.name + ' source face geometry retained in runtime indices')
+        .toBe(f.reader.counts.faces);
       expect(value.materialRows.length).toBe(f.reader.materialColors.length);
       f.reader.materialColors.forEach((rgba, i) => {
         const color = '#' + rgba.slice(0, 3).map(v => v.toString(16).padStart(2, '0')).join('');
@@ -141,10 +151,19 @@ describe('BMB-021 hostile input at ORIGINAL Editor E4 loader', () => {
       v.setUint32(second.directory + 4, first.offset, true);
     })]);
     for (const cut of [0, 7, 31, 32, Math.floor(source.length / 2), source.length - 16]) invalid.push(['truncated-' + cut, source.slice(0, cut)]);
+    const erroneouslyAccepted: string[] = [];
     for (const [kind, bad] of invalid) {
-      await isRejected(load(bad, kind + '.bomc'), kind);
-      console.log(JSON.stringify({ gate: 'EDITOR_E4_NEGATIVE', vector: kind, outcome: 'REJECT' }));
+      try {
+        await load(bad, kind + '.bomc');
+        erroneouslyAccepted.push(kind);
+        console.log(JSON.stringify({ gate: 'EDITOR_E4_NEGATIVE', vector: kind, outcome: 'ACCEPTED_UNEXPECTEDLY' }));
+      } catch (error) {
+        console.log(JSON.stringify({ gate: 'EDITOR_E4_NEGATIVE', vector: kind,
+          outcome: 'REJECT', reason: error instanceof Error ? error.message : String(error) }));
+      }
     }
+    // Report every vector before failing; never remove a genuine fail-open vector.
+    expect(erroneouslyAccepted, 'real E4 fail-open corruption vectors').toEqual([]);
   });
   test('unknown optional section and malformed 241: E4 viewer observes but does not edit/interpret', async () => {
     const unknown = mutation(source, (b, v, c) => { const s = sectionLocation(c, 20); v.setUint16(s.directory, 250, true); });
