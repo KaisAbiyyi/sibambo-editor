@@ -2,6 +2,8 @@
 
 Status: corrected consumer acceptance; final hosted receipts are linked from Builder Issue #21. No merge and no native certification.
 
+Hosted harness correction: the first expanded Bun 1.3 CI run exposed missing DecompressionStream before later test imports installed the existing transport adapter. Workflow commands now preload that test-only adapter before test discovery. The initial failed runs are retained; no production parser or semantic assertion was relaxed.
+
 ## Targeted production change
 Only packages/e4-import/src/bomc-loader.ts changes production behavior. decodeReleased reconciles each parsed table or singleton with its directory count before returning it, inside the existing release finally boundary. Position/topology counts equal decoded mesh blocks; UV count equals meshes with a UV block; texture table/blob counts equal decoded textures. Ignored viewer extension/debug/241 sections remain ignored. Material v1/v2 parsing and rendering algorithms are unchanged.
 

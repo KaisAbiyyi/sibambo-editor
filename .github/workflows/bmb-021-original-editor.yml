@@ -45,7 +45,7 @@ jobs:
       - name: Install original Editor dependencies
         run: bun install --frozen-lockfile
       - name: Run REAL E4 and strict editable section 241 tests
-        run: bun test packages/e4-import/src/bmb021-original-consumer.test.ts packages/e4-import/src/bmb021-compatibility.test.ts packages/e4-import/src/bmb021-geometry.test.ts packages/e4-import/src/bomc-materials-v2.test.ts packages/e4-import/src/resource-limits.test.ts packages/bomc-document/src/bmb021-strict-editable.test.ts packages/bomc-document/src/roundtrip.test.ts
+        run: bun test --preload ./packages/e4-import/src/bmb021-browser-test-stream.ts packages/e4-import/src/bmb021-original-consumer.test.ts packages/e4-import/src/bmb021-compatibility.test.ts packages/e4-import/src/bmb021-geometry.test.ts packages/e4-import/src/bomc-materials-v2.test.ts packages/e4-import/src/resource-limits.test.ts packages/bomc-document/src/bmb021-strict-editable.test.ts packages/bomc-document/src/roundtrip.test.ts
       - name: Generate original Editor synthetic writer 241 output
         if: always()
         env:
