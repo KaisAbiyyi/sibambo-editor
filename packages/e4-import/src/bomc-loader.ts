@@ -119,18 +119,18 @@ export class BomcLoader {
 		for (const type of REQUIRED_SECTIONS) if (!container.has(type)) throw new Error(`BOMC invalid: missing section ${type}.`);
 
 		const metadataStarted = performance.now();
-		const strings = await decodeReleased(container, BOMC_SECTION.STRINGS, decodeStrings);
+		const strings = await decodeReleased(container, BOMC_SECTION.STRINGS, decodeStrings, (rows) => rows.length);
 		const model = await decodeReleased(container, BOMC_SECTION.MODEL, (bytes) => decodeModel(bytes, strings));
 		validateCountedSections(container, model.counts);
 		let materialSectionVersion: 1 | 2 | null = null;
 		const materials = container.has(BOMC_SECTION.MATERIALS) ? await decodeReleased(container, BOMC_SECTION.MATERIALS, (bytes) => {
 			if (bytes[0] === 1 || bytes[0] === 2) materialSectionVersion = bytes[0];
 			return decodeMaterials(bytes, strings, model.counts.materials);
-		}) : [];
-		const tags = container.has(BOMC_SECTION.TAGS) ? await decodeReleased(container, BOMC_SECTION.TAGS, (bytes) => decodeTags(bytes, strings, model.counts.tags)) : [];
-		const definitions = await decodeReleased(container, BOMC_SECTION.DEFINITIONS, (bytes) => decodeDefinitions(bytes, strings, model.counts.definitions));
-		const instances = await decodeReleased(container, BOMC_SECTION.INSTANCES, (bytes) => decodeInstances(bytes, strings, model.counts.instances));
-		const { transforms } = await decodeReleased(container, BOMC_SECTION.TRANSFORMS, (bytes) => decodeTransformSection(bytes, model.counts.transforms));
+		}, (rows) => rows.length) : [];
+		const tags = container.has(BOMC_SECTION.TAGS) ? await decodeReleased(container, BOMC_SECTION.TAGS, (bytes) => decodeTags(bytes, strings, model.counts.tags), (rows) => rows.length) : [];
+		const definitions = await decodeReleased(container, BOMC_SECTION.DEFINITIONS, (bytes) => decodeDefinitions(bytes, strings, model.counts.definitions), (rows) => rows.length);
+		const instances = await decodeReleased(container, BOMC_SECTION.INSTANCES, (bytes) => decodeInstances(bytes, strings, model.counts.instances), (rows) => rows.length);
+		const { transforms } = await decodeReleased(container, BOMC_SECTION.TRANSFORMS, (bytes) => decodeTransformSection(bytes, model.counts.transforms), (value) => value.transforms.length / 16);
 		for (let index = 0; index < instances.length; index += 1) {
 			const owner = instances[index].owner;
 			if (owner !== MISSING) {
@@ -148,9 +148,9 @@ export class BomcLoader {
 		if (callbacks?.isCancelled?.()) throw new Error('BOMC load cancelled');
 
 		const analyticalStarted = performance.now();
-		const meshRows = container.has(BOMC_SECTION.MESHES) ? await decodeReleased(container, BOMC_SECTION.MESHES, (bytes) => decodeMeshes(bytes, model.counts.meshes)) : [];
-		const faceRows = container.has(BOMC_SECTION.FACES) ? await decodeReleased(container, BOMC_SECTION.FACES, (bytes) => decodeFaces(bytes, strings, model.counts.faces)) : [];
-		const normals = container.has(BOMC_SECTION.NORMALS) ? (await decodeReleased(container, BOMC_SECTION.NORMALS, (bytes) => decodeNormalSection(bytes, model.counts.faces))).normals : new Float32Array(0);
+		const meshRows = container.has(BOMC_SECTION.MESHES) ? await decodeReleased(container, BOMC_SECTION.MESHES, (bytes) => decodeMeshes(bytes, model.counts.meshes), (rows) => rows.length) : [];
+		const faceRows = container.has(BOMC_SECTION.FACES) ? await decodeReleased(container, BOMC_SECTION.FACES, (bytes) => decodeFaces(bytes, strings, model.counts.faces), (rows) => rows.length) : [];
+		const normals = container.has(BOMC_SECTION.NORMALS) ? (await decodeReleased(container, BOMC_SECTION.NORMALS, (bytes) => decodeNormalSection(bytes, model.counts.faces), (value) => value.normals.length / 3)).normals : new Float32Array(0);
 		if (normals.length !== faceRows.length * 3) throw new Error('BOMC invalid: normal count does not match faces.');
 		const coverage = await decodeReleased(container, BOMC_SECTION.COVERAGE, decodeCoverage);
 		const analyticalDecodeMs = performance.now() - analyticalStarted;
@@ -162,12 +162,16 @@ export class BomcLoader {
 		let meshes: MeshRecord[];
 		try {
 			meshes = decodeGeometry(meshRows, faceRows, normals, positionSection, topologySection, uvSection);
+			validateDirectoryCount(container, BOMC_SECTION.POSITIONS, meshes.length);
+			validateDirectoryCount(container, BOMC_SECTION.TOPOLOGY, meshes.length);
+			// Section 10 counts mesh UV blocks, not faces, UV pairs or textures.
+			validateDirectoryCount(container, BOMC_SECTION.UVS, meshRows.filter((row) => row.uvLength > 0).length);
 		} finally {
 			container.release(BOMC_SECTION.POSITIONS);
 			container.release(BOMC_SECTION.TOPOLOGY);
 			container.release(BOMC_SECTION.UVS);
 		}
-		if (container.has(BOMC_SECTION.VISUAL_EDGES)) await decodeReleased(container, BOMC_SECTION.VISUAL_EDGES, (bytes) => decodeEdges(bytes, meshRows, meshes, tags.length, model.counts.edges));
+		if (container.has(BOMC_SECTION.VISUAL_EDGES)) await decodeReleased(container, BOMC_SECTION.VISUAL_EDGES, (bytes) => decodeEdges(bytes, meshRows, meshes, tags.length, model.counts.edges), (count) => count);
 		const definitionDecodeMs = performance.now() - definitionStarted;
 		const geometryReadyMs = performance.now() - totalStarted;
 
@@ -181,6 +185,8 @@ export class BomcLoader {
 			const blobs = await container.load(BOMC_SECTION.TEXTURE_BLOBS) as Uint8Array;
 			try {
 				textures = await decodeTextures(table, blobs, { isCancelled: callbacks?.isCancelled, expectedCount: model.counts.textures });
+				validateDirectoryCount(container, BOMC_SECTION.TEXTURE_TABLE, textures.length);
+				validateDirectoryCount(container, BOMC_SECTION.TEXTURE_BLOBS, textures.length);
 			} finally {
 				container.release(BOMC_SECTION.TEXTURE_TABLE);
 				container.release(BOMC_SECTION.TEXTURE_BLOBS);
@@ -188,7 +194,7 @@ export class BomcLoader {
 		}
 		const textureTableMs = performance.now() - textureStarted;
 		const fallback = container.has(BOMC_SECTION.FALLBACK)
-			? await decodeReleased(container, BOMC_SECTION.FALLBACK, (bytes) => decodeFallback(bytes, strings))
+			? await decodeReleased(container, BOMC_SECTION.FALLBACK, (bytes) => decodeFallback(bytes, strings), (rows) => rows.length)
 			: [];
 
 		validateReferences(model, materials, tags, meshes, definitions, instances, transforms, textures, coverage, fallback);
@@ -208,7 +214,7 @@ export class BomcLoader {
 		const buildRuntimeStarted = performance.now();
 		let clipPlanes: ClipPlaneRecord[] = [];
 		if (container.has(BOMC_SECTION.CLIP_PLANES)) {
-			clipPlanes = await decodeReleased(container, BOMC_SECTION.CLIP_PLANES, (bytes) => decodeClipPlanes(bytes, strings));
+			clipPlanes = await decodeReleased(container, BOMC_SECTION.CLIP_PLANES, (bytes) => decodeClipPlanes(bytes, strings), (rows) => rows.length);
 		}
 		let scenes: SceneProfile[] = [];
 		let sceneSectionVersion: number | null = null;
@@ -216,7 +222,7 @@ export class BomcLoader {
 			scenes = await decodeReleased(container, BOMC_SECTION.SCENES, (bytes) => {
 				sceneSectionVersion = bytes[0] ?? null;
 				return decodeScenes(bytes, strings, tags, instances, faceRows.length, meshes.reduce((sum, mesh) => sum + mesh.edges.length, 0), clipPlanes);
-			});
+			}, (rows) => rows.length);
 		} else scenes = syntheticDefaultScenes(tags, instances);
 		const sceneVisibilityIndex = createSceneVisibilityIndex(scenes);
 		const edgeAdjacencyByMesh = buildRuntimeEdgeAdjacencies(meshes, occurrences.meshes);
@@ -431,10 +437,17 @@ export class BomcLoader {
 	}
 }
 
-async function decodeReleased<T>(container: BomcContainer, type: number, decode: (bytes: Uint8Array) => T | Promise<T>): Promise<T> {
+function validateDirectoryCount(container: BomcContainer, type: number, actual: number) {
+	const descriptor = container.descriptor(type);
+	if (descriptor && descriptor.count !== actual) throw new Error(`BOMC invalid: section ${type} directory count mismatch; declared ${descriptor.count}, decoded ${actual}.`);
+}
+
+async function decodeReleased<T>(container: BomcContainer, type: number, decode: (bytes: Uint8Array) => T | Promise<T>, countOf: (value: T) => number = () => 1): Promise<T> {
 	const bytes = (await container.load(type)) as Uint8Array;
 	try {
-		return await decode(bytes);
+		const value = await decode(bytes);
+		validateDirectoryCount(container, type, countOf(value));
+		return value;
 	} finally {
 		container.release(type);
 	}
@@ -789,6 +802,7 @@ export function decodeEdges(bytes: Uint8Array, meshRows: MeshRow[], meshes: Mesh
 			assertIndex(edge.second, row.vertexCount, `mesh ${index} edge`);
 		}
 	}
+	return count;
 }
 
 export async function decodeTextures(tableBytes: Uint8Array, blobBytes: Uint8Array, options: { isCancelled?: () => boolean; expectedCount?: number } = {}) {

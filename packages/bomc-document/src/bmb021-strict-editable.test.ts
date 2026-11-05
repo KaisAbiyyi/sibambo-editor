@@ -57,6 +57,9 @@ describe('BMB-021 ORIGINAL Editor strict editable section 241 (separate from E4)
     const v = new DataView(repairedCRC.buffer);
     v.setUint32(32 + idx * 24 + 20, crc32(modified), true);
     await reject(repairedCRC, '241 corrupt BWEB magic with corrected CRC');
+    const badCount = bytes.slice();
+    new DataView(badCount.buffer).setUint32(32 + idx * 24 + 16, section.count + 1, true);
+    await reject(badCount, '241 directory count tampering with unchanged CRC-valid content');
     const unknown241 = bytes.slice();
     new DataView(unknown241.buffer).setUint16(32 + idx * 24, 242, true);
     await reject(unknown241, 'missing mandatory 241 / unknown 242');

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { BomcLoader } from './bomc-loader';
 import { BomcContainer } from './container';
+import { expectedRuntimeSha256, runtimeSha256 } from './bmb021-runtime-snapshot';
 
 const root = process.env.BMB021_BUILDER_DIR;
 if (!root) throw new Error('BMB021_BUILDER_DIR is required: test must run against pinned public Builder checkout');
@@ -60,6 +61,7 @@ describe('BMB-021 pinned Builder -> ORIGINAL Editor E4 loader (not editable)', (
     test(f.name + ' real E4 semantic decode', async () => {
       const input = golden(f);
       const value = await load(input, f.file);
+      expect(runtimeSha256(value), f.name + ' complete original Editor runtime snapshot').toBe(expectedRuntimeSha256[f.name]);
       expect(value.version).toBe('1.2');
       for (const [field, count] of Object.entries(f.reader.counts)) {
         expect(value.counts[field as keyof typeof value.counts], f.name + ' ' + field).toBe(count);
