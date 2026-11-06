@@ -1,0 +1,5 @@
+# Original hosted evidence is byte-preserved on both OSes, including JSON newlines.
+*.bomc -text
+baseline.json -text
+revised.json -text
+receipt.json -text
