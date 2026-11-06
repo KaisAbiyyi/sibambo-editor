@@ -49,6 +49,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_CONSUMER_SHA"
           test "$(git -C bmb021-public rev-parse HEAD)" = 0e3ec262e98762969da66088d412f8beebb63523
+          python -m pip install --disable-pip-version-check jsonschema==4.23.0
           python scripts/bmb026-verify-provenance.py bmb026-builder
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
