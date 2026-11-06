@@ -6,5 +6,5 @@
 		"types": ["vite/client"]
 	},
 		"include": ["contracts/src/**/*.ts", "provenance/src/**/*.ts", "scene-runtime/src/**/*.ts", "e4-import/src/**/*.ts", "viewport/src/**/*.ts", "bomc-document/src/**/*.ts"],
-		"exclude": ["node_modules", "**/*.test.ts", "bomc-document/src/test-fixtures/**"]
+		"exclude": ["node_modules", "**/*.test.ts", "bomc-document/src/test-fixtures/**", "e4-import/src/bmb021-browser-test-stream.ts", "e4-import/src/bmb021-runtime-snapshot.ts"]
 }
