@@ -1,0 +1,861 @@
+{
+  "status": "PASS",
+  "editorSource": "698c2e17b0e6fca824b63fb6968f9b28c093273f",
+  "builderSource": "8fc6ebbeb1996889983bd6fff0958d1f9a7aaf00",
+  "browser": "149.0.7827.55",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "cameras": [
+    {
+      "name": "exterior-roof",
+      "eye": [
+        13,
+        -7,
+        8
+      ],
+      "target": [
+        4,
+        3,
+        1.5
+      ],
+      "xray": false
+    },
+    {
+      "name": "four-room-xray",
+      "eye": [
+        11,
+        -5,
+        12
+      ],
+      "target": [
+        4,
+        3,
+        1
+      ],
+      "xray": true
+    },
+    {
+      "name": "living-shared-doors",
+      "eye": [
+        1,
+        0.7,
+        1.5
+      ],
+      "target": [
+        3.6,
+        2.7,
+        1.3
+      ],
+      "xray": false
+    },
+    {
+      "name": "bedroom-bath-door",
+      "eye": [
+        5.1,
+        0.7,
+        1.5
+      ],
+      "target": [
+        6,
+        3,
+        1.3
+      ],
+      "xray": false
+    },
+    {
+      "name": "exterior-window",
+      "eye": [
+        11.5,
+        1.5,
+        1.5
+      ],
+      "target": [
+        8,
+        1.5,
+        1.5
+      ],
+      "xray": false
+    }
+  ],
+  "ownerVisual": "NOT_RUN",
+  "independentReview": "NOT_RUN",
+  "models": [
+    {
+      "label": "baseline",
+      "binarySha256": "071ebe152b44d2bae387818094ad67a6f461645d45d1ad33c195848dbb0b49aa",
+      "counts": {
+        "materials": 9,
+        "tags": 0,
+        "meshes": 5,
+        "faces": 278,
+        "definitions": 7,
+        "instances": 7,
+        "transforms": 7,
+        "textures": 0,
+        "edges": 0
+      },
+      "captures": [
+        {
+          "file": "baseline-exterior-roof.png",
+          "pngSha256": "17947ed2bbf5f95cb5484af74a3a14dbcdc13e88946a978758ed237c317dae27",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 13,
+                "y": 8,
+                "z": 7
+              },
+              "target": {
+                "x": 4,
+                "y": 1.5,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 79,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 6781.60000000149,
+            "readyAtMs": 6790.20000000298
+          }
+        },
+        {
+          "file": "baseline-four-room-xray.png",
+          "pngSha256": "751400ee0c4c5ed3ed1516293c1c9b9a2686170f54107de0b0b93ae475b39bfc",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 11,
+                "y": 12,
+                "z": 5
+              },
+              "target": {
+                "x": 4,
+                "y": 1,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 79,
+              "render": {
+                "calls": 43,
+                "triangles": 1424
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "xray",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": true,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 43,
+            "triangleCount": 1424,
+            "firstFrameAtMs": 6781.60000000149,
+            "readyAtMs": 6790.20000000298
+          }
+        },
+        {
+          "file": "baseline-living-shared-doors.png",
+          "pngSha256": "456e3f3b7c9e4dfe9601ae6223e97a88f161664c92136578c2e4342779367508",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 1,
+                "y": 1.5,
+                "z": -0.7
+              },
+              "target": {
+                "x": 3.6,
+                "y": 1.3,
+                "z": -2.7
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 79,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 6781.60000000149,
+            "readyAtMs": 6790.20000000298
+          }
+        },
+        {
+          "file": "baseline-bedroom-bath-door.png",
+          "pngSha256": "536597a2fd271827e35915a8e223147d6e491a2fdd58e00afbcb77030a2f9cd1",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 5.1,
+                "y": 1.5,
+                "z": -0.7
+              },
+              "target": {
+                "x": 6,
+                "y": 1.3,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 79,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 6781.60000000149,
+            "readyAtMs": 6790.20000000298
+          }
+        },
+        {
+          "file": "baseline-exterior-window.png",
+          "pngSha256": "b3997a50d52468fac540a59b4884d16b6214b4ddebcbb65c28beff84afb61510",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 11.5,
+                "y": 1.5,
+                "z": -1.5
+              },
+              "target": {
+                "x": 8,
+                "y": 1.5,
+                "z": -1.5
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 79,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 6781.60000000149,
+            "readyAtMs": 6790.20000000298
+          }
+        }
+      ],
+      "consoleLogs": [
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x5d84001b7400]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x5d84001b7400]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x5d84001b7400]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x5d84001b7400]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+        }
+      ],
+      "pageErrors": []
+    },
+    {
+      "label": "revised",
+      "binarySha256": "e56924fead241df9a1a76c9de9e0e647b13caf2785cf14bc4c679a8979192233",
+      "counts": {
+        "materials": 9,
+        "tags": 0,
+        "meshes": 5,
+        "faces": 278,
+        "definitions": 7,
+        "instances": 7,
+        "transforms": 7,
+        "textures": 0,
+        "edges": 0
+      },
+      "captures": [
+        {
+          "file": "revised-exterior-roof.png",
+          "pngSha256": "05986450d127a8c12d0191f45bf008dea3b5ae73cbb66b05dfce17857cb338b6",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 13,
+                "y": 8,
+                "z": 7
+              },
+              "target": {
+                "x": 4,
+                "y": 1.5,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 27.100000001490116,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 710,
+            "readyAtMs": 714.5
+          }
+        },
+        {
+          "file": "revised-four-room-xray.png",
+          "pngSha256": "a5529083397cc1e8b1cb96ea00a193650c8e692fc8fba7ab7ddab96b2d38cf58",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 11,
+                "y": 12,
+                "z": 5
+              },
+              "target": {
+                "x": 4,
+                "y": 1,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 27.100000001490116,
+              "render": {
+                "calls": 43,
+                "triangles": 1424
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "xray",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": true,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 43,
+            "triangleCount": 1424,
+            "firstFrameAtMs": 710,
+            "readyAtMs": 714.5
+          }
+        },
+        {
+          "file": "revised-living-shared-doors.png",
+          "pngSha256": "843f36ae4a8642d5f29b9cbbef864130f49d8174356964549613f1b66bdd3c41",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 1,
+                "y": 1.5,
+                "z": -0.7
+              },
+              "target": {
+                "x": 3.6,
+                "y": 1.3,
+                "z": -2.7
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 27.100000001490116,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 710,
+            "readyAtMs": 714.5
+          }
+        },
+        {
+          "file": "revised-bedroom-bath-door.png",
+          "pngSha256": "8679459f5142416ae24232d137c31925f33a2eca8d8f342dd42ea27e6a86d4c3",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 5.1,
+                "y": 1.5,
+                "z": -0.7
+              },
+              "target": {
+                "x": 6,
+                "y": 1.3,
+                "z": -3
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 27.100000001490116,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 710,
+            "readyAtMs": 714.5
+          }
+        },
+        {
+          "file": "revised-exterior-window.png",
+          "pngSha256": "eff77858f74ee333a36177cb47db04b2c0a67968319b9d2cbcc330d98c6d1dc2",
+          "observation": {
+            "backend": "webgl2",
+            "viewport": {
+              "width": 1600,
+              "height": 864,
+              "pixelRatio": 1
+            },
+            "camera": {
+              "position": {
+                "x": 11.5,
+                "y": 1.5,
+                "z": -1.5
+              },
+              "target": {
+                "x": 8,
+                "y": 1.5,
+                "z": -1.5
+              },
+              "up": {
+                "x": 0,
+                "y": 1,
+                "z": 0
+              },
+              "fov": 42,
+              "near": 0.004074999906122685,
+              "far": 325.99999248981476,
+              "projection": "perspective"
+            },
+            "scene": {
+              "meshCount": 21,
+              "instanceCount": 21,
+              "uniqueTriangles": 712
+            },
+            "renderer": {
+              "initializationMs": 27.100000001490116,
+              "render": {
+                "calls": 22,
+                "triangles": 712
+              },
+              "memory": {
+                "geometries": 22,
+                "textures": 1
+              }
+            },
+            "resources": {
+              "jsHeapBytes": 23100000,
+              "totalGpuMemoryBytes": null
+            },
+            "appearance": {
+              "viewMode": "solid",
+              "faceStyle": "shaded",
+              "effects": {
+                "xray": false,
+                "ambientOcclusion": false
+              },
+              "ambientOcclusionSupported": true,
+              "photorealFallback": false,
+              "failedDecodePaths": [],
+              "missingAssetPaths": [],
+              "unsupportedTexturePaths": []
+            },
+            "geometryCount": 22,
+            "textureCount": 1,
+            "drawCallCount": 22,
+            "triangleCount": 712,
+            "firstFrameAtMs": 710,
+            "readyAtMs": 714.5
+          }
+        }
+      ],
+      "consoleLogs": [],
+      "pageErrors": []
+    }
+  ]
+}
