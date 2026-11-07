@@ -75,3 +75,12 @@ Editor package scripts are listed in [package.json](package.json).
 - [Admission code](src/lib/e4-admission.ts)
 - [Worker lifecycle](src/lib/e4-worker-client.ts)
 
+
+
+## Builder preview handoff
+
+Use **Extensions → Preview Builder Artifact…** to open a locally supplied BOMC 1.2 artifact produced by BOMC Builder. The handoff reuses Editor's existing admission checks, E4 import worker, and viewport; it does not invoke Builder or copy its construction implementation.
+
+Builder preview is always read-only, including when the artifact would otherwise match Editor's supported authoring subset. Scene selection, camera navigation, source-face picking, and **Save View** remain available. Editor does not expose Move, Undo/Redo, or Save BOMC for this mode. The selected artifact stays in browser memory; there is no upload, server persistence, live MCP connection, or automatic cross-app transport.
+
+See [the Builder preview seam contract](../../docs/integrations/builder-preview-seam.md).
