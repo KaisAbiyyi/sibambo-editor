@@ -33,7 +33,8 @@
 	let artifactSha256 = $state('');
 	let modelTabTitle = $state('Sibambo Editor');
 	type EditorMode = 'empty' | 'imported' | 'authoring';
-	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null } | { kind: 'close' };
+	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null; previewOnly?: boolean } | { kind: 'close' };
+	let builderPreviewOnly = $state(false);
 	let mode = $state<EditorMode>('empty');
 	let hasModel = $derived(mode !== 'empty');
 	let result = $state.raw<AdaptedBomcResult | null>(null);
@@ -92,6 +93,7 @@
 	let globalKeydownHandler: ((event: KeyboardEvent) => void) | null = null;
 	let viewportHost = $state<HTMLDivElement | null>(null);
 	let sourceInput: HTMLInputElement;
+	let builderPreviewInput: HTMLInputElement;
 	let provenanceInput: HTMLInputElement;
 	let provenanceUpgradeInput: HTMLInputElement;
 	let busy = $state(false);
@@ -126,6 +128,7 @@
 	const activeTouchPoints = new Map<number, { x: number; y: number }>();
 	type LoadedEditorState = {
 		mode: EditorMode;
+		builderPreviewOnly: boolean;
 		provenance: ResearchProvenance | null;
 		artifactSha256: string;
 		modelTabTitle: string;
@@ -160,7 +163,7 @@
 
 	function snapshotLoadedState(): LoadedEditorState {
 		return {
-			mode, provenance, artifactSha256, modelTabTitle, result, session, editorController, viewport,
+			mode, builderPreviewOnly, provenance, artifactSha256, modelTabTitle, result, session, editorController, viewport,
 				authoringClient, authoringCheckpoint, authoringTools, authoringTool, authoringInference, measureTooltip, selectedEntityId, authoringBounds, activeSourceName,
 			ready, picked,
 			selectedOccurrenceHandles: [...selectedOccurrenceHandles], activeTool, activeCameraTool, selectionBox: selectionBox ? { ...selectionBox } : null,
@@ -182,6 +185,7 @@
 		if (authoringTools && authoringTools !== snapshot.authoringTools) authoringTools.dispose();
 		if (authoringClient && authoringClient !== snapshot.authoringClient) void authoringClient.close();
 		mode = snapshot.mode;
+		builderPreviewOnly = snapshot.builderPreviewOnly;
 		provenance = snapshot.provenance;
 		artifactSha256 = snapshot.artifactSha256;
 		modelTabTitle = snapshot.modelTabTitle;
@@ -226,6 +230,17 @@
 		if (provenanceInput) provenanceInput.value = '';
 		error = '';
 		void requestTransition({ kind: 'open', file, sidecar }, transitionTrigger);
+	}
+	function stageBuilderPreviewSource(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0] ?? null;
+		input.value = '';
+		if (!file) return;
+		sourceFile = file;
+		provenanceFile = null;
+		if (provenanceInput) provenanceInput.value = '';
+		error = '';
+		void requestTransition({ kind: 'open', file, sidecar: null, previewOnly: true }, transitionTrigger);
 	}
 	function stageProvenance(event: Event) {
 		provenanceFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null;
@@ -407,6 +422,12 @@
 		sourceInput?.click();
 	}
 
+	function openBuilderPreviewPicker(trigger: HTMLElement | null) {
+		if (!clientReady || busy || saveBusy || authoringOperationBusy || pendingTransition) return;
+		transitionTrigger = trigger;
+		builderPreviewInput?.click();
+	}
+
 	function canRunTransition(action: PendingTransition) {
 		const recoveryClose = action.kind === 'close' && mode === 'authoring' && authoringRecovery.phase !== 'ready';
 		return clientReady && !busy && !saveBusy && (!authoringOperationBusy || recoveryClose);
@@ -427,7 +448,7 @@
 	async function executeTransition(action: PendingTransition) {
 		if (!canRunTransition(action)) return;
 		if (action.kind === 'new') await createNewAuthoringDocument();
-		else if (action.kind === 'open') await openModel(action.file, action.sidecar);
+		else if (action.kind === 'open') await openModel(action.file, action.sidecar, { previewOnly: action.previewOnly === true });
 		else unload();
 	}
 
@@ -436,6 +457,7 @@
 			sourceFile = null;
 			provenanceFile = null;
 			if (sourceInput) sourceInput.value = '';
+			if (builderPreviewInput) builderPreviewInput.value = '';
 			if (provenanceInput) provenanceInput.value = '';
 		}
 		pendingTransition = null;
@@ -606,7 +628,7 @@
 			const candidateBounds = setAuthoringProjection(candidateViewport, created.checkpoint, true);
 			await waitForPreparedViewportReady(candidateViewport, request);
 			if (request !== generation) return;
-			mode = 'authoring'; result = null; session = null; editorController = null;
+			mode = 'authoring'; result = null; session = null; editorController = null; builderPreviewOnly = false;
 			provenance = null; artifactSha256 = ''; activeSourceName = null; sceneId = '';
 			viewport = candidateViewport; authoringClient = client; authoringCheckpoint = created.checkpoint;
 				authoringBounds = candidateBounds; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; selectedEntityId = '';
@@ -661,7 +683,8 @@
 		});
 	}
 
-	async function openModel(file: File = sourceFile!, sidecar: File | null = provenanceFile) {
+	async function openModel(file: File = sourceFile!, sidecar: File | null = provenanceFile, options: { previewOnly?: boolean } = {}) {
+		const previewOnly = options.previewOnly === true;
 		if (!clientReady || !file || busy || saveBusy) return;
 		const previous = snapshotLoadedState();
 		const request = ++generation;
@@ -670,7 +693,7 @@
 		lastCancelledSnapshot = null; lastCancelGeneration = -1;
 		controller?.abort();
 		const importController = new AbortController(); controller = importController;
-		busy = true; activeOperation = 'import'; loadStatus = sidecar ? 'Checking BOMC and provenance…' : 'Checking BOMC format and artifact hash…';
+		busy = true; activeOperation = 'import'; loadStatus = previewOnly ? 'Checking Builder BOMC 1.2 artifact…' : sidecar ? 'Checking BOMC and provenance…' : 'Checking BOMC format and artifact hash…';
 		error = ''; projectionError = '';
 		let importedViewport: PreparedSceneViewport | null = null;
 		let writableViewport: PreparedSceneViewport | null = null;
@@ -699,12 +722,17 @@
 			await waitForPreparedViewportReady(importedViewport, request);
 			if (request !== generation || importController.signal.aborted) return;
 
-			loadStatus = 'Inspecting the real file for the exact writable BOMC subset…';
-			candidateClient = new AuthoringClient({ sessionId: crypto.randomUUID() });
-			pendingCandidateClient = candidateClient;
-			const inspection: OpenResult = await candidateClient.open(await file.arrayBuffer());
-			if (request !== generation || importController.signal.aborted) return;
-			if (inspection.kind === 'authoring') {
+			let inspection: OpenResult | null = null;
+			if (!previewOnly) {
+				loadStatus = 'Inspecting the real file for the exact writable BOMC subset…';
+				candidateClient = new AuthoringClient({ sessionId: crypto.randomUUID() });
+				pendingCandidateClient = candidateClient;
+				inspection = await candidateClient.open(await file.arrayBuffer());
+				if (request !== generation || importController.signal.aborted) return;
+			}
+			if (!previewOnly && inspection?.kind === 'authoring') {
+				const inspectionClient = candidateClient;
+				if (!inspectionClient) throw new Error('The writable-subset inspection client is unavailable.');
 				const checkpoint = inspection.checkpoint;
 				await waitForViewportLayout(request);
 					writableViewport = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
@@ -715,12 +743,12 @@
 				const bounds = setAuthoringProjection(writableViewport, checkpoint, true);
 				await waitForPreparedViewportReady(writableViewport, request);
 				if (request !== generation || importController.signal.aborted) return;
-				mode = 'authoring'; result = null; session = null; editorController = null;
+				mode = 'authoring'; result = null; session = null; editorController = null; builderPreviewOnly = false;
 				provenance = admitted.provenance; artifactSha256 = admitted.artifactSha256; activeSourceName = file.name;
-				sceneId = ''; viewport = writableViewport; authoringClient = candidateClient; authoringCheckpoint = checkpoint;
+				sceneId = ''; viewport = writableViewport; authoringClient = inspectionClient; authoringCheckpoint = checkpoint;
 					authoringBounds = bounds; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; selectedEntityId = ''; picked = null; selectedOccurrenceHandles = [];
 				activeTool = 'select'; activeCameraTool = null; selectionBox = null; pointerGesture = null; activeTouchPoints.clear();
-					ready = true; authoringTools = makeAuthoringTools(candidateClient, writableViewport, checkpoint);
+					ready = true; authoringTools = makeAuthoringTools(inspectionClient, writableViewport, checkpoint);
 					bindAuthoringRecovery(candidateClient);
 				modelTabTitle = authoringTitle(checkpoint); editorNotice = 'Writable BOMC · This file is inside the supported Editor planar-face topology subset.';
 				writableViewport.setOnReady(() => { if (viewport === writableViewport && request === generation) ready = true; });
@@ -730,15 +758,20 @@
 				disposePreviousOwners(previous, writableViewport);
 				activeLoadSnapshot = null;
 			} else {
-				await candidateClient.close(); candidateClient = null; pendingCandidateClient = null;
+				if (candidateClient) {
+					const closingCandidateClient = candidateClient;
+					await closingCandidateClient.close();
+					candidateClient = null;
+					if (pendingCandidateClient === closingCandidateClient) pendingCandidateClient = null;
+				}
 				candidateSession = new EditorSession(file, admitted.provenance, admitted.artifactSha256, loaded.encodingContract?.profile ?? null);
 				pendingCandidateSession = candidateSession;
-				mode = 'imported'; result = loaded; session = candidateSession; editorController = new EditorController(candidateSession.editableGeometry);
+				mode = 'imported'; result = loaded; session = candidateSession; editorController = previewOnly ? null : new EditorController(candidateSession.editableGeometry); builderPreviewOnly = previewOnly;
 				provenance = admitted.provenance; artifactSha256 = admitted.artifactSha256; activeSourceName = file.name; modelTabTitle = resolveLoadedModelTabTitle({ modelName: loaded.modelName, sourceFileName: loaded.sourceFileName, selectedFileName: file.name }, 'Sibambo Editor');
 					sceneId = nextSceneId; viewport = importedViewport; authoringClient = null; authoringCheckpoint = null; authoringTools = null; authoringBounds = null;
 					bindAuthoringRecovery(null);
 					ready = false; picked = null; selectedOccurrenceHandles = []; activeTool = 'select'; authoringTool = 'select'; authoringInference = ''; extrusionDistanceText = ''; activeCameraTool = null;
-				moveDistanceText = ''; moveAxis = null; editorNotice = inspection.reason; selectionBox = null; importedViewport.setSelectedOccurrences([]);
+				moveDistanceText = ''; moveAxis = null; editorNotice = previewOnly ? 'Builder preview · read-only. Construction and revisions remain in BOMC Builder; Editor only previews and inspects this artifact.' : inspection?.kind === 'viewer' ? inspection.reason : ''; selectionBox = null; importedViewport.setSelectedOccurrences([]);
 				unsubscribeOccurrenceTransforms?.();
 				unsubscribeOccurrenceTransforms = candidateSession.editableGeometry.subscribeOccurrenceTransforms((transforms) => {
 					if (viewport !== importedViewport || request !== generation) return;
@@ -752,6 +785,7 @@
 				activeLoadSnapshot = null;
 			}
 			if (sourceInput) sourceInput.value = '';
+			if (builderPreviewInput) builderPreviewInput.value = '';
 			if (provenanceInput) provenanceInput.value = '';
 			sourceFile = null; provenanceFile = null;
 		} catch (cause) {
@@ -803,6 +837,11 @@
 	}
 
 	function setTool(tool: EditorTool) {
+		if (builderPreviewOnly && tool !== 'select') {
+			editorNotice = 'Builder preview is read-only; Editor-owned Move is disabled.';
+			activeTool = 'select';
+			return;
+		}
 		if (mode === 'authoring') {
 		if (tool === 'select') setAuthoringTool('select');
 			return;
@@ -841,12 +880,14 @@
 		editorNotice = '';
 	}
 	function undoAction() {
+		if (builderPreviewOnly) return;
 		if (mode === 'authoring') { void runAuthoringHistory('undo'); return; }
 		if (editorController) { editorController.undo(); editorController.setTool('select'); }
 		activeTool = 'select';
 		viewport?.setOccurrencePreview(null);
 	}
 	function redoAction() {
+		if (builderPreviewOnly) return;
 		if (mode === 'authoring') { void runAuthoringHistory('redo'); return; }
 		editorController?.redo();
 		editorController?.setTool('select');
@@ -1302,6 +1343,7 @@
 		authoringTool = 'select';
 		authoringInference = '';
 		mode = 'empty';
+		builderPreviewOnly = false;
 		authoringOperationBusy = false;
 		editorController = null;
 		editorNotice = '';
@@ -1321,6 +1363,7 @@
 		activeCameraTool = null;
 		busy = false;
 		if (sourceInput) sourceInput.value = '';
+		if (builderPreviewInput) builderPreviewInput.value = '';
 		if (provenanceInput) provenanceInput.value = '';
 		if (provenanceUpgradeInput) provenanceUpgradeInput.value = '';
 		sourceFile = null;
@@ -1423,9 +1466,10 @@
 	<meta name="theme-color" content={darkMode ? '#15181C' : '#F7F8FA'} />
 </svelte:head>
 
-<main data-app="editor" data-editor-ready={clientReady ? 'true' : 'false'} class:is-loaded={hasModel}>
+<main data-app="editor" data-editor-ready={clientReady ? 'true' : 'false'} data-builder-preview-only={builderPreviewOnly ? 'true' : 'false'} class:is-loaded={hasModel}>
 	<div class="visually-hidden">
 		<label>BOMC 1.2 file<input bind:this={sourceInput} type="file" accept=".bomc,application/octet-stream" onchange={stageSource} disabled={busy || saveBusy || authoringOperationBusy || !clientReady} tabindex="-1" /></label>
+		<label>Builder BOMC 1.2 artifact<input bind:this={builderPreviewInput} type="file" accept=".bomc,application/octet-stream" onchange={stageBuilderPreviewSource} disabled={busy || saveBusy || authoringOperationBusy || !clientReady} tabindex="-1" /></label>
 		<label>Provenance JSON for next model<input bind:this={provenanceInput} type="file" accept=".json,application/json" onchange={stageProvenance} disabled={busy} tabindex="-1" /></label>
 		<label>Provenance JSON for current model<input bind:this={provenanceUpgradeInput} type="file" accept=".json,application/json" onchange={stageUpgradeProvenance} disabled={busy || !session || !!provenance} tabindex="-1" /></label>
 	</div>
@@ -1448,8 +1492,8 @@
 		<details class="menu-root">
 			<summary>Edit</summary>
 			<div class="menu-popover">
-					<button type="button" onclick={undoAction} disabled={mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.undo.length : !editorController?.history.canUndo}>Undo<kbd>Ctrl+Z</kbd></button>
-					<button type="button" onclick={redoAction} disabled={mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.redo.length : !editorController?.history.canRedo}>Redo<kbd>Ctrl+Shift+Z</kbd></button>
+					<button type="button" onclick={undoAction} disabled={builderPreviewOnly || (mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.undo.length : !editorController?.history.canUndo)}>Undo<kbd>Ctrl+Z</kbd></button>
+					<button type="button" onclick={redoAction} disabled={builderPreviewOnly || (mode === 'authoring' ? !canAuthor() || !authoringCheckpoint?.history.redo.length : !editorController?.history.canRedo)}>Redo<kbd>Ctrl+Shift+Z</kbd></button>
 			</div>
 		</details>
 		<details class="menu-root">
@@ -1487,7 +1531,7 @@
 		<details class="menu-root">
 			<summary>Tools</summary>
 			<div class="menu-popover">
-				<button type="button" onclick={() => setTool('move')} disabled={mode !== 'imported' || !canMoveSelected()}>Move Selected<kbd>M</kbd></button>
+				<button type="button" onclick={() => setTool('move')} disabled={builderPreviewOnly || mode !== 'imported' || !canMoveSelected()}>Move Selected<kbd>M</kbd></button>
 				{#if mode === 'authoring'}
 					<button type="button" onclick={() => setAuthoringTool('measure')} disabled={!canAuthor()}>Tape Measure<kbd>T</kbd></button>
 					<span class="menu-status">Tape Measure is transient and does not modify BOMC geometry.</span>
@@ -1498,7 +1542,13 @@
 			<summary>Window</summary>
 			<div class="menu-popover"><button type="button" onclick={toggleTheme}>{darkMode ? 'Light Theme' : 'Dark Theme'}</button></div>
 		</details>
-		<button type="button" class="menu-label" aria-label="Extensions menu placeholder">Extensions</button>
+		<details class="menu-root">
+			<summary>Extensions</summary>
+			<div class="menu-popover">
+				<button type="button" onclick={(event) => openBuilderPreviewPicker(event.currentTarget)} disabled={busy || saveBusy || authoringOperationBusy || !clientReady || !!pendingTransition}>Preview Builder Artifact…</button>
+				<span class="menu-status">Local BOMC 1.2 handoff. Builder owns construction; Editor provides read-only preview and inspection.</span>
+			</div>
+		</details>
 		<button type="button" class="menu-label" aria-label="Help menu placeholder">Help</button>
 	</nav>
 	{#if pendingTransition}
@@ -1543,7 +1593,7 @@
 			</button>
 		</div>
 		{#if mode === 'authoring' && authoringCheckpoint}<div class="tool-context"><span>{authoringCheckpoint.snapshot.graph.name || 'Untitled'}</span><span class="mode-badge">Writable BOMC</span><span>{isAuthoringDirty() ? 'Unsaved' : 'Saved'}</span></div>
-		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span title="BOMC editing is limited to the validated Editor-authored planar-face topology subset.">Viewer · supported authoring subset only</span></div>{/if}
+		{:else if mode === 'imported' && result}<div class="tool-context"><span>{result.modelName ?? session?.source.file.name ?? 'BOMC model'}</span><span>{result.encodingContract?.profile?.toUpperCase() ?? 'PROFILE'}</span><span class="mode-badge" title={builderPreviewOnly ? 'Read-only Builder artifact preview; construction remains in BOMC Builder.' : 'BOMC editing is limited to the validated Editor-authored planar-face topology subset.'}>{builderPreviewOnly ? 'Builder Preview · Read-only' : 'Viewer · supported authoring subset only'}</span></div>{/if}
 	</nav>
 
 	{#if result?.scenes.length}

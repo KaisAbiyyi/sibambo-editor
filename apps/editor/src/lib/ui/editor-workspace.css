@@ -75,6 +75,7 @@ main[data-app="editor"].is-loaded {
 .menu-root:nth-of-type(5) .menu-popover { left: 250px; top: 29px; }
 .menu-root:nth-of-type(6) .menu-popover { left: 310px; top: 29px; }
 .menu-root:nth-of-type(7) .menu-popover { left: 370px; top: 29px; }
+.menu-root:nth-of-type(8) .menu-popover { left: min(430px, calc(100vw - 240px)); top: 29px; }
 .menu-popover button {
 	display: flex;
 	min-height: 30px;
