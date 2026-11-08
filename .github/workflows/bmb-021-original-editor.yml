@@ -1,0 +1,70 @@
+name: BMB-021 original Editor acceptance
+on:
+  push:
+    branches:
+      - test/bmb-021-original-e4-20261104
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  original-consumer:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      BMB021_BUILDER_DIR: ${{ github.workspace }}/bmb021-public
+      BMB021_RUBY_FIXTURE_DIR: ${{ github.workspace }}/packages/e4-import/src/bmb021-fixtures/ruby-original
+      EXPECTED_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BMB021_CONSUMER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: KaisAbiyyi/sibambo-bomc-builder
+          ref: 0e3ec262e98762969da66088d412f8beebb63523
+          path: bmb021-public
+          persist-credentials: false
+      - name: Pin both exact source trees and check all seven binary hashes
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_CONSUMER_SHA"
+          test "$(git -C bmb021-public rev-parse HEAD)" = 0e3ec262e98762969da66088d412f8beebb63523
+          python -c "import hashlib,json,pathlib; p=pathlib.Path('bmb021-public/tests/interop/goldens'); m=json.loads((p/'manifest.json').read_text()); assert len(m['fixtures'])==7; assert all(hashlib.sha256((p/f['file']).read_bytes()).hexdigest()==f['sha256'] and (p/f['file']).stat().st_size==f['byteSize'] for f in m['fixtures']); print('7/7 pinned SHA256 PASS')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.0'
+      - name: Install original Editor dependencies
+        run: bun install --frozen-lockfile
+      - name: Run REAL E4 and strict editable section 241 tests
+        run: bun test --preload ./packages/e4-import/src/bmb021-browser-test-stream.ts packages/e4-import/src/bmb021-original-consumer.test.ts packages/e4-import/src/bmb021-compatibility.test.ts packages/e4-import/src/bmb021-geometry.test.ts packages/e4-import/src/bomc-materials-v2.test.ts packages/e4-import/src/resource-limits.test.ts packages/bomc-document/src/bmb021-strict-editable.test.ts packages/bomc-document/src/roundtrip.test.ts
+      - name: Generate original Editor synthetic writer 241 output
+        if: always()
+        env:
+          BMB021_EDITOR_EXPORT_DIR: ${{ runner.temp }}/bmb021-editor-original
+          BMB021_PRINT_BASE64: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
+        run: bun scripts/bmb021-export-original-editor.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: bmb021-editor-writer-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/bmb021-editor-original/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Evidence summary
+        if: always()
+        shell: bash
+        run: |
+          echo "Original Editor consumer SHA: $EXPECTED_CONSUMER_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Builder frozen fixture SHA: 0e3ec262e98762969da66088d412f8beebb63523" >> "$GITHUB_STEP_SUMMARY"
+          echo "Real entrypoint: packages/e4-import/src/bomc-loader.ts BomcLoader.load; strict editable: packages/bomc-document/src/reader.ts readWebBomc" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Original Ruby synthetic import and Editor writer strict 241 are asserted here. External Model-Eval comparison is a separate consumer-owned gate. Native SketchUp and human visual acceptance remain NOT_RUN." >> "$GITHUB_STEP_SUMMARY"

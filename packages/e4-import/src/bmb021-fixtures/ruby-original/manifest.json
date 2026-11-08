@@ -1,0 +1,18 @@
+{
+  "gate": "BMB021_ORIGINAL_RUBY_PRODUCER",
+  "file": "ruby-producer-synthetic.bomc",
+  "sha256": "ef830ba5a5568e8af9930cf2f11a7721a2d65e2f5f0e8b1352c4142b6f4314f5",
+  "byteSize": 877,
+  "sourceRepository": "KaisAbiyyi/sibambo-bom-engine-plugin",
+  "sourceSha": "34f6b795b701209bb1b3262efbccf0d79fedb458",
+  "originalEntrypoint": "BOMEngine::BOMCWriter.pack",
+  "expected": {
+    "materials": 1,
+    "meshes": 1,
+    "faces": 1,
+    "triangles": 2,
+    "definitions": 2,
+    "instances": 2,
+    "frontBackDistinctFaces": 0
+  }
+}
