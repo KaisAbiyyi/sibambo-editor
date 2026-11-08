@@ -130,6 +130,12 @@ Experimental1 adds XB-19.0–19.3 (synthetic phase). Experimental2 adds XB-19.4�
 | E2 | Switch `silabs-generator` to private + add proprietary licence notice (owner GitHub action) | Required before any Batch 2 content lands there |
 | E3 | Discovery timebox per week (D3) | A few hours per week |
 
+### Decision log update (2026-11-08)
+
+- **E1 · Keep.** Already-public Batch 2 planning material (Builder PR #88 docs, issues #76–#87, v1.4 file on the public branch) stays; no takedown. It is planning text only (no code, client data, credentials or weights), and deletion would not erase forks, caches or git history. Hygiene rules: nothing new about Batch 2 goes to public repos; when docs merge into Builder main, only the public edition goes in and Batch 2 sections become a pointer; at XB-00, Batch 2 issues are recreated in private `silabs-generator` and the public XB issues are closed with a pointer.
+- **E2 · Done.** The owner set `KaisAbiyyi/silabs-generator` to private; visibility verified 2026-11-08. A proprietary LICENSE notice is added with the first commit.
+- **E3 · Accepted.** Discovery timebox: a few hours per week, never taking Stable's slot.
+
 # Part 5 — v1.4 (accepted by the owner), preserved verbatim
 
 The following is the complete, unmodified text of `MASTER_IMPLEMENTATION_PLAN_2026-11-08_SIB-TWO-PHASE-001_v1.4.md`, which itself contains v1.3 verbatim as its Part 4.
