@@ -45,6 +45,9 @@
   }
   function grantAction(agent: Agent, action: 'approve' | 'deny' | 'revoke' | 'remove') {
     const code = (pairingConfirmation[agent.id] ?? '').trim().toUpperCase();
+    if (action === 'approve' && (!agent.expiresAt || !Number.isFinite(Date.parse(agent.expiresAt)) || Date.parse(agent.expiresAt) <= Date.now())) {
+      errorText = 'Permintaan pairing kedaluwarsa atau tidak mempunyai batas waktu valid. Mulai pairing baru.'; return;
+    }
     if (action === 'approve' && !/^[A-Z2-9]{8}$/.test(code)) {
       errorText = 'Cocokkan dan ketik kode pasangan 8 karakter dari aplikasi agent.'; return;
     }
@@ -107,11 +110,12 @@
             <li><strong>{agent.displayName ?? 'Agent baru'}</strong>
               <small>Subject: <code>{agent.agentSubject}</code></small>
               <small>Client: <code>{agent.clientId}</code></small>
-              <small>Scopes: {agent.scopes.join(', ')} · Batas waktu: {agent.expiresAt ?? 'periksa aplikasi agent'}</small>
+              <small>Scopes: {agent.scopes.join(', ')} · Batas waktu: {agent.expiresAt ?? 'tidak tersedia'}</small>
+              {#if !agent.expiresAt || !Number.isFinite(Date.parse(agent.expiresAt)) || Date.parse(agent.expiresAt) <= Date.now()}<small role="status">Pairing kedaluwarsa — minta agent mengulang OAuth.</small>{/if}
               <label for={'mcp-code-' + agent.id}>Kode 8 karakter yang tampil di agent</label>
               <input id={'mcp-code-' + agent.id} value={pairingConfirmation[agent.id] ?? ''} oninput={(e) => pairingConfirmation[agent.id] = e.currentTarget.value} maxlength="8" autocomplete="off" autocapitalize="characters" />
               <div class="mcp-inline">
-                <button type="button" disabled={busy || !!session?.paused} onclick={() => grantAction(agent,'approve')}>Izinkan scope tepat ini</button>
+                <button type="button" disabled={busy || !!session?.paused || !agent.expiresAt || !Number.isFinite(Date.parse(agent.expiresAt)) || Date.parse(agent.expiresAt) <= Date.now()} onclick={() => grantAction(agent,'approve')}>Izinkan scope tepat ini</button>
                 <button type="button" disabled={busy} onclick={() => grantAction(agent,'deny')}>Tolak</button>
               </div>
             </li>

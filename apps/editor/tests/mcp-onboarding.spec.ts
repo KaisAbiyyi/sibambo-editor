@@ -1,13 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const project = 'demo-project-01', csrf = 'synthetic-csrf';
-type Fixture = { pending: boolean; granted: boolean; paused: boolean; reject: boolean; requests: any[]; calls: any[] };
+type Fixture = { pending: boolean; expired: boolean; granted: boolean; paused: boolean; reject: boolean; requests: any[]; calls: any[] };
 async function fixture(page: Page): Promise<Fixture> {
-  const f: Fixture = { pending: true, granted: false, paused: false, reject: false, requests: [], calls: [] };
+  const f: Fixture = { pending: true, expired: false, granted: false, paused: false, reject: false, requests: [], calls: [] };
   await page.route('**/api/mcp/session**', async r => {
     const selected = new URL(r.request().url()).searchParams.get('project') === project;
     const agent = { id: 'pending-1', clientId: 'client-attacker-1', agentSubject: 'subject-attacker-1',
-      displayName: 'Claude Code (untrusted label)', scopes: ['read','write'], expiresAt: new Date(Date.now()+120000).toISOString() };
+      displayName: 'Claude Code (untrusted label)', scopes: ['read','write'], expiresAt: new Date(Date.now()+(f.expired?-120000:120000)).toISOString() };
     await r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
       contract:'se04-owner-mcp-v1',phase: !selected?'project-selected':f.paused?'paused':f.granted?'writer-active':'awaiting-owner-grant',
       configured:true,serviceReady:true,subject:'owner-01',csrf,
@@ -105,4 +105,35 @@ test('unauthenticated direct API cannot mutate session or grant',async({request}
     const r=await request.post('/api/mcp/'+ep,{data:{projectId:project,paused:false},headers:{origin:'http://localhost:5175','x-se04-csrf':'fake'}});
     expect([401,403,503]).toContain(r.status());
   }
+});
+
+test('expired pairing cannot be approved even when agent identity and code look valid',async({page})=>{
+  const f=await fixture(page);f.expired=true;await page.goto('/');await open(page);await select(page);
+  await expect(page.getByText('Pairing kedaluwarsa — minta agent mengulang OAuth.')).toBeVisible();
+  await page.getByLabel('Kode 8 karakter yang tampil di agent').fill('ABCDEFGH');
+  await expect(page.getByRole('button',{name:'Izinkan scope tepat ini'})).toBeDisabled();
+  expect(f.granted).toBe(false);expect(f.calls.length).toBe(0);
+});
+test('keyboard-only opening and Escape closing keeps panel focusable',async({page})=>{
+  await fixture(page);await page.goto('/');
+  await page.locator('summary').filter({hasText:'Extensions'}).focus();
+  await page.keyboard.press('Enter');
+  const openButton=page.getByRole('button',{name:'MCP Extension…'});
+  await openButton.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog',{name:'MCP Extension'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Tutup MCP Extension'})).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog',{name:'MCP Extension'})).toBeHidden();
+});
+test('typed owner request preserves numeric parameters without enabling writes',async({page})=>{
+  const f=await fixture(page);await page.goto('/');await open(page);await select(page);
+  await page.getByLabel('Jenis revisi').selectOption('typed-parameters');
+  await page.getByRole('textbox',{name:'Pesan revisi'}).fill('Ukuran jendela sesuai parameter.');
+  await page.getByLabel('Parameter angka (satu nama=angka per baris)').fill('width=3.5\\nheight=2.8');
+  await page.getByRole('button',{name:'Kirim permintaan revisi'}).click();
+  const saved=f.calls.find(x=>x.ep==='requests'&&x.body.action==='create');
+  expect(saved?.body.parameters).toEqual({width:3.5,height:2.8});
+  expect(saved?.body.kind).toBe('typed-parameters');
+  expect(f.granted).toBe(false);
 });
