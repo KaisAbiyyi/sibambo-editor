@@ -1,0 +1,65 @@
+name: SE-00 exact merged-main cross-repo proof
+on:
+  push:
+    branches:
+      - ci/se00-postmerge-proof-20261108
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact merged Editor main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: KaisAbiyyi/sibambo-editor
+          ref: 555aeafeafbb25599150f8fafa43644e6111cf21
+          path: editor
+          persist-credentials: false
+      - name: Checkout exact merged Builder main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: KaisAbiyyi/sibambo-bomc-builder
+          ref: 8b3d7024838bb3dd64e6530becc1e33da77799b1
+          path: builder
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install pinned Builder corpus dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.23.0
+      - name: Assert exact checkouts
+        shell: bash
+        run: |
+          test "$(git -C builder rev-parse HEAD)" = "8b3d7024838bb3dd64e6530becc1e33da77799b1"
+          test "$(git -C editor rev-parse HEAD)" = "555aeafeafbb25599150f8fafa43644e6111cf21"
+          test -z "$(git -C builder status --porcelain --untracked-files=all)"
+          test -z "$(git -C editor status --porcelain --untracked-files=all)"
+      - name: Run strict cross-repo verifier on merged main commits
+        shell: bash
+        run: |
+          python -I builder/docs/two-phase/se00_cross_repo_check.py \
+            --builder builder --editor editor \
+            --expected-builder-sha 8b3d7024838bb3dd64e6530becc1e33da77799b1 \
+            --expected-editor-sha 555aeafeafbb25599150f8fafa43644e6111cf21 | tee se00-merged-proof.json
+          python -c 'import json; a=json.load(open("se00-merged-proof.json")); assert a["verdict"] == "PASS"; assert a["cleanTrees"] and a["expectedShaVerified"]'
+      - name: Validate checker negative tests
+        shell: bash
+        run: python -I -m unittest discover -s builder/docs/two-phase -p test_se00_cross_repo_check.py -v
+      - name: Summarize exact evidence
+        if: always()
+        shell: bash
+        run: |
+          echo "Editor main SHA 555aeafeafbb25599150f8fafa43644e6111cf21" >> "$GITHUB_STEP_SUMMARY"
+          echo "Builder main SHA 8b3d7024838bb3dd64e6530becc1e33da77799b1" >> "$GITHUB_STEP_SUMMARY"
+          echo "CI-only workflow branch; no source changes to main, no deployments or credentials" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload proof receipt
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: se00-merged-main-proof
+          path: se00-merged-proof.json
+          if-no-files-found: error
+          retention-days: 14
