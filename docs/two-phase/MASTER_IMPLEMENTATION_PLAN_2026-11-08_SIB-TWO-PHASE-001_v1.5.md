@@ -1971,3 +1971,20 @@ GitHub implementation/evidence: https://github.com/KaisAbiyyi/sibambo-bomc-build
 - notionADRsV11: https://app.notion.com/p/412c4a6aaf7381bd833cff378b078a0f?pvs=204
 - notionMasterV12: https://app.notion.com/p/412c4a6aaf7381f79521c8c88e738381?pvs=204
 - notionADRsV12: https://app.notion.com/p/412c4a6aaf73818eadebd5ec456263f4?pvs=204
+
+
+---
+
+## D10 — Render Free demo-only staging (owner-approved addendum, 2026-11-08)
+
+**Status: ACCEPTED HOSTING CHOICE FOR THE INITIAL BATCH 1 PRESENTATION; NOT A PRODUCTION OR DEPLOYMENT APPROVAL.** D10 supplements but does not supersede D1–D9, inherited v1.4/v1.3 security/actor/Save contracts, the SE-11 acceptance gate, or the Phase 2 lock.
+
+**User experience:** Sibambo hosts one remote Python Streamable HTTP MCP server. End users connect Claude Code/Codex once via supported OAuth, issue about three bounded construction/revision prompts, see live geometry in existing Vercel-hosted Sibambo Editor, and explicitly click Owner Save to compile/download BOMC. No local Python install or user-run daemon.
+
+**Selected demo backend:** Render Free Web Service (Python ASGI/FastAPI + MCP, authenticated actor and WebSocket streaming), deployment from approved Builder demo branch when independently authorized. Existing Editor frontend stays on Vercel subject to provider commercial-use terms. Intended hosting spend: $0 during presentation exploration; availability, service eligibility, resource limits, and future costs are not guaranteed. Render Free's spin-down/cold-start/restart/volatile-memory behavior is an intentional demo constraint, not an exemption to correctness. No cloud provisioning, credential registration, spending, deployment, merge, or Stable IMPLEMENT follows automatically from D10.
+
+**Presentation-specific procedure and checks:** prepare a reproducible deployment manifest/start command and non-secret environment-variable inventory; verify chosen service size/runtime/CPU/RAM, hosted Python dependencies and long-lived actor capacity; validate TLS/HTTPS, WSS, Streamable HTTP MCP, Auth0 nonprod issuer/audience, separate real Claude Code and Codex PKCE clients, project isolation, single fenced writer, ordered live revisions/render ACK, owner Save, exact BOMC original-Editor reopen and bounded performance. Open service early to warm it; establish authenticated client + Editor session; run three prompts; Save while the draft still exists. Test sleep/restart while draft is unsaved and show explicit loss/reconnect failure, never silently resurrect nonexistent RAM state. Do not add fake no-op keepalive, unauthorized persistence, or unauthenticated demo shortcuts.
+
+**Security/data policy:** preserve no unsaved-model logging/backups/swap/core dumps, origin/CSRF protection, HTTP-only secure BFF cookies, no bearer token in localStorage, resource caps, disposal/revoke behavior, exact source/receipt requirements and all fail-closed invariants. No global shared draft state across users. If 512MB-class Free resource constraints or free-tier restarts prevent required SE-11 tests/actor promises, record FAIL/NOT_RUN and seek explicit owner-approved alternative staging (paid or different free provider), without changing the canonical architecture or waiving tests.
+
+**Rollout governance:** SE-00 remains Blocked / Owner Gate until CP0 source/environment qualification and separate implementation permission. Existing Builder candidate PR #90 at `f1503748216b8778d2e11e6e73674bd64e295450` passed its Ubuntu+Windows scoped house/interop CI; it is unmerged and does not imply Auth0/staging/live acceptance. Editor #12 and #13 are unmerged candidates. SE-01 and SE-04 stay Up Next, XB remains blocked until accepted SE-11 and separate Phase 2 owner authorization. Production hosting/cost/SLA decision is deferred until after client funding. Authoritative owner record: https://app.notion.com/p/412c4a6aaf738117ac36c5101c01fae2 (D10); SE-00: https://app.notion.com/p/412c4a6aaf73817a95c4f924aeb464ab.
