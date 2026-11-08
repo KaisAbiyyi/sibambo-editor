@@ -130,7 +130,7 @@ test('typed owner request preserves numeric parameters without enabling writes',
   const f=await fixture(page);await page.goto('/');await open(page);await select(page);
   await page.getByLabel('Jenis revisi').selectOption('typed-parameters');
   await page.getByRole('textbox',{name:'Pesan revisi'}).fill('Ukuran jendela sesuai parameter.');
-  await page.getByLabel('Parameter angka (satu nama=angka per baris)').fill('width=3.5\\nheight=2.8');
+  await page.getByLabel('Parameter angka (satu nama=angka per baris)').fill('width=3.5\nheight=2.8');
   await page.getByRole('button',{name:'Kirim permintaan revisi'}).click();
   const saved=f.calls.find(x=>x.ep==='requests'&&x.body.action==='create');
   expect(saved?.body.parameters).toEqual({width:3.5,height:2.8});
