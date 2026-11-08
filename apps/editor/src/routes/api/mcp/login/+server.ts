@@ -4,7 +4,7 @@ import { callbackUrl, discovery, oidcConfig, setFlow, token } from '$lib/server/
 import { pkceChallenge } from '$lib/server/mcp-oidc';
 
 export const GET: RequestHandler = async (event) => {
-  const { issuer, clientId } = oidcConfig();
+  const { issuer, clientId, audience } = oidcConfig();
   const metadata = await discovery(issuer);
   const flow = { state: token(), nonce: token(), verifier: token(48), created: Date.now(), redirectUri: callbackUrl(event) };
   setFlow(event, flow);
@@ -13,6 +13,7 @@ export const GET: RequestHandler = async (event) => {
   url.searchParams.set('client_id', clientId);
   url.searchParams.set('redirect_uri', flow.redirectUri);
   url.searchParams.set('scope', 'openid profile email');
+  url.searchParams.set('audience', audience);
   url.searchParams.set('state', flow.state);
   url.searchParams.set('nonce', flow.nonce);
   url.searchParams.set('code_challenge_method', 'S256');

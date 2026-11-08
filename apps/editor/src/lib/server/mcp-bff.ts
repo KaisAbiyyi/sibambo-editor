@@ -8,7 +8,7 @@ import { sameIssuerEndpoint, safeIssuer, seal, unseal, token } from './mcp-oidc'
 
 const SESSION = '__Host-se04_session';
 const FLOW = '__Host-se04_oidc';
-const browserCookie = { path: '/', httpOnly: true, secure: !dev, sameSite: 'lax' as const };
+const browserCookie = { path: '/', httpOnly: true, secure: true, sameSite: 'lax' as const };
 export type OwnerSession = { sub: string; accessToken: string; exp: number; csrf: string; issuer: string };
 export type LoginFlow = { state: string; nonce: string; verifier: string; created: number; redirectUri: string };
 export type GrantScope = 'read' | 'write';
@@ -26,10 +26,11 @@ export function oidcConfig() {
   const issuer = process.env.SE04_AUTH_ISSUER ?? '';
   const clientId = process.env.SE04_AUTH_CLIENT_ID ?? '';
   const clientSecret = process.env.SE04_AUTH_CLIENT_SECRET ?? '';
+  const audience = process.env.SE04_AUTH_AUDIENCE ?? '';
   try { safeIssuer(issuer); } catch { throw error(503, 'OIDC issuer is not configured'); }
-  if (!clientId || !clientSecret || clientId.length > 256) throw error(503, 'OIDC BFF client is not configured');
+  if (!clientId || !clientSecret || !audience || clientId.length > 256) throw error(503, 'OIDC BFF client is not configured');
   key();
-  return { issuer: issuer.replace(/\/$/, ''), clientId, clientSecret };
+  return { issuer: issuer.replace(/\/$/, ''), clientId, clientSecret, audience };
 }
 export function configured(): boolean {
   try { oidcConfig(); return true; } catch { return false; }
