@@ -1,0 +1,146 @@
+<script lang="ts">
+  import { onDestroy, tick } from 'svelte';
+  import { McpConnection, type McpSessionView, type Agent } from './connection';
+  import OwnerRequests from './OwnerRequests.svelte';
+
+  let { open, onClose }: { open: boolean; onClose: () => void } = $props();
+  const client = new McpConnection();
+  let session = $state<McpSessionView | null>(null);
+  let projectId = $state('');
+  let errorText = $state('');
+  let busy = $state(false);
+  let pairingConfirmation = $state<Record<string, string>>({});
+  let panel = $state<HTMLElement | null>(null);
+  let activeRead = 0;
+  const grants = $derived((session?.grants ?? []).filter((x): x is Agent => !!x && !!x.id && !!x.agentSubject && !!x.clientId));
+  const pending = $derived((session?.pending ?? []).filter((x): x is Agent => !!x && !!x.id && !!x.agentSubject && !!x.clientId));
+  const selectedProject = $derived(session?.projectId ?? '');
+  const isSignedIn = $derived(!!session?.csrf);
+  const stateName = $derived(session?.phase ?? 'disconnected');
+
+  async function refresh() {
+    const seq = ++activeRead;
+    errorText = '';
+    try {
+      const result = await client.session(projectId || undefined);
+      if (seq === activeRead) session = result;
+    } catch (err) {
+      if (seq === activeRead) { errorText = err instanceof Error ? err.message : 'Gagal memuat sesi.'; }
+    }
+  }
+  async function perform(path: 'grants' | 'pause' | 'requests' | 'logout', body: Record<string, unknown>) {
+    if (!session?.csrf) return;
+    busy = true; errorText = '';
+    try {
+      await client.mutate(path, session.csrf, body);
+      if (path === 'logout') { projectId = ''; session = null; }
+      await refresh();
+    } catch (err) { errorText = err instanceof Error ? err.message : 'Aksi ditolak.'; }
+    finally { busy = false; }
+  }
+  async function chooseProject() {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(projectId)) { errorText = 'ID proyek 1–64 karakter: huruf, angka, minus, garis bawah.'; return; }
+    busy = true;
+    try { await refresh(); } finally { busy = false; }
+  }
+  function grantAction(agent: Agent, action: 'approve' | 'deny' | 'revoke' | 'remove') {
+    const code = (pairingConfirmation[agent.id] ?? '').trim().toUpperCase();
+    if (action === 'approve' && !/^[A-Z2-9]{8}$/.test(code)) {
+      errorText = 'Cocokkan dan ketik kode pasangan 8 karakter dari aplikasi agent.'; return;
+    }
+    void perform('grants', { projectId: selectedProject, action, grantId: agent.id,
+      agentSubject: agent.agentSubject, clientId: agent.clientId, scopes: agent.scopes,
+      ...(action === 'approve' ? { confirmationCode: code } : {}) });
+  }
+  function close() { onClose(); }
+  $effect(() => {
+    if (open) {
+      void refresh();
+      void tick().then(() => panel?.querySelector<HTMLElement>('[data-mcp-first]')?.focus());
+    }
+  });
+  onDestroy(() => { activeRead += 1; client.dispose(); });
+</script>
+
+<aside bind:this={panel} class="mcp-panel" role="dialog" aria-label="MCP Extension" aria-modal="false" hidden={!open} onkeydown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }}>
+  <div class="mcp-panel-head"><div><p class="mcp-eyebrow">Extensions</p><h2>MCP Extension</h2></div>
+    <button type="button" data-mcp-first onclick={close} aria-label="Tutup MCP Extension">Tutup</button>
+  </div>
+  <p class="mcp-help">Kelola koneksi Claude Code / Codex ke proyek Sibambo. Semua izin harus disetujui owner.</p>
+  <div class="mcp-status" role="status" aria-live="polite"><strong>Status: {stateName}</strong>
+    {#if session?.paused}<span>Proyek dijeda — semua penulisan harus ditolak oleh server.</span>{/if}
+  </div>
+  {#if errorText}<p role="alert" class="mcp-error">{errorText}</p>{/if}
+  {#if !isSignedIn}
+    {#if session?.configured}
+      <p>Masuk sebagai owner lewat penyedia identitas yang dikonfigurasi. Tidak ada token disimpan di localStorage.</p>
+      <a class="mcp-action" href="/api/mcp/login">Masuk dengan OIDC</a>
+    {:else}
+      <p class="mcp-warning">OIDC belum dikonfigurasi. Hubungi operator untuk mengatur nonproduction Auth0 terlebih dahulu.</p>
+      <button type="button" onclick={() => void refresh()}>Periksa ulang konfigurasi</button>
+    {/if}
+  {:else}
+    <div class="mcp-subsection">
+      <p>Akun terverifikasi: <code class="mcp-identity">{session?.subject}</code></p>
+      <button type="button" disabled={busy} onclick={() => void perform('logout', {})}>Keluar dari sesi owner</button>
+      <label for="mcp-project">ID proyek (hanya proyek yang diizinkan server)</label>
+      <div class="mcp-inline"><input id="mcp-project" bind:value={projectId} maxlength="64" autocomplete="off" placeholder="contoh-proyek-01" />
+        <button type="button" disabled={busy || !projectId.trim()} onclick={() => void chooseProject()}>Buka proyek</button></div>
+    </div>
+    {#if selectedProject}
+      <div class="mcp-subsection">
+        <h3>{session?.projectName ?? selectedProject}</h3>
+        <p>Kapabilitas dari server: {(session?.capabilities ?? []).join(', ') || 'tidak tersedia'}</p>
+        <p>Writer aktif: <strong>{session?.writer ?? 'tidak ada'}</strong></p>
+        <p>Revisi diterima: {session?.seenRevision ?? '—'} · Revisi tergambar: {session?.renderedRevision ?? '—'}</p>
+        <div class="mcp-inline">
+          <button type="button" disabled={busy} onclick={() => void perform('pause', {projectId: selectedProject, paused: !session?.paused})}>{session?.paused ? 'Lanjutkan proyek' : 'Jeda semua perubahan'}</button>
+          <button type="button" disabled={busy} onclick={() => void refresh()}>Segarkan status</button>
+        </div>
+      </div>
+      <section class="mcp-subsection" aria-label="Agent meminta izin">
+        <h3>Permintaan pasangan dan izin</h3>
+        <p>Baca <strong>client ID</strong> dan <strong>subject</strong> asli. Nama tampilan bukan bukti identitas. Kode hanya untuk dibandingkan secara manusia; OAuth dan grant eksplisit tetap wajib.</p>
+        {#if pending.length === 0}<p>Belum ada agent menunggu persetujuan.</p>{/if}
+        <ul class="mcp-list">
+          {#each pending as agent (agent.id)}
+            <li><strong>{agent.displayName ?? 'Agent baru'}</strong>
+              <small>Subject: <code>{agent.agentSubject}</code></small>
+              <small>Client: <code>{agent.clientId}</code></small>
+              <small>Scopes: {agent.scopes.join(', ')} · Batas waktu: {agent.expiresAt ?? 'periksa aplikasi agent'}</small>
+              <label for={'mcp-code-' + agent.id}>Kode 8 karakter yang tampil di agent</label>
+              <input id={'mcp-code-' + agent.id} value={pairingConfirmation[agent.id] ?? ''} oninput={(e) => pairingConfirmation[agent.id] = e.currentTarget.value} maxlength="8" autocomplete="off" autocapitalize="characters" />
+              <div class="mcp-inline">
+                <button type="button" disabled={busy || !!session?.paused} onclick={() => grantAction(agent,'approve')}>Izinkan scope tepat ini</button>
+                <button type="button" disabled={busy} onclick={() => grantAction(agent,'deny')}>Tolak</button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+      <section class="mcp-subsection" aria-label="Agent telah diberi izin">
+        <h3>Agent terotorisasi</h3>
+        {#if grants.length === 0}<p>Belum ada grant. Write selalu ditolak sampai disetujui server.</p>{/if}
+        <ul class="mcp-list">
+          {#each grants as agent (agent.id)}
+            <li><strong>{agent.displayName ?? 'Agent'}</strong>
+              <small>Subject: <code>{agent.agentSubject}</code> · Client: <code>{agent.clientId}</code></small>
+              <small>Hak: {agent.scopes.join(', ')} · {agent.state ?? 'status server'}</small>
+              <div class="mcp-inline">
+                <button type="button" disabled={busy} onclick={() => grantAction(agent,'revoke')}>Cabut akses</button>
+                <button type="button" disabled={busy} onclick={() => grantAction(agent,'remove')}>Hapus</button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+      <OwnerRequests {client} projectId={selectedProject} csrf={session?.csrf ?? ''} requests={session?.requests ?? []} onChanged={refresh} />
+      <section class="mcp-subsection" aria-label="Panduan agent">
+        <h3>Cara menghubungkan agent</h3>
+        <p>Daftarkan server MCP HTTPS dan lakukan OAuth melalui aplikasi resmi; jangan salin bearer token atau client secret ke command, URL, atau screenshot.</p>
+        <a href="https://docs.anthropic.com/en/docs/claude-code/mcp" target="_blank" rel="noreferrer">Panduan Claude Code</a>
+        <a href="https://developers.openai.com/codex/mcp/" target="_blank" rel="noreferrer">Panduan Codex MCP</a>
+      </section>
+    {/if}
+  {/if}
+</aside>
