@@ -1,0 +1,38 @@
+{
+  "builderSha": "8fc6ebbeb1996889983bd6fff0958d1f9a7aaf00",
+  "editorBaseSha": "b5f46a761d1763241b60375cbb5f7110d62d99d2",
+  "originalRun": 42036423066,
+  "originalArchives": {
+    "ubuntu": {
+      "artifactId": 13417954261,
+      "sha256": "48d843fd03abb10cc736ca213667b638692b2b1f4d99c149276e69e0d0108757"
+    },
+    "windows": {
+      "artifactId": 13417673986,
+      "sha256": "e862c56bcc90c66d24c513478985380f49de9c0e35e14b378eefa54e18f2949a"
+    }
+  },
+  "fixtureOrigin": "Original Ubuntu hosted artifacts, byte-preserved; Windows binary SHA256 identical",
+  "files": {
+    "baseline.bomc": {
+      "sha256": "071ebe152b44d2bae387818094ad67a6f461645d45d1ad33c195848dbb0b49aa",
+      "bytes": 32660
+    },
+    "baseline.json": {
+      "sha256": "68279b5d0e83ace43ec81e15bd4d0461c8178351653dbe4cffc3bf91756cad6b",
+      "bytes": 40158
+    },
+    "receipt.json": {
+      "sha256": "462c2fac84755bc3b05af21db5a953fdc5af945a7e36673e3d3f7bc0ece875fc",
+      "bytes": 4028
+    },
+    "revised.bomc": {
+      "sha256": "e56924fead241df9a1a76c9de9e0e647b13caf2785cf14bc4c679a8979192233",
+      "bytes": 32660
+    },
+    "revised.json": {
+      "sha256": "b776634dbe5ea22c9c81c548a81ee94d15ef7ea5b3ffb7277b3b2086542a1b86",
+      "bytes": 40158
+    }
+  }
+}

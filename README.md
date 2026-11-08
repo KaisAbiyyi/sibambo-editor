@@ -72,3 +72,8 @@ The package-level scripts are listed in [apps/editor/package.json](apps/editor/p
 ## Multi-agent orchestration
 
 Agents must follow [AGENTS.md](AGENTS.md) and the [shared orchestration protocol](docs/AGENT-ORCHESTRATION.md) for neutral task planning, exclusive claims, isolated branches, remote checkpoints, safe takeover, author attribution and four-repo Sibambo integration. These rules do not change existing validation claims.
+
+
+## Builder preview handoff
+
+Editor exposes **Extensions → Preview Builder Artifact…** for a user-mediated local BOMC 1.2 handoff. It is read-only and reuses the existing E4 import path; construction remains owned by BOMC Builder. See [the integration seam contract](docs/integrations/builder-preview-seam.md).

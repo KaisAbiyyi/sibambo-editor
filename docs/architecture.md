@@ -59,3 +59,12 @@ The Editor route tree contains the main page and the build-identity endpoint. Th
 - [Editor package manifest](../apps/editor/package.json)
 - [SvelteKit configuration](../apps/editor/svelte.config.js)
 
+
+
+## BOMC Builder preview seam
+
+The optional Builder handoff is a user-mediated local file boundary: **Extensions → Preview Builder Artifact…** accepts one BOMC 1.2 file. It calls the same E4 admission, worker import, and PreparedSceneViewport path as ordinary inspection. It does not call the Builder CLI/MCP server, duplicate construction or compilation logic, upload bytes, or create a server-side session.
+
+Builder preview deliberately skips the Editor authoring-subset promotion step and does not create an EditorController. The imported scene remains inspectable (scene selection, camera navigation, and source-face picking) and may be captured with Save View, but Move, Undo/Redo, and Save BOMC are unavailable. This read-only boundary applies even when the input would otherwise qualify for Editor's supported authoring subset.
+
+The handoff carries only the compiled BOMC 1.2 artifact selected by the user. No private Sibambo source or Builder construction implementation is transferred. An automated extension transport (postMessage, HTTP, stdio, or another bridge) is not part of this seam and requires a separate trust, consent, and lifecycle contract. See [Builder preview seam](integrations/builder-preview-seam.md).

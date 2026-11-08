@@ -1,0 +1,162 @@
+{
+  "afterModuleHashes": {
+    "house/level/bath": "fca80fd1bf4c8380ef9c0995a23cd942d925a39188c5533fe664f4e1a77984f1",
+    "house/level/bedroom-a": "b15c67c09fc97e9900324d3b20f1ba2d00b4b343d868307fe4dcdc7ac4fd4123",
+    "house/level/bedroom-b": "48b382f27e00fe2c1c650eed5b08cbe38112ad38cbe630a838b22a301ac52bb8",
+    "house/level/living": "22b934029ac15d5be9dbe8b75ce4d38e87005818da146ab56d215319b2b71863",
+    "house/level/roof": "487f0a30a20661a4d630033d5d1522db107ce89fbc968638866f68398e12aba3"
+  },
+  "beforeModuleHashes": {
+    "house/level/bath": "fca80fd1bf4c8380ef9c0995a23cd942d925a39188c5533fe664f4e1a77984f1",
+    "house/level/bedroom-a": "fc88be52b3ac2ee18e2de08cc29762093ac1c3985265992b48bf3a72c52093f7",
+    "house/level/bedroom-b": "48b382f27e00fe2c1c650eed5b08cbe38112ad38cbe630a838b22a301ac52bb8",
+    "house/level/living": "22b934029ac15d5be9dbe8b75ce4d38e87005818da146ab56d215319b2b71863",
+    "house/level/roof": "487f0a30a20661a4d630033d5d1522db107ce89fbc968638866f68398e12aba3"
+  },
+  "changedModules": [
+    "house/level/bedroom-a"
+  ],
+  "doorOpenings": 3,
+  "exteriorWindows": 1,
+  "gates": {
+    "builder_source_assembly_compiler_reader": "PASS",
+    "full_roof_gable_stairs_and_arbitrary_bomc": "NOT_RUN",
+    "native_editor_e4_import": "NOT_RUN",
+    "owner_visual_acceptance": "NOT_RUN",
+    "provider_native_live_agent": "NOT_RUN"
+  },
+  "layout": "2 bedrooms, living, bath + flat roof",
+  "moduleCount": 5,
+  "outputs": {
+    "baseline": {
+      "builderReadback": {
+        "bounds": [
+          -0.075,
+          -0.075,
+          0.0,
+          8.075,
+          6.075,
+          3.0
+        ],
+        "faces": 278,
+        "meshes": 5,
+        "triangles": 556
+      },
+      "coverage": [
+        278,
+        278,
+        0,
+        0,
+        0,
+        0
+      ],
+      "faceCount": 278,
+      "geometrySemanticsValid": true,
+      "materialCount": 9,
+      "meshCount": 5,
+      "modelCounts": [
+        9,
+        0,
+        5,
+        278,
+        7,
+        7,
+        7,
+        0,
+        0
+      ],
+      "nodeCount": 7,
+      "profile": "bomc-1.2-semantic-solid-subset",
+      "sections": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13,
+        17,
+        20
+      ],
+      "sha256": "071ebe152b44d2bae387818094ad67a6f461645d45d1ad33c195848dbb0b49aa",
+      "sizeBytes": 32660,
+      "stringCount": 219,
+      "triangleCount": 556,
+      "vertexCount": 292
+    },
+    "revised": {
+      "builderReadback": {
+        "bounds": [
+          -0.075,
+          -0.075,
+          0.0,
+          8.075,
+          6.075,
+          3.0
+        ],
+        "faces": 278,
+        "meshes": 5,
+        "triangles": 556
+      },
+      "coverage": [
+        278,
+        278,
+        0,
+        0,
+        0,
+        0
+      ],
+      "faceCount": 278,
+      "geometrySemanticsValid": true,
+      "materialCount": 9,
+      "meshCount": 5,
+      "modelCounts": [
+        9,
+        0,
+        5,
+        278,
+        7,
+        7,
+        7,
+        0,
+        0
+      ],
+      "nodeCount": 7,
+      "profile": "bomc-1.2-semantic-solid-subset",
+      "sections": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13,
+        17,
+        20
+      ],
+      "sha256": "e56924fead241df9a1a76c9de9e0e647b13caf2785cf14bc4c679a8979192233",
+      "sizeBytes": 32660,
+      "stringCount": 219,
+      "triangleCount": 556,
+      "vertexCount": 292
+    }
+  },
+  "preservedModuleHashes": {
+    "house/level/bath": "fca80fd1bf4c8380ef9c0995a23cd942d925a39188c5533fe664f4e1a77984f1",
+    "house/level/bedroom-b": "48b382f27e00fe2c1c650eed5b08cbe38112ad38cbe630a838b22a301ac52bb8",
+    "house/level/living": "22b934029ac15d5be9dbe8b75ce4d38e87005818da146ab56d215319b2b71863",
+    "house/level/roof": "487f0a30a20661a4d630033d5d1522db107ce89fbc968638866f68398e12aba3"
+  },
+  "roomCount": 4,
+  "sharedWallOwners": 4,
+  "source": "synthetic",
+  "task": "BMB-026"
+}
