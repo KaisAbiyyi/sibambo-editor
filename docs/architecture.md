@@ -1,4 +1,7 @@
 
+> **Product architecture update — 2026-11-08:** the [two-phase MASTER IMPLEMENTATION PLAN](two-phase/MASTER_IMPLEMENTATION_PLAN_2026-11-08_SIB-TWO-PHASE-001_v1.0.md) governs new Stable Editor remote MCP/live draft/owner Save delivery and the separate **EXPERIMENTAL** native agentic application. This older document is retained as foundation/history; its task/component completion is not product readiness. [Gap audit](two-phase/GAP-AUDIT.md) · [ADRs](two-phase/ADR-LEDGER.md) · [task contracts](two-phase/TASK-CONTRACTS.md) · [Notion/GitHub resource map](two-phase/RESOURCE-MAP.md). No product implementation/deployment/release is performed by this documentation update.
+
+
 # Architecture
 
 Sibambo Editor is a separate SvelteKit application under apps/editor. Its route owns the file-selection, admission, worker, session, and viewport lifecycle. Its SvelteKit configuration selects the Vercel adapter when the Vercel build environment is present and the Node adapter for local builds. The development server binds to the loopback interface on port 5175.

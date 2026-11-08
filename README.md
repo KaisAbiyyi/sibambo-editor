@@ -1,4 +1,7 @@
 
+> **Product architecture update — 2026-11-08:** the [two-phase MASTER IMPLEMENTATION PLAN](docs/two-phase/MASTER_IMPLEMENTATION_PLAN_2026-11-08_SIB-TWO-PHASE-001_v1.0.md) governs new Stable Editor remote MCP/live draft/owner Save delivery and the separate **EXPERIMENTAL** native agentic application. This older document is retained as foundation/history; its task/component completion is not product readiness. [Gap audit](docs/two-phase/GAP-AUDIT.md) · [ADRs](docs/two-phase/ADR-LEDGER.md) · [task contracts](docs/two-phase/TASK-CONTRACTS.md) · [Notion/GitHub resource map](docs/two-phase/RESOURCE-MAP.md). No product implementation/deployment/release is performed by this documentation update.
+
+
 # Sibambo Editor
 
 The standalone workspace follows the versioned [Sibambo UI contract](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/sibambo-ui-contract-ui-reunification-001-v1.1.md), based on the production `model-eval` interface. Editor owns its layout and styles locally; shared appearance does not move model data or sessions between apps.
