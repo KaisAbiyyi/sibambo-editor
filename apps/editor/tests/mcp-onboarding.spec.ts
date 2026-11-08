@@ -86,7 +86,7 @@ test('grant, pause, owner request, and revoke are separate operations',async({pa
 test('reopen preserves draft, Escape closes panel',async({page})=>{
   await fixture(page);await page.goto('/');await open(page);await select(page);
   await page.getByRole('textbox',{name:'Pesan revisi'}).fill('Draft belum terkirim.');
-  await page.getByRole('button',{name:'Tutup',exact:true}).click();
+  await page.getByRole('button',{name:'Tutup MCP Extension'}).click();
   await open(page);
   await expect(page.getByRole('textbox',{name:'Pesan revisi'})).toHaveValue('Draft belum terkirim.');
   await page.keyboard.press('Escape');

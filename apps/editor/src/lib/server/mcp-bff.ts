@@ -30,7 +30,7 @@ export function oidcConfig() {
   try { safeIssuer(issuer); } catch { throw error(503, 'OIDC issuer is not configured'); }
   if (!clientId || !clientSecret || !audience || clientId.length > 256) throw error(503, 'OIDC BFF client is not configured');
   key();
-  return { issuer: issuer.replace(/\/$/, ''), clientId, clientSecret, audience };
+  return { issuer, clientId, clientSecret, audience };
 }
 export function configured(): boolean {
   try { oidcConfig(); return true; } catch { return false; }
@@ -43,7 +43,7 @@ export function callbackUrl(event: RequestEvent): string {
   return new URL('/api/mcp/callback', url).toString();
 }
 export async function discovery(issuer: string) {
-  const path = issuer + '/.well-known/openid-configuration';
+  const path = issuer.replace(/\/$/, '') + '/.well-known/openid-configuration';
   const response = await fetch(path, { signal: AbortSignal.timeout(7000), headers: { accept: 'application/json' } });
   if (!response.ok) throw error(503, 'OIDC discovery unavailable');
   const obj = await response.json() as Record<string, unknown>;
