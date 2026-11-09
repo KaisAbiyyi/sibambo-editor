@@ -1,9 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const project = 'demo-project-01', csrf = 'synthetic-csrf';
-type Fixture = { pending: boolean; expired: boolean; granted: boolean; paused: boolean; reject: boolean; requests: any[]; calls: any[] };
+type Fixture = { pending: boolean; expired: boolean; granted: boolean; paused: boolean; reject: boolean; wrongProject: boolean; wrongMutation: boolean; requests: any[]; calls: any[] };
 async function fixture(page: Page): Promise<Fixture> {
-  const f: Fixture = { pending: true, expired: false, granted: false, paused: false, reject: false, requests: [], calls: [] };
+  const f: Fixture = { pending: true, expired: false, granted: false, paused: false, reject: false, wrongProject: false, wrongMutation: false, requests: [], calls: [] };
   await page.route('**/api/mcp/session**', async r => {
     const selected = new URL(r.request().url()).searchParams.get('project') === project;
     const agent = { id: 'pending-1', clientId: 'client-attacker-1', agentSubject: 'subject-attacker-1',
@@ -11,7 +11,7 @@ async function fixture(page: Page): Promise<Fixture> {
     await r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
       contract:'se04-owner-mcp-v1',phase: !selected?'project-selected':f.paused?'paused':f.granted?'writer-active':'awaiting-owner-grant',
       configured:true,serviceReady:true,subject:'owner-01',csrf,
-      projectId:selected?project:undefined,projectName:selected?'Synthetic Project':undefined,
+      projectId:selected?(f.wrongProject?'other-project-02':project):undefined,projectName:selected?'Synthetic Project':undefined,
       capabilities:['read','write'],pending:selected&&f.pending?[agent]:[],
       grants:selected&&f.granted?[{...agent,id:'grant-1',state:'active'}]:[],
       writer:selected&&f.granted?'subject-attacker-1':null,
@@ -21,7 +21,7 @@ async function fixture(page: Page): Promise<Fixture> {
   for (const ep of ['grants','pause','requests','logout']) {
     await page.route('**/api/mcp/'+ep, async r => {
       if (r.request().method() === 'GET') {
-        await r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({contract:'se04-owner-mcp-v1',requests:f.requests})}); return;
+        await r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({contract:'se04-owner-mcp-v1',projectId:project,requests:f.requests})}); return;
       }
       const body = r.request().postDataJSON();
       f.calls.push({ep,body,csrf:r.request().headers()['x-se04-csrf']});
@@ -35,7 +35,7 @@ async function fixture(page: Page): Promise<Fixture> {
       }
       if (ep==='pause') f.paused=body.paused;
       if (ep==='requests'&&body.action==='create') f.requests.push({id:'request-1',body:body.body,moduleIds:body.moduleIds,status:'open'});
-      await r.fulfill({status:200,contentType:'application/json',body:'{"contract":"se04-owner-mcp-v1"}'});
+      await r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({contract:'se04-owner-mcp-v1',projectId:f.wrongMutation?'other-project-02':body.projectId})});
     });
   }
   return f;
@@ -136,4 +136,23 @@ test('typed owner request preserves numeric parameters without enabling writes',
   expect(saved?.body.parameters).toEqual({width:3.5,height:2.8});
   expect(saved?.body.kind).toBe('typed-parameters');
   expect(f.granted).toBe(false);
+});
+
+test('wrong-project service view is rejected and no owner action can follow it',async({page})=>{
+  const f=await fixture(page);f.wrongProject=true;await page.goto('/');await open(page);
+  await page.getByLabel('ID proyek (hanya proyek yang diizinkan server)').fill(project);
+  await page.getByRole('button',{name:'Buka proyek'}).click();
+  await expect(page.getByRole('alert')).toContainText('proyek yang berbeda');
+  await expect(page.getByText('Synthetic Project')).toBeHidden();
+  await expect(page.getByRole('button',{name:'Jeda semua perubahan'})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Izinkan scope tepat ini'})).toHaveCount(0);
+  expect(f.calls.length).toBe(0);
+});
+test('wrong-project mutation response is rejected and the project view is dropped',async({page})=>{
+  const f=await fixture(page);await page.goto('/');await open(page);await select(page);
+  f.wrongMutation=true;
+  await page.getByRole('button',{name:'Jeda semua perubahan'}).click();
+  await expect(page.getByRole('alert')).toContainText('proyek yang berbeda');
+  await expect(page.getByRole('button',{name:'Jeda semua perubahan'})).toHaveCount(0);
+  expect(f.calls.map(x=>x.ep)).toEqual(['pause']);
 });

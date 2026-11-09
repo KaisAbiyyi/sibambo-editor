@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { McpConnection, type McpSessionView, type Agent } from './connection';
+  import { McpConnection, McpScopeError, type McpSessionView, type Agent } from './connection';
   import OwnerRequests from './OwnerRequests.svelte';
 
   let { open, onClose }: { open: boolean; onClose: () => void } = $props();
@@ -25,17 +25,33 @@
       const result = await client.session(projectId || undefined);
       if (seq === activeRead) session = result;
     } catch (err) {
-      if (seq === activeRead) { errorText = err instanceof Error ? err.message : 'Gagal memuat sesi.'; }
+      if (seq === activeRead) failClosed(err, 'Gagal memuat sesi.');
     }
   }
-  async function perform(path: 'grants' | 'pause' | 'requests' | 'logout', body: Record<string, unknown>) {
+  // A wrong-project response must never leave a project view behind that owner actions could target.
+  function failClosed(err: unknown, fallback: string) {
+    errorText = err instanceof Error ? err.message : fallback;
+    if (err instanceof McpScopeError && session) {
+      session = { contract: session.contract, phase: 'error', csrf: session.csrf, subject: session.subject, serviceReady: session.serviceReady };
+    }
+  }
+  async function perform(path: 'grants' | 'pause' | 'requests', body: { projectId: string } & Record<string, unknown>) {
     if (!session?.csrf) return;
     busy = true; errorText = '';
     try {
       await client.mutate(path, session.csrf, body);
-      if (path === 'logout') { projectId = ''; session = null; }
       await refresh();
-    } catch (err) { errorText = err instanceof Error ? err.message : 'Aksi ditolak.'; }
+    } catch (err) { failClosed(err, 'Aksi ditolak.'); }
+    finally { busy = false; }
+  }
+  async function logout() {
+    if (!session?.csrf) return;
+    busy = true; errorText = '';
+    try {
+      await client.logout(session.csrf);
+      projectId = ''; session = null;
+      await refresh();
+    } catch (err) { failClosed(err, 'Aksi ditolak.'); }
     finally { busy = false; }
   }
   async function chooseProject() {
@@ -85,7 +101,7 @@
   {:else}
     <div class="mcp-subsection">
       <p>Akun terverifikasi: <code class="mcp-identity">{session?.subject}</code></p>
-      <button type="button" disabled={busy} onclick={() => void perform('logout', {})}>Keluar dari sesi owner</button>
+      <button type="button" disabled={busy} onclick={() => void logout()}>Keluar dari sesi owner</button>
       <label for="mcp-project">ID proyek (hanya proyek yang diizinkan server)</label>
       <div class="mcp-inline"><input id="mcp-project" bind:value={projectId} maxlength="64" autocomplete="off" placeholder="contoh-proyek-01" />
         <button type="button" disabled={busy || !projectId.trim()} onclick={() => void chooseProject()}>Buka proyek</button></div>

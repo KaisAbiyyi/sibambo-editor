@@ -17,6 +17,15 @@ export type McpSessionView = {
   seenRevision?: number; renderedRevision?: number; paused?: boolean;
   requests?: RevisionRequest[]; error?: string;
 };
+/** Raised when a response does not belong to the project the owner asked for. Fail closed. */
+export class McpScopeError extends Error {
+  constructor() { super('Respons MCP untuk proyek yang berbeda ditolak. Tidak ada aksi owner yang dikirim.'); this.name = 'McpScopeError'; }
+}
+const PROJECT_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+export function assertProjectScope(data: { projectId?: unknown }, expected: string): void {
+  if (!PROJECT_ID.test(expected) || data.projectId !== expected) throw new McpScopeError();
+}
+export type WebSocketTicket = { contract: 'se04-owner-mcp-v1'; projectId: string; ticket: string; ticketExpiresAt: string };
 export class McpConnection {
   private pending = new Set<AbortController>();
   private closed = false;
@@ -44,11 +53,28 @@ export class McpConnection {
       return data as T;
     } finally { this.pending.delete(abort); }
   }
-  session(project?: string) {
-    return this.request<McpSessionView>('session' + (project ? '?project=' + encodeURIComponent(project) : ''));
+  async session(project?: string) {
+    const view = await this.request<McpSessionView>('session' + (project ? '?project=' + encodeURIComponent(project) : ''));
+    if (project) assertProjectScope(view, project);
+    return view;
   }
-  mutate(path: 'grants' | 'pause' | 'requests' | 'logout' | 'ticket', csrf: string, body: unknown) {
-    return this.request<McpSessionView>(path, { method: 'POST', csrf, body });
+  async mutate(path: 'grants' | 'pause' | 'requests', csrf: string, body: { projectId: string } & Record<string, unknown>) {
+    const view = await this.request<McpSessionView>(path, { method: 'POST', csrf, body });
+    assertProjectScope(view, body.projectId);
+    return view;
+  }
+  logout(csrf: string) { return this.request<{ phase?: string }>('logout', { method: 'POST', csrf, body: {} }); }
+  /**
+   * Single-use WebSocket ticket for the SE-05 first message. Returned to the caller only: never
+   * kept in a field, storage, URL or log by this class.
+   */
+  async ticket(project: string, csrf: string): Promise<WebSocketTicket> {
+    const data = await this.request<Partial<WebSocketTicket>>('ticket', { method: 'POST', csrf, body: { projectId: project } });
+    assertProjectScope(data, project);
+    if (data.contract !== 'se04-owner-mcp-v1' || typeof data.ticket !== 'string' || !/^[A-Za-z0-9._~-]{32,512}$/.test(data.ticket) ||
+        typeof data.ticketExpiresAt !== 'string' || !(Date.parse(data.ticketExpiresAt) > Date.now()))
+      throw new Error('Respons ticket MCP tidak valid.');
+    return { contract: data.contract, projectId: project, ticket: data.ticket, ticketExpiresAt: data.ticketExpiresAt };
   }
   dispose() { this.closed = true; for (const abort of this.pending) abort.abort(); this.pending.clear(); }
 }

@@ -126,11 +126,42 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
   try { data = JSON.parse(raw); } catch { throw error(502, 'Invalid service response'); }
   if (!data || typeof data !== 'object' || Array.isArray(data) || (data as Record<string, unknown>).contract !== 'se04-owner-mcp-v1')
     throw error(502, 'Unsupported SE-03 MCP contract');
-  return data as Record<string, unknown>;
+  const envelope = data as Record<string, unknown>;
+  // P1-B: every service response is bound to the project that was requested. The BFF never
+  // re-scopes an owner view: missing, non-string, malformed or different IDs fail closed (502)
+  // before anything reaches the browser.
+  if (typeof envelope.projectId !== 'string' || envelope.projectId !== safeProject)
+    throw error(502, 'MCP service response project scope mismatch');
+  return envelope;
+}
+/** Short-lived WebSocket tickets: generous token alphabet, bounded size, never URL-shaped. */
+export const TICKET_PATTERN = /^[A-Za-z0-9._~-]{32,512}$/;
+export const TICKET_MAX_TTL_MS = 300_000;
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+/**
+ * P1-A: dedicated serializer for POST /api/mcp/ticket. Returns only the contract marker,
+ * the requested project, the single-use ticket and its expiry. The ticket is request-scoped:
+ * it is never logged, cached (no-store), set as a cookie or kept in module state; SE-03 is the
+ * single-use enforcer. `service()` has already proven the project scope.
+ */
+export function ticketResponse(data: Record<string, unknown>, owner: OwnerSession, project: string, now = Date.now()) {
+  const { ticket, ticketExpiresAt } = data;
+  if (typeof ticket !== 'string' || !TICKET_PATTERN.test(ticket) ||
+      (owner.accessToken && (ticket.includes(owner.accessToken) || owner.accessToken.includes(ticket))))
+    throw error(502, 'MCP service returned an invalid WebSocket ticket');
+  if (typeof ticketExpiresAt !== 'string' || !ISO_UTC.test(ticketExpiresAt))
+    throw error(502, 'MCP service returned an invalid WebSocket ticket expiry');
+  const expires = Date.parse(ticketExpiresAt);
+  if (!Number.isFinite(expires) || expires <= now || expires - now > TICKET_MAX_TTL_MS)
+    throw error(502, 'MCP service returned an out-of-range WebSocket ticket expiry');
+  // Optional session binding: if SE-03 echoes the owner subject it must be this owner.
+  if (Object.prototype.hasOwnProperty.call(data, 'subject') && data.subject !== owner.sub)
+    throw error(502, 'MCP service ticket belongs to a different owner');
+  return { contract: 'se04-owner-mcp-v1' as const, projectId: project, ticket, ticketExpiresAt };
 }
 export function expose(data: Record<string, unknown>) {
   // Explicit allowlist; a compromised service must not leak bearer/cookies via JSON.
-  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'ticketExpiresAt', 'error'];
+  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'error'];
   return Object.fromEntries(fields.filter(f => Object.prototype.hasOwnProperty.call(data, f)).map(f => [f, data[f]]));
 }
 export { token };
