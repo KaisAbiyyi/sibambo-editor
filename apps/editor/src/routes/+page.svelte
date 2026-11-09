@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import ModelingPanel from '$lib/authoring/ModelingPanel.svelte';
+	import McpPanel from '$lib/mcp/McpPanel.svelte';
 	import { ModelingController, type ModelingMode, type ModelingState } from '$lib/authoring/model-tools';
 	import { contextGraph } from '$lib/authoring/model';
 	import '$lib/ui/sibambo.css';
@@ -35,6 +36,7 @@
 	type EditorMode = 'empty' | 'imported' | 'authoring';
 	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null; previewOnly?: boolean } | { kind: 'close' };
 	let builderPreviewOnly = $state(false);
+	let mcpOpen = $state(false);
 	let mode = $state<EditorMode>('empty');
 	let hasModel = $derived(mode !== 'empty');
 	let result = $state.raw<AdaptedBomcResult | null>(null);
@@ -437,6 +439,7 @@
 		if (!canRunTransition(action) || pendingTransition) return;
 		transitionTrigger = trigger;
 		transitionError = '';
+		mcpOpen = false; // project state persists server-side; Editor local transitions never grant writes
 		if (mode === 'authoring' && isAuthoringDirty()) {
 			pendingTransition = Object.freeze({ ...action }) as PendingTransition;
 			void tick().then(() => document.querySelector<HTMLButtonElement>('[data-transition-dialog] button[data-cancel]')?.focus());
@@ -447,6 +450,7 @@
 
 	async function executeTransition(action: PendingTransition) {
 		if (!canRunTransition(action)) return;
+		mcpOpen = false;
 		if (action.kind === 'new') await createNewAuthoringDocument();
 		else if (action.kind === 'open') await openModel(action.file, action.sidecar, { previewOnly: action.previewOnly === true });
 		else unload();
@@ -1318,6 +1322,7 @@
 		error = loadStatus;
 	}
 	function unload() {
+		mcpOpen = false; // close local panel; no implicit server grant or session revocation
 		cancelEditorCameraGesture();
 		generation += 1;
 		evidenceGeneration += 1;
@@ -1441,6 +1446,7 @@
 		};
 	});
 	onDestroy(() => {
+		mcpOpen = false;
 		modeling.dispose();
 			generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
 			unsubscribeAuthoringRecovery?.(); unsubscribeAuthoringRecovery = null;
@@ -1545,12 +1551,14 @@
 		<details class="menu-root">
 			<summary>Extensions</summary>
 			<div class="menu-popover">
-				<button type="button" onclick={(event) => openBuilderPreviewPicker(event.currentTarget)} disabled={busy || saveBusy || authoringOperationBusy || !clientReady || !!pendingTransition}>Preview Builder Artifact…</button>
+				<button type="button" onclick={() => { mcpOpen = true; }} aria-haspopup="dialog" aria-expanded={mcpOpen}>MCP Extension…</button>
+			<button type="button" onclick={(event) => openBuilderPreviewPicker(event.currentTarget)} disabled={busy || saveBusy || authoringOperationBusy || !clientReady || !!pendingTransition}>Preview Builder Artifact…</button>
 				<span class="menu-status">Local BOMC 1.2 handoff. Builder owns construction; Editor provides read-only preview and inspection.</span>
 			</div>
 		</details>
 		<button type="button" class="menu-label" aria-label="Help menu placeholder">Help</button>
 	</nav>
+	<McpPanel open={mcpOpen} onClose={() => { mcpOpen = false; }} />
 	{#if pendingTransition}
 		<div class="transition-backdrop">
 				<dialog open class="transition-dialog" data-transition-dialog aria-modal="true" aria-labelledby="transition-title" aria-describedby="transition-description" onkeydown={trapTransitionFocus}>
