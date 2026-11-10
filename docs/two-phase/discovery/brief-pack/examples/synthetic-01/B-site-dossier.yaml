@@ -1,0 +1,115 @@
+# SINTETIS — kavling karangan. Bukan lokasi, dokumen, atau regulasi nyata.
+schema: brief-pack/site-dossier@0
+project_id: syn-01-rumah-deret-9x16
+capture_level: lot
+prepared_by_role: client
+site_visit: { done: false }
+frame: "meter lokal; titik 0 = sudut kiri-depan dilihat dari jalan; +X sepanjang muka kavling; +Y ke dalam kavling; +Z ke atas"
+
+location:
+  region: { value: "perumahan sintetis, dataran tinggi", evidence: user-stated, by: client }
+  pin_wgs84: { value: null, evidence: missing }          # sengaja kosong: kavling hipotetis
+  elevation_m: { value: 700, unit: m, evidence: unverified, by: assumed }
+
+legal:
+  tenure: { value: "SHM", evidence: user-stated, by: client }
+  area_per_certificate_m2: { value: 144, unit: m2, evidence: user-stated, by: client }
+  documents_available: { value: [sertifikat], evidence: user-stated, by: client }
+  estate_rules: { value: "aturan perumahan: sempadan depan 3 m, maksimum 2 lantai", evidence: user-stated, by: client, source: "ingatan klien, belum ada dokumen" }
+
+lot:
+  method: dimensions
+  frontage_m: { value: 9.0, unit: m, evidence: user-stated, by: client, uncertainty: "±0.2 m" }
+  depth_m:    { value: 16.0, unit: m, evidence: user-stated, by: client, uncertainty: "±0.2 m" }
+  frontage_bearing_deg: { value: 180, unit: deg, evidence: user-stated, by: client, uncertainty: "±15 deg", note: "muka kavling menghadap selatan; jalan di sisi selatan" }
+  polygon_local_m: { value: [[0,0],[9,0],[9,16],[0,16]], evidence: inferred, by: derived }
+  area_m2: { value: 144, unit: m2, evidence: inferred, by: derived }
+  shape: rectangle
+  position: mid_block
+
+regulation:
+  zone: { evidence: missing }
+  kdb_max_percent: { value: 60, unit: percent, evidence: user-stated, by: client, source: "ingatan klien" }
+  klb_max: { evidence: missing }
+  kdh_min_percent: { evidence: missing }
+  gsb_front_m: { value: 3.0, unit: m, evidence: user-stated, by: client, source: "aturan perumahan" }
+  gsb_side_m:  { value: 0.0, unit: m, evidence: user-stated, by: client, note: "rumah deret; dinding kiri dan kanan di batas" }
+  gsb_rear_m:  { value: 1.5, unit: m, evidence: unverified, by: assumed }
+  max_floors:  { value: 2, evidence: user-stated, by: client }
+  max_height_m: { evidence: missing }
+  source_document: { evidence: missing }
+
+natural:
+  topography: { value: "datar; turun sekitar 0,3 m dari depan ke belakang", evidence: user-stated, by: client }
+  drainage: { value: "air mengalir ke saluran belakang", evidence: user-stated, by: client }
+  flood_history: { value: never, evidence: user-stated, by: client }
+  soil: { evidence: missing }
+  groundwater_depth_m: { evidence: missing }
+  vegetation: { value: [], evidence: user-stated, by: client }
+
+built:
+  existing_structures: { value: [], evidence: user-stated, by: client }
+  boundary_walls:
+    value: { left: "dinding tetangga 2 lantai di batas", right: "dinding tetangga 1 lantai di batas", rear: "pagar 1,8 m", front: "belum ada" }
+    evidence: user-stated
+    by: client
+  neighbors:
+    left:  { value: { side: west, floors: 2, distance_m: 0, windows_facing_lot: false }, evidence: user-stated, by: client }
+    right: { value: { side: east, floors: 1, distance_m: 0, windows_facing_lot: false }, evidence: user-stated, by: client }
+    rear:  { value: { side: north, description: "saluran 1 m lalu lahan kosong; terbuka ke arah bukit" }, evidence: user-stated, by: client }
+    across: { value: { side: south, floors: 2, distance_m: 9 }, evidence: user-stated, by: client }
+
+access:
+  roads:
+    - { side: south, width_m: 6, surface: paving, two_way: true, traffic: low, evidence: user-stated, by: client }
+  entry_candidates:
+    - { kind: vehicle, x_m: 6.5, note: "sisi kanan muka kavling" }
+    - { kind: pedestrian, x_m: 3.0 }
+  construction_access: { value: true, evidence: user-stated, by: client }
+  street_parking: { value: false, evidence: user-stated, by: client }
+
+utilities:
+  electricity: { value: "tersedia; tiang di sudut kiri-depan", evidence: user-stated, by: client }
+  water: { value: "PDAM; meter di depan", evidence: user-stated, by: client }
+  sewage: { value: "septik sendiri", evidence: user-stated, by: client }
+  storm_drain: { value: "saluran depan 0,4 m dan saluran belakang 1 m", evidence: user-stated, by: client }
+
+climate:
+  true_north_deg: { value: 0, unit: deg, evidence: inferred, by: derived, note: "+Y lokal = utara, mengikuti frontage_bearing ±15°" }
+  sun:
+    value: "tropis selatan khatulistiwa; pagi dari +X (timur), sore dari -X (barat); fasad -Y (jalan) dan +Y (belakang) relatif mudah dibayangi"
+    evidence: inferred
+    by: derived
+  prevailing_wind: { evidence: missing }
+  rainfall: { value: "curah hujan tinggi; butuh teritis", evidence: unverified, by: assumed }
+
+sensory:
+  noise:
+    - { source: "jalan perumahan", direction: south, time: "pagi dan sore", level: low }
+  views:
+    - { direction: north, quality: good, description: "terbuka ke arah bukit" }
+    - { direction: south, quality: neutral, description: "rumah seberang" }
+  overlooking:
+    - { from: "lantai 2 rumah seberang", toward: "halaman depan" }
+
+context:
+  neighborhood_character: { value: "perumahan baru, rumah deret 1–2 lantai", evidence: user-stated, by: client }
+  typical_frontage: { value: "pagar rendah, carport terbuka", evidence: user-stated, by: client }
+
+hazards:
+  earthquake: { value: "tidak dinilai", evidence: missing }
+
+attachments: []
+
+synthesis:
+  opportunities:
+    - "Sisi belakang (utara) terbuka dan berpemandangan."
+    - "Jalan sepi; teras depan aman dipakai."
+  constraints:
+    - "Dinding kiri dan kanan tertutup: cahaya hanya dari depan, belakang, atau taman dalam."
+    - "Lebar 9 m membatasi jumlah ruang berjajar."
+    - "Tetangga kiri 2 lantai membayangi sisi barat pada sore hari."
+  critical_missing:
+    - "KRK atau dokumen aturan perumahan (KDB, KDH, sempadan belakang belum bersumber)."
+    - "Arah hadap belum diukur (±15°)."
+    - "Data tanah."

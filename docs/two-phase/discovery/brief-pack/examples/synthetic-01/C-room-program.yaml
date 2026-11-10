@@ -1,0 +1,71 @@
+# SINTETIS — program karangan. Rentang luas adalah placeholder, belum bersumber.
+schema: brief-pack/room-program@0
+project_id: syn-01-rumah-deret-9x16
+status: confirmed
+confirmed_by: [client]
+
+summary:
+  floors: 1                       # tahap 2 (lantai dua) dicatat di A.phasing, tidak dibangun sekarang
+  template: custom
+  target_gfa_m2: 86
+  occupants: 3
+
+rooms:
+  - { id: terrace,       type: terrace,       label: "Teras",            floor: 1, area_m2: { min: 4,    target: 6,    max: 8 },  priority: should, privacy: public,  needs: [street_view],                        origin: "proposed_from:A.needs.N5", confirmed: true, phase: 1 }
+  - { id: carport,       type: carport,       label: "Carport",          floor: 1, area_m2: { min: 12.5, target: 13.5, max: 15 }, min_width_m: 2.5, priority: must, privacy: service, needs: [],                    origin: client,   confirmed: true, phase: 1 }
+  - { id: living-family, type: living-family, label: "Ruang keluarga",   floor: 1, area_m2: { min: 14,   target: 18,   max: 22 }, min_width_m: 3.0, priority: must, privacy: semi,    needs: [daylight, cross_vent, garden_access], occupancy: 4, origin: "proposed_from:A.needs.N1", confirmed: true, phase: 1 }
+  - { id: dining,        type: dining,        label: "Ruang makan",      floor: 1, area_m2: { min: 8,    target: 10,   max: 12 }, priority: must,   privacy: semi,    needs: [daylight],                           origin: client,   confirmed: true, phase: 1 }
+  - { id: kitchen-dry,   type: kitchen-dry,   label: "Dapur bersih",     floor: 1, area_m2: { min: 5,    target: 6,    max: 8 },  priority: should, privacy: semi,    needs: [wet],                                origin: template, confirmed: true, phase: 1 }
+  - { id: kitchen-wet,   type: kitchen-wet,   label: "Dapur kotor",      floor: 1, area_m2: { min: 4,    target: 5,    max: 6 },  priority: must,   privacy: service, needs: [wet, exterior_wall, cross_vent],     origin: "proposed_from:A.needs.N2", confirmed: true, phase: 1 }
+  - { id: bed-master,    type: bed-master,    label: "Kamar utama",      floor: 1, area_m2: { min: 11,   target: 12,   max: 14 }, min_width_m: 3.0, priority: must, privacy: private, needs: [daylight, quiet],            occupancy: 2, origin: client, confirmed: true, phase: 1 }
+  - { id: bath-master,   type: bath,          label: "KM kamar utama",   floor: 1, area_m2: { min: 3,    target: 3.5,  max: 4 },  priority: should, privacy: private, needs: [wet],                                origin: client,   confirmed: true, phase: 1 }
+  - { id: bed-child-1,   type: bed-child,     label: "Kamar anak",       floor: 1, area_m2: { min: 9,    target: 9,    max: 11 }, min_width_m: 2.7, priority: must, privacy: private, needs: [daylight],                   occupancy: 1, origin: client, confirmed: true, phase: 1 }
+  - { id: bed-flex,      type: bed-guest,     label: "Kamar fleksibel",  floor: 1, area_m2: { min: 8,    target: 9,    max: 10 }, min_width_m: 2.7, priority: must, privacy: private, needs: [daylight, quiet],            occupancy: 1, origin: "proposed_from:A.needs.N3", confirmed: true, phase: 1 }
+  - { id: bath-shared,   type: bath,          label: "KM bersama",       floor: 1, area_m2: { min: 2.5,  target: 3,    max: 4 },  priority: must,   privacy: service, needs: [wet],                                origin: template, confirmed: true, phase: 1 }
+  - { id: laundry,       type: laundry,       label: "Cuci dan jemur",   floor: 1, area_m2: { min: 3,    target: 4,    max: 5 },  priority: should, privacy: service, needs: [exterior_wall],                      origin: client,   confirmed: true, phase: 1 }
+  - { id: courtyard,     type: courtyard,     label: "Taman dalam",      floor: 1, area_m2: { min: 4,    target: 6,    max: 9 },  priority: could,  privacy: semi,    needs: [],                                   origin: architect, confirmed: true, phase: 1 }
+
+relations:
+  - { a: living-family, b: dining,        kind: connected,        strength: require, reason: client }
+  - { a: dining,        b: kitchen-dry,   kind: connected,        strength: require, reason: client }
+  - { a: kitchen-dry,   b: kitchen-wet,   kind: connected,        strength: require, reason: client }
+  - { a: kitchen-wet,   b: living-family, kind: separated,        strength: require, reason: "A.needs.N2" }
+  - { a: kitchen-wet,   b: laundry,       kind: near,             strength: prefer,  reason: template }
+  - { a: bed-master,    b: bath-master,   kind: connected,        strength: require, reason: client }
+  - { a: bed-flex,      b: bath-shared,   kind: near,             strength: require, reason: "A.needs.N3" }
+  - { a: bed-flex,      b: living-family, kind: adjacent,         strength: avoid,   reason: "A.needs.N4 (pending)" }
+  - { a: terrace,       b: living-family, kind: connected,        strength: prefer,  reason: template }
+  - { a: bed-master,    b: terrace,       kind: not_visible_from, strength: require, reason: "A.goals.dealbreakers[1]" }
+  - { a: bed-child-1,   b: terrace,       kind: not_visible_from, strength: require, reason: "A.goals.dealbreakers[1]" }
+  - { a: living-family, b: courtyard,     kind: adjacent,         strength: prefer,  reason: "A.needs.N1" }
+
+openings:
+  every_habitable_room_has_window: true
+  every_room_reachable: true
+  main_entry_faces: street
+  bath_window: high
+  no_window_toward: [west, east]          # dinding batas tetangga (B.regulation.gsb_side_m = 0)
+
+budget:
+  counted_in_kdb: "ruang tertutup + cadangan sirkulasi; carport terbuka, teras, cuci-jemur, taman dalam tidak dihitung (asumsi, belum bersumber)"
+  sum_min_m2: 64.5                # 9 ruang tertutup
+  sum_target_m2: 75.5
+  circulation_reserve_percent: 20
+  gross_min_m2: 77.4
+  gross_target_m2: 90.6
+  ground_floor_limit_m2: 86.4     # 60 % × 144 m²; KDB user-stated
+  fits: at_min_yes_at_target_no
+
+conflicts:
+  - id: C1
+    kind: sum_exceeds_site
+    detail: "Luas target + sirkulasi (90,6 m²) melebihi batas lantai dasar (86,4 m²); luas minimum (77,4 m²) masih muat."
+    options: ["kecilkan ruang ke arah minimum", "pindahkan kamar anak ke tahap 2", "kurangi cadangan sirkulasi"]
+    resolved_by: client
+    resolution: "Kecilkan ke arah minimum dengan urutan: bed-flex, dining, living-family. Jangan hapus ruang."
+  - id: C2
+    kind: impossible_adjacency
+    detail: "A.needs.N6 meminta cahaya timur untuk ruang makan, tetapi sisi timur adalah dinding batas tanpa jendela."
+    options: ["cahaya timur lewat taman dalam", "terima cahaya pagi tidak langsung dari utara"]
+    resolved_by: null
+    resolution: null              # sengaja belum diselesaikan: agent harus melaporkan, bukan memutuskan

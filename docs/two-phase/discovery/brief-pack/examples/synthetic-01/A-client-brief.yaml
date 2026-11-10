@@ -1,0 +1,156 @@
+# SINTETIS — bukan klien nyata. Dibuat untuk pengembangan (D16). Tidak ada data pribadi.
+schema: brief-pack/client-brief@0
+project_id: syn-01-rumah-deret-9x16
+language: id
+captured: { mode: mixed, by: mixed, date: 2026-11-10 }
+consent: { design_use: true, sensitive_section: false, research_use: false }
+
+project:
+  kind: new_build
+  decision_makers: [pemilik, pasangan]
+  respondent_role: owner
+  prior_architect_experience: none
+
+goals:
+  why_now: "Kontrakan habis tahun depan dan anak mulai butuh kamar sendiri."
+  success_in_5y: "Siang hari tidak perlu nyalakan lampu, dan semua orang masih betah kumpul di ruang tengah."
+  top3: [terang alami, dapur tidak mengganggu ruang keluarga, kamar bawah untuk orang tua yang menginap]
+  dealbreakers: [ruang tengah gelap, kamar tidur terlihat langsung dari pintu depan]
+
+household:
+  members:
+    - { role: pemilik, age_band: "18-39" }
+    - { role: pasangan, age_band: "18-39" }
+    - { role: anak, age_band: "6-12" }
+  changes_5_10y: ["orang tua kadang menginap", "anak butuh tempat belajar sendiri"]
+  regular_guests: { frequency: sometimes, count: 1 }
+  pets: "tidak ada"
+  vehicles: { cars_now: 1, cars_5y: 1, motorbikes: 1, bicycles: 2 }
+
+routine:
+  weekday:
+    - { time: morning, who: semua, activity: "sarapan bersama", space: ruang makan }
+    - { time: day, who: pasangan, activity: "kerja dari rumah, rapat video", space: kamar fleksibel }
+    - { time: afternoon, who: anak, activity: "belajar dan main", space: ruang keluarga }
+    - { time: evening, who: semua, activity: "makan malam lalu nonton", space: ruang keluarga }
+  weekend:
+    - { time: morning, who: pemilik, activity: "cuci motor dan sepeda", space: carport }
+    - { time: afternoon, who: semua, activity: "ngobrol dengan tetangga", space: teras }
+  cooking: { frequency: daily, heavy: true, cook: pasangan }
+  eating: table
+  work_study:
+    - { who: pasangan, frequency: "3 hari per minggu", needs_quiet: true }
+  laundry: outdoor
+  hobbies: [bersepeda, tanaman pot]
+  most_used_space: "ruang keluarga, sore sampai malam"
+
+current_home:
+  keep:
+    - "Matahari pagi kena meja makan."
+    - "Teras depan enak buat ngobrol sama tetangga."
+  fix:
+    - "Ruang tengah gelap, siang pun harus nyalakan lampu."
+    - "Bau gorengan masuk ke ruang TV."
+    - "Sepatu dan helm numpuk di depan pintu."
+  storage_pain: "helm, sepatu, sepeda anak"
+  size_feel: cramped
+
+feeling:
+  atmosphere:
+    public:  { open_sheltered: 2, formal_casual: 4 }
+    family:  { warm_cool: 4, bright_shaded: 2, social_quiet: 2, spacious_intimate: 2, connected_separated: 2 }
+    private: { social_quiet: 5, bright_shaded: 3, open_sheltered: 4 }
+    outdoor: { natural_industrial: 1 }
+  place_memory:
+    past: "Beranda rumah nenek. Lantainya dingin, ada suara hujan di atap, dan dari situ kelihatan orang lewat."
+    present: "Warung kopi dekat kantor yang jendelanya besar dan menghadap pohon."
+    future: "Sore, duduk di ruang tengah dengan pintu belakang terbuka, anak main di taman kecil."
+  three_words: [adem, terang, akrab]
+  never_words: [pengap, pamer, berisik]
+  references:
+    - label: "rumah deret dengan taman dalam"
+      liked_features: [cahaya dari atas, tanaman di tengah rumah]
+      disliked_features: [terlalu banyak kaca ke jalan]
+      why: "terang tapi tetap tertutup dari luar"
+
+privacy: { from_street: 4, guest_boundary: living_room, between_members: 4 }
+social:
+  gatherings:
+    - { kind: "arisan keluarga", people: 12, frequency: "2 kali setahun" }
+  neighbors: friendly_open
+
+comfort:
+  cooling: mixed
+  ac_rooms: [bed-master]
+  morning_sun: dining
+  noise_sensitivity: [jalan]
+  smell_sensitivity: no
+  nature: [dilihat, berkebun pot]
+  daylight_vs_privacy: 3
+
+style:
+  liked_materials: [bata ekspos, kayu, semen halus]
+  avoided_materials: ["kaca gelap — terasa seperti kantor"]
+  maintenance_tolerance: low
+  energy_priority: 4
+
+budget:
+  range_idr: unknown
+  includes: [pagar]
+  flexibility: reduce_area
+schedule: { target_move_in: "Q4 2027" }
+phasing: { grow_plan: "Tahap 2: tambah lantai dua untuk kamar anak dan ruang kerja. Belum sekarang." }
+
+needs:
+  - id: N1
+    quote_ref: current_home.fix[0]
+    need: "Ruang keluarga terang alami sepanjang siang."
+    priority: must
+    candidate_constraint: "living-family punya bukaan ke ruang luar (belakang atau taman dalam)."
+    design_implication: "Ruang keluarga di sisi belakang atau menghadap taman dalam; denah tidak lebih dalam dari dua ruang tanpa sumber cahaya."
+    status: confirmed
+  - id: N2
+    quote_ref: current_home.fix[1]
+    need: "Asap dan bau masak berat tidak masuk ruang keluarga."
+    priority: must
+    candidate_constraint: "kitchen-wet punya dinding luar dan tidak terbuka langsung ke living-family."
+    design_implication: "Dapur kotor di belakang dekat area jemur; dapur bersih sebagai penyangga."
+    status: confirmed
+  - id: N3
+    quote_ref: household.changes_5_10y[0]
+    need: "Kamar di lantai dasar untuk orang tua yang menginap, dekat kamar mandi."
+    priority: must
+    candidate_constraint: "bed-flex di lantai 1 dan dekat bath-shared."
+    design_implication: "Kamar fleksibel bersebelahan dengan kamar mandi bersama."
+    status: confirmed
+  - id: N4
+    quote_ref: routine.work_study[0]
+    need: "Tempat rapat video yang tenang di siang hari."
+    priority: should
+    candidate_constraint: "bed-flex tidak berbagi dinding dengan living-family atau carport."
+    design_implication: "Kamar fleksibel dipakai ganda sebagai ruang kerja."
+    status: pending
+  - id: N5
+    quote_ref: current_home.keep[1]
+    need: "Teras depan untuk ngobrol dengan tetangga."
+    priority: should
+    candidate_constraint: "terrace menghadap jalan dan terlihat dari jalan."
+    design_implication: "Teras di depan, sejajar carport."
+    status: confirmed
+  - id: N6
+    quote_ref: current_home.keep[0]
+    need: "Matahari pagi di meja makan."
+    priority: should
+    candidate_constraint: "dining mendapat cahaya dari arah timur."
+    design_implication: "Perlu dicek terhadap Dok B: sisi timur berbatasan dinding tetangga."
+    status: confirmed
+  - id: N7
+    quote_ref: current_home.fix[2]
+    need: "Tempat sepatu dan helm sebelum masuk rumah."
+    priority: could
+    candidate_constraint: "ada ceruk penyimpanan di teras atau dekat pintu masuk."
+    design_implication: "Ceruk di antara carport dan pintu."
+    status: confirmed
+
+unknowns:
+  - budget.range_idr
