@@ -1,6 +1,21 @@
 # D16 · Brainstorm 10 Nov 2026 — tiga layer, Brief Pack, dan pengerasan plan
 
-> **Status: DRAFT sesi perencanaan, menunggu keputusan owner (§6).** Aditif terhadap SIB-TWO-PHASE-001 v1.5; tidak ada kontrak v1.3–v1.5 yang dihapus atau dilemahkan. Tidak ada task berubah status, tidak ada klaim, merge, deploy, atau izin IMPLEMENT. Bagian bertanda **[arah owner]** berasal langsung dari owner pada sesi ini; sisanya **[usulan]**.
+> **Status: DITERIMA owner 2026-11-11 — semua default E4–E11 (§6). Bagian plan aktif v1.5 + D16.** Draf ditulis 2026-11-10. Aditif terhadap SIB-TWO-PHASE-001 v1.5; tidak ada kontrak v1.3–v1.5 yang dihapus atau dilemahkan. Tidak ada task berubah status, tidak ada klaim, merge, deploy, atau izin IMPLEMENT. Bagian bertanda **[arah owner]** berasal langsung dari owner pada sesi ini; sisanya **[usulan]**.
+
+## Keputusan owner 2026-11-11
+
+| # | Keputusan | Akibat |
+| --- | --- | --- |
+| E4 | D16 diterima seluruhnya | Usulan §5 menjadi checklist acceptance di task SE-03, 05, 06, 07, 09, 10, 11. Jalur kritis tidak berubah |
+| E5 | Probe kompatibilitas SE-03.0 diizinkan | Satu hari, tanpa kode produk; boleh sekarang oleh owner / lokal tanpa menunggu SE-02 diterima. Tenant IdP nonproduksi dan tunnel tetap tindakan owner |
+| E6 | Amandemen sempit D3 | Brief Pack sintetis boleh jadi prompt run Stable, eksploratif, bukan gate. Larangan D3 lainnya tetap |
+| E7 | Tanpa viewer aktif, tulis ditolak | `NO_ACTIVE_VIEWER`; tidak ada mode headless di Batch 1 |
+| E8 | Tidak pernah auto-fit, termasuk geometri pertama | Tombol Bingkai draft + indikator perubahan di luar pandangan |
+| E9 | XB-20 Blueprint | Baris dibuat setelah klien proyek menjawab soal hak atas ±20 model; belum dibuat |
+| E10 | Operator utama Batch 2 | Asumsi kerja: arsitek sebagai operator; dikonfirmasi di rapat klien |
+| E11 | Sesi owner gabungan | Gate live SE-03 + SE-04 satu sesi; SE-05 sisi cloud boleh mulai saat SE-03 Review |
+
+**Penyesuaian saat diterapkan:** SE-02 sudah cloud-complete dan berstatus Review sejak 2026-11-10, jadi acceptance-nya tidak ditambah. S2 dipindah ke SE-03 dan P5 ke SE-09; tabel di bawah sudah mencerminkannya.
 
 ## 0. Ringkasan
 
@@ -68,7 +83,7 @@ Kolom **Dasar** menyebut dari mana celah itu diketahui: `kode` = dicek di repo p
 | ID | Celah | Dasar | Usulan | Task |
 | --- | --- | --- | --- | --- |
 | S1 | Brief Pack adalah kanal prompt injection, dan di jalur D11 agent (Claude Code / Codex) berjalan di laptop owner dengan akses shell dan berkas. SEC-05 hanya melindungi sisi server | kontrak (D11, BMB-004) | Profil demo: agent hanya diberi server MCP Sibambo, tanpa shell, tanpa tulis berkas, tanpa server MCP lain. Brief Pack dikirim dalam pembatas data, teks bebas dibatasi, tanpa URL. Varian uji `01-inject`. PDF dan halaman web tidak pernah diberikan langsung ke agent yang memegang tool tulis; peringkas tanpa tool yang menghasilkan Dok B terstruktur | SE-11 SOP, SE-09, XB-05.3 |
-| S2 | Jembatan stdio → actor di D11 disebut "thin IPC/loopback client" tanpa syarat autentikasi. Proses lokal lain bisa memanggilnya | kontrak (D11), spec (*Local MCP Server Compromise*) | Named pipe / UDS dengan ACL khusus owner, atau loopback + rahasia acak per peluncuran dari berkas ber-ACL owner. Bind 127.0.0.1. Tes: proses kedua tanpa rahasia ditolak | SE-02 |
+| S2 | Jembatan stdio → actor di D11 disebut "thin IPC/loopback client" tanpa syarat autentikasi. Proses lokal lain bisa memanggilnya | kontrak (D11), spec (*Local MCP Server Compromise*) | Named pipe / UDS dengan ACL khusus owner, atau loopback + rahasia acak per peluncuran dari berkas ber-ACL owner. Bind 127.0.0.1. Tes: proses kedua tanpa rahasia ditolak | SE-03 (dipindah dari SE-02) |
 | S3 | Kontrak SE-03 belum merinci uji konformansi transport: `Origin` tidak valid → 403; `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` tidak cocok dengan body → 400 `HeaderMismatch` (−32020); GET/DELETE → 405; `Mcp-Session-Id` diabaikan; SSE tidak dapat dilanjutkan | spec (Streamable HTTP) | Tambah ke tes SE-03. Kirim `X-Accel-Buffering: no` dan komentar keep-alive pada stream panjang | SE-03 |
 | S4 | Lease writer, `operationId`, idempotency key, dan ticket adalah *state handle*. Spec: kepemilikan handle **tidak boleh** dianggap autentikasi | spec (*State Handle Hijacking*), kontrak (BMB-004 §1) | Baris uji eksplisit: handle milik principal A dipakai principal B (termasuk yang punya grant baca di proyek sama) → ditolak; pelepasan lease oleh bukan pemegang → ditolak | SE-09 |
 | S5 | Kecocokan pendaftaran klien nyata dengan IdP belum pernah diuji: metode registrasi (pra-daftar / DCR / Client ID Metadata Document), parameter `resource` (RFC 8707), dan `code_challenge_methods_supported` di metadata. Klien **wajib** menolak bila PKCE tidak diiklankan | spec (Authorization) | **SE-03.0 probe kompatibilitas** sebelum kode adapter: catat apa yang dikirim Claude Code dan Codex versi terpasang terhadap tenant nonproduksi. Hasil probe menentukan desain auth | SE-03 (E5) |
@@ -90,7 +105,7 @@ Kolom **Dasar** menyebut dari mana celah itu diketahui: `kode` = dicek di repo p
 | P2 | Batas respons tool 256 KiB bisa berarti puluhan ribu token per panggilan | kontrak (BMB-004 §4) | `read_project` ringkas secara default (ID, revisi, hash, bounds; target ≤ 4 KiB); detail hanya lewat `inspect_module`. Laporkan total byte hasil tool per build | SE-03, SE-11 |
 | P3 | Worker geometri "proses terisolasi, tenggat 30 s" vs P95 ≤ 500 ms. Spawn proses Python per operasi di Windows mahal | kontrak (SE-09, SE-10) | Worker hangat (pool 1, daur ulang setelah N operasi atau RSS naik); isolasi tetap. Ukur dingin vs hangat | SE-09, SE-10 |
 | P4 | SE-10 mengemulasi 100 ms RTT + 10 Mbps, tetapi Funnel melewati relay dengan batas yang tidak dipublikasikan | riset | Preflight demo mengukur RTT dan throughput tunnel nyata; ambang go / no-go tertulis | SE-10, skrip D11 |
-| P5 | "20 proyek aktif per worker" × batas 10.000 modul × 64 KiB tidak muat di 512 MiB | kontrak (SE-09, BMB-004 §4, D10) | Batas draft live per proyek (usul awal ≤ 200 modul, ≤ 8 MiB IR, snapshot dipecah ≤ 2 MiB) dan admission berbasis RAM. Angka untuk diukur, bukan janji | SE-02 |
+| P5 | "20 proyek aktif per worker" × batas 10.000 modul × 64 KiB tidak muat di 512 MiB | kontrak (SE-09, BMB-004 §4, D10) | Batas draft live per proyek (usul awal ≤ 200 modul, ≤ 8 MiB IR, snapshot dipecah ≤ 2 MiB) dan admission berbasis RAM. Angka untuk diukur, bukan janji | SE-09 (dipindah dari SE-02) |
 | P6 | "Tanpa replay tak terbatas" belum punya angka; viewer lambat bisa menumpuk antrean | kontrak (SE-05) | Batas antrean per koneksi (usul 64 event / 4 MiB) → paksa resync snapshot. Tes slow-consumer | SE-05 |
 | P7 | Agent bisa mengirim tool call paralel; dengan satu-penulis + CAS hasilnya `REVISION_CONFLICT` beruntun | kontrak (SE-02, BMB-004 §5) | Panduan: tulis berurutan. Server: `BUSY` + `retryAfterMs`. SE-11 melaporkan tingkat konflik | SE-03.A, SE-11 |
 | P8 | Ticket 30 s dan harus dikirim dalam 5 s; cold start BFF bisa membuat badai reconnect | kontrak (SE-05, D10) | Backoff eksponensial + jitter + batas percobaan; ukur waktu ticket saat cold start | SE-05 |
@@ -140,24 +155,24 @@ Kolom **Dasar** menyebut dari mana celah itu diketahui: `kode` = dicek di repo p
 
 ## 5. Usulan tambahan acceptance per task
 
-Semua berlabel `D16` dan baru berlaku bila owner menerimanya (E4).
+Diterima owner 2026-11-11 (E4): butir di bawah adalah acceptance tambahan task induknya, dan task baru ditutup bila butirnya lulus.
 
 | Task | Tambahan |
 | --- | --- |
-| SE-02 | S2 jembatan loopback terautentikasi · P5 batas draft live + admission RAM |
-| SE-03 | **SE-03.0 probe kompatibilitas (S5)** · S3 konformansi transport · S11 lock ber-hash · P2 `read_project` ringkas · SE-03.A: P1 granularitas modul, P7 tulis berurutan · SE-03.B: kode `RENDER_ACK_TIMEOUT`, `NO_ACTIVE_VIEWER`, `PAUSED_BY_OWNER` (aditif; kode v1.3 tidak berubah) |
+| SE-02 | Tidak ada tambahan: task sudah cloud-complete (Review). S2 → SE-03, P5 → SE-09 |
+| SE-03 | **SE-03.0 probe kompatibilitas (S5)** · S2 jembatan loopback terautentikasi · S3 konformansi transport · S11 lock ber-hash · P2 `read_project` ringkas · SE-03.A: P1 granularitas modul, P7 tulis berurutan · SE-03.B: kode `RENDER_ACK_TIMEOUT`, `NO_ACTIVE_VIEWER`, `PAUSED_BY_OWNER` (aditif; kode v1.3 tidak berubah) |
 | SE-05 | S7 header keamanan · S10 primary viewer · P6 batas antrean + resync · P8 backoff reconnect · X1 peringatan draft belum disimpan |
 | SE-06 | S8 verifikasi digest ACK + tenggat · U1 chip keadaan · U2 keadaan kosong + Bingkai draft · U3 timeline deterministik + operasi ditolak · U4 aksesibilitas highlight · P9 virtualisasi · X5 · X6 · X7 |
 | SE-07 | S14 header unduhan · U7 "Simpan rev N" · X1 ajakan simpan |
-| SE-09 | S1 uji injeksi · S4 pengikatan handle · S6 allowlist path · S9 injeksi tersimpan · P3 worker hangat |
+| SE-09 | S1 uji injeksi · S4 pengikatan handle · S6 allowlist path · S9 injeksi tersimpan · P3 worker hangat · P5 batas draft live + admission RAM |
 | SE-10 | P1 byte per operasi + jeda · P4 RTT tunnel nyata · U5 · U6 · U8 · X4 |
 | SE-11 | G2 run Brief Pack sintetis (eksploratif) · S1 profil agent terbatas di SOP · S12 hanya sintetis · G3 pernyataan batas produk · P2 / P7 metrik per klien |
 | Skrip D11 | S6 · S13 · P4 preflight |
 | XB (dokumen saja) | XB-01.0 / 02.0 / 03.0 mengadopsi format v0 · XB-05.3 pola peringkas tanpa tool (S1) · XB-20 usulan |
 
-## 6. Keputusan yang dibutuhkan owner
+## 6. Keputusan owner — semua default diterima 2026-11-11
 
-| # | Keputusan | Default usulan |
+| # | Keputusan | Diterima (default) |
 | --- | --- | --- |
 | E4 | Terima D16 (semua atau per item) sebagai tambahan v1.5 | Terima §5 sebagai checklist di task induk; jalur kritis tidak berubah |
 | E5 | Izinkan probe kompatibilitas awal SE-03.0 (butuh tenant IdP nonproduksi dan tunnel sementara) | Ya, dibatasi satu hari, tanpa kode produk |

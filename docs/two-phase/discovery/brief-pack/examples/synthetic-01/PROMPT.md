@@ -1,6 +1,6 @@
 # Brief Pack sintetis 01 — pembungkus prompt untuk Claude Code / Codex via MCP
 
-> **DRAFT (D16).** Sintetis seluruhnya: tidak ada klien, lokasi, atau regulasi nyata. Dipakai untuk melihat sejauh mana kecerdasan model saat ini bisa membangun dari tiga dokumen Layer 1 dengan tool Layer 3 yang ada. **Bukan** gate SE-11 dan tidak menggantikan brief empat-ruang 8×6 m di kontrak SE-11.
+> **D16 diterima owner 2026-11-11 (E6): run eksploratif, bukan gate.** Sintetis seluruhnya: tidak ada klien, lokasi, atau regulasi nyata. Dipakai untuk melihat sejauh mana kecerdasan model saat ini bisa membangun dari tiga dokumen Layer 1 dengan tool Layer 3 yang ada. **Bukan** gate SE-11 dan tidak menggantikan brief empat-ruang 8×6 m di kontrak SE-11.
 
 ## Isi folder
 

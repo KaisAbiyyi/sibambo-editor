@@ -1,6 +1,6 @@
-# Discovery — Batch 2 (planning-only) + D16 plan hardening
+# Discovery — Batch 2 (planning-only) + D16 plan hardening (diterima owner 2026-11-11)
 
-> **Status: DRAFT — menunggu keputusan owner.** Semua isi folder ini adalah dokumen perencanaan yang diizinkan D3 (v1.5): tidak ada kode, eksperimen, partisipan, panggilan provider/Colab, atau klaim XB. Tidak ada task yang berubah status karena dokumen ini. Sumber kebenaran board tetap Notion.
+> **Status: D16 DITERIMA owner 2026-11-11 (E4–E11, semua default) — bagian plan aktif v1.5 + D16.** Semua isi folder ini tetap dokumen perencanaan yang diizinkan D3 (v1.5): tidak ada kode, eksperimen, partisipan, panggilan provider/Colab, atau klaim XB. Format Brief Pack v0 adalah dasar kerja discovery dan belum divalidasi ke klien. Penerimaan ini tidak mengubah status task; sumber kebenaran board tetap Notion.
 >
 > Repo ini **private**. Sesuai D7, materi Batch 2 tidak boleh disalin ke repo publik `sibambo-bomc-builder`; saat XB-00 dibuka, folder ini dipindah ke `silabs-generator`.
 
