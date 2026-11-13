@@ -1,4 +1,5 @@
 import { hash, moduleId, parseJson, sha, uint, validateProjection, type DraftModule, type DraftProposal, type DraftState, type Manifest } from './draft-protocol';
+import validateModule from './module-ir-validator.generated.js';
 
 /** Stage off-thread; never mutate the last committed state before projection/render succeeds. */
 export async function stageDraft(raw: string, previous: DraftState | null, projectId: string): Promise<DraftProposal> {
@@ -21,7 +22,7 @@ export async function stageDraft(raw: string, previous: DraftState | null, proje
     // Hash exact UTF-8 before parsing (Python and JS float spelling is intentionally not reserialized).
     if (await hash(m.canonicalIrJson) !== m.contentSha256 || await hash(m.projectionJson) !== m.projectionSha256) throw Error('DRAFT_HASH');
     const ir = parseJson(m.canonicalIrJson, 65536), projection = parseJson(m.projectionJson);
-    if (!ir || ir.moduleId !== m.moduleId || ir.revision !== m.moduleRevision || !Array.isArray(ir.operations)) throw Error('DRAFT_IR');
+    if (!validateModule(ir) || ir.moduleId !== m.moduleId || ir.revision !== m.moduleRevision) throw Error('DRAFT_IR');
     validateProjection(projection, m.moduleId, m.moduleRevision);
     if (event.type === 'event') {
       const old = previous!.manifest.find(row => row[0] === m.moduleId);
@@ -49,6 +50,13 @@ export async function stageDraft(raw: string, previous: DraftState | null, proje
       const row = rows.get(old[0]);
       if (!row || removed.includes(old[0]) && (row[1] !== old[1] + 1 || row[2] !== null) ||
           !changed.has(old[0]) && !removed.includes(old[0]) && JSON.stringify(row) !== JSON.stringify(old)) throw Error('DRAFT_MANIFEST_REVISION');
+    }
+  }
+  if (previous && event.type === 'snapshot') {
+    for (const old of previous.manifest) {
+      const row = rows.get(old[0]);
+      if (!row || row[1] < old[1] || old[2] === null && (row[2] !== null || row[1] !== old[1]) ||
+          row[1] === old[1] && row[2] !== old[2]) throw Error('DRAFT_MANIFEST_REVISION');
     }
   }
   return { state: { projectId, epoch: event.epoch, revision: event.revision, draftSha256: event.draftSha256, manifest, modules: [...modules.values()] },

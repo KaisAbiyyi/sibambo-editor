@@ -1623,7 +1623,7 @@
 		onLogout={() => { draftClient?.dispose(); draftClient = null; if (draftStatus) draftStatus = { ...draftStatus, phase: 'paused', error: 'Sesi owner ditutup. Model terakhir tetap ada di tab ini.' }; }}
 		onClose={() => { mcpOpen = false; }} />
 	{#if mode === 'builder-draft' && draftStatus}
-		<section class="draft-live-status" aria-label="Draft live" data-revision={draftStatus.revision} data-rendered-revision={draftStatus.renderedRevision} data-module-count={draftState?.modules.length ?? 0}>
+		<section class="draft-live-status" aria-label="Draft live" data-project-id={draftState?.projectId} data-revision={draftStatus.revision} data-rendered-revision={draftStatus.renderedRevision} data-module-count={draftState?.modules.length ?? 0}>
 			<p role="status">Draft live · {draftStatus.phase} · {draftStatus.role === 'primary' ? 'Viewer utama' : 'Pengikut baca-saja'} · revisi {draftStatus.revision} / tergambar {draftStatus.renderedRevision} · {draftState?.modules.length ?? 0} modul</p>
 			<p>Draft belum disimpan. Dipertahankan hanya dalam sesi terbuka ini.</p>
 			{#if draftStatus.error}<p role="alert">{draftStatus.error}</p>{/if}

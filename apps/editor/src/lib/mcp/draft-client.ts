@@ -140,10 +140,14 @@ export class DraftClient {
     const delay = Math.min(8000, 500 * 2 ** (this.attempts - 1)) * (.5 + Math.random());
     this.retry = window.setTimeout(() => { if (!this.disposed) void this.connect(); }, delay);
   }
-  reconnectNow() { window.clearTimeout(this.retry); this.attempts = 0; this.socket?.close(); void this.connect(); }
+  reconnectNow() {
+    window.clearTimeout(this.retry); window.clearInterval(this.heartbeat);
+    this.attempts = 0; this.messageGeneration++; this.queue = []; this.queuedBytes = 0; this.needsSnapshot = true;
+    this.socket?.close(); void this.connect();
+  }
   suspend() { this.suspended = true; this.messageGeneration++; this.visibility(); }
   resume() { this.suspended = false; this.visibility(); this.resync(); }
-  private fatal(error: string) { this.status.phase = 'error'; this.status.error = error; this.emit(); this.generation++; this.socket?.close(); window.clearInterval(this.heartbeat); }
+  private fatal(error: string) { this.status.phase = 'error'; this.status.error = error; this.emit(); this.generation++; this.socket?.close(); window.clearTimeout(this.retry); window.clearInterval(this.heartbeat); }
   dispose() {
     this.disposed = true; this.generation++; this.messageGeneration++; window.clearTimeout(this.retry); window.clearInterval(this.heartbeat);
     document.removeEventListener('visibilitychange', this.visibility); this.socket?.close(); this.client.dispose(); this.worker.terminate();

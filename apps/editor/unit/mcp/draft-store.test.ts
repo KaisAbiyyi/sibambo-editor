@@ -3,7 +3,10 @@ import { hash, parseJson, type DraftState } from '../../src/lib/mcp/draft-protoc
 import { stageDraft } from '../../src/lib/mcp/draft-store';
 const epoch = '12345678-1234-4234-8234-123456789012';
 async function record(revision = 1) {
-  const canonicalIrJson = JSON.stringify({ schemaVersion: '1.0.0', moduleId: 'house/room', revision, operations: [] });
+  const canonicalIrJson = JSON.stringify({ schemaVersion: '1.0.0', moduleId: 'house/room', parentId: null, revision,
+    localFrame: { unit: 'm', handedness: 'right', upAxis: '+Z', forwardAxis: '+Y', transform: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1] },
+    bounds: { min: [0,0,0], max: [1,1,1] }, operations: [], materials: [], ports: [], ownedSeams: [], dependencies: [],
+    provenance: { origin: 'synthetic', generator: 'se05-validation-test' } });
   const projectionJson = JSON.stringify({ moduleId: 'house/room', revision, worldTransform: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], positions: [], materials: [], faces: [] });
   return { moduleId: 'house/room', moduleRevision: revision, canonicalIrJson, projectionJson,
     contentSha256: await hash(canonicalIrJson), projectionSha256: await hash(projectionJson) };
@@ -36,6 +39,14 @@ test('identical duplicate is acknowledged without another projection', async () 
 test('parser rejects duplicate keys, malformed numbers, invalid trailing data and excessive depth', () => {
   for (const raw of ['{"a":1,"a":2}', '{"x":1e999}', '[01]', '{}{}', '['.repeat(65) + '0' + ']'.repeat(65)]) expect(() => parseJson(raw)).toThrow();
 });
+
+test('a correctly hashed but schema-invalid canonical IR is rejected before committing', async () => {
+  const raw = await snapshot(), module = raw.modules[0]!;
+  const ir = JSON.parse(module.canonicalIrJson); ir.localFrame.unit = 'ft';
+  module.canonicalIrJson = JSON.stringify(ir); module.contentSha256 = await hash(module.canonicalIrJson);
+  raw.manifest[0]![2] = module.contentSha256; raw.draftSha256 = await hash(JSON.stringify(raw.manifest));
+  await expect(stageDraft(JSON.stringify(raw), null, 'p')).rejects.toThrow('DRAFT_IR');
+});
 test('a remove produces a tombstone and cannot resurrect its module in the same epoch', async () => {
   const raw = await snapshot(), previous = (await stageDraft(JSON.stringify(raw), null, 'p')).state;
   const manifest = [['house/room', 2, null]], digest = await hash(JSON.stringify(manifest));
@@ -43,4 +54,8 @@ test('a remove produces a tombstone and cannot resurrect its module in the same 
     operationId: 'remove', changed: [], removed: ['house/room'], manifest, draftSha256: digest }), previous, 'p')).state;
   expect(removed.modules).toEqual([]); expect(removed.manifest[0]![2]).toBeNull();
   await expect(stageDraft(JSON.stringify({ ...raw, type: 'event', revision: 3, previousRevision: 2, changed: [await record(3)], removed: [] }), removed, 'p')).rejects.toThrow();
+  // A reconnect snapshot must retain tombstones too, even with a higher project revision.
+  await expect(stageDraft(JSON.stringify({ ...raw, revision: 3 }), removed, 'p')).rejects.toThrow();
+  const missing = { ...raw, revision: 3, modules: [], manifest: [], draftSha256: await hash('[]') };
+  await expect(stageDraft(JSON.stringify(missing), removed, 'p')).rejects.toThrow();
 });

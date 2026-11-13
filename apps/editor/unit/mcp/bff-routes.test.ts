@@ -265,11 +265,29 @@ describe('P1-B: project isolation of every service response', () => {
     expect(result.body.projectId).toBeUndefined();
     expect(upstream).toHaveLength(0);
   });
+  test('canonical slash-separated module IDs in a typed owner request reach the service unchanged', async () => {
+    responder = () => json(envelope(A, { requests: [] }));
+    const body = { projectId: A, action: 'create', body: 'Revise this room', moduleIds: ['house/room'], kind: 'typed-parameters', parameters: { width: 3.5 } };
+    const result = await run(routes.requests.POST as never, event('/api/mcp/requests', { body }));
+    expect(result.status).toBe(200);
+    expect(JSON.parse(upstream[0]!.body)).toEqual(body);
+  });
   test('GET requests: wrong-project inbox is rejected', async () => {
     responder = () => json(envelope(B, { requests: [{ id: 'r1', body: 'secret of B', moduleIds: [], status: 'open' }] }));
     const result = await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }));
     expect(result.status).toBe(502);
     expect(result.text).toBe('');
+  });
+  test('a full bounded inbox including typed metadata fits; oversized owner responses still fail closed', async () => {
+    const requests = Array.from({ length: 50 }, (_, i) => ({ id: String(i + 1), body: 'é'.repeat(1900), status: 'open',
+      moduleIds: Array.from({ length: 8 }, (_, n) => 'house/a' + 'b'.repeat(168) + n),
+      kind: 'typed-parameters', parameters: Object.fromEntries(Array.from({ length: 16 }, (_, n) => ['width' + 'a'.repeat(48) + n, 123.5])) }));
+    responder = () => json(envelope(A, { requests }));
+    expect(Buffer.byteLength(JSON.stringify(envelope(A, { requests })))).toBeGreaterThan(256 * 1024);
+    const accepted = await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }));
+    expect(accepted.status).toBe(200); expect(accepted.body.requests).toHaveLength(50);
+    responder = () => json(envelope(A, { unexpected: 'x'.repeat(512 * 1024) }));
+    expect((await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }))).status).toBe(502);
   });
   const grantBody = { projectId: A, action: 'approve', grantId: 'g1', agentSubject: 'agent-1', clientId: 'client-1', scopes: ['read'], confirmationCode: 'ABCDEFGH' };
   const mutations: Array<[string, (b?: Record<string, unknown>) => Promise<Result>]> = [

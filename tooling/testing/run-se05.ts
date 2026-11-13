@@ -8,6 +8,7 @@ const builder = path.resolve(process.env.SE05_BUILDER_ROOT ?? path.join(repo, '.
 const output = path.resolve(process.env.SE05_OUTPUT_ROOT ?? path.join(os.tmpdir(), 'se05-integration'));
 if (process.platform === 'win32' && !/^D:/i.test(output)) throw Error('SE05_OUTPUT_ROOT must be on D:');
 await mkdir(output, { recursive: true });
+if (existsSync(path.join(output, 'bootstrap.json'))) throw Error('Use a fresh SE05_OUTPUT_ROOT; a bootstrap already exists there.');
 const env = { ...process.env, TEMP: output, TMP: output, PYTHONPYCACHEPREFIX: path.join(output, 'pycache'), PIP_CACHE_DIR: path.join(output, 'pip-cache') };
 const server = Bun.spawn([process.env.SE05_PYTHON ?? 'python', path.join(builder, 'tests/se05_fixture_server.py'), '--output', output],
   { cwd: builder, env, stdout: Bun.file(path.join(output, 'fixture.log')), stderr: Bun.file(path.join(output, 'fixture-error.log')) });
@@ -30,7 +31,9 @@ try {
   const code = await child.exited;
   await writeFile(path.join(output, 'run.json'), JSON.stringify({ schemaVersion: 1, syntheticOnly: true, exitCode: code, elapsedMs: Date.now() - start,
     editorSha: Bun.spawnSync(['git', 'rev-parse', 'HEAD'], { cwd: repo }).stdout.toString().trim(),
-    builderSha: Bun.spawnSync(['git', 'rev-parse', 'HEAD'], { cwd: builder }).stdout.toString().trim() }, null, 2));
+    builderSha: Bun.spawnSync(['git', 'rev-parse', 'HEAD'], { cwd: builder }).stdout.toString().trim(),
+    editorDirty: !!Bun.spawnSync(['git', 'status', '--porcelain', '--untracked-files=no'], { cwd: repo }).stdout.toString().trim(),
+    builderDirty: !!Bun.spawnSync(['git', 'status', '--porcelain', '--untracked-files=no'], { cwd: builder }).stdout.toString().trim() }, null, 2));
   process.exitCode = code;
 } finally {
   server.kill(); await server.exited;

@@ -120,7 +120,7 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
   }).catch(() => { throw error(503, 'MCP service unavailable'); });
   if (r.status === 401 || r.status === 403) throw error(r.status, 'Owner or project authorization denied');
   if (!r.ok) throw error(502, 'MCP service rejected request');
-  const limit = endpoint === '/ticket' ? 32768 : 256 * 1024; // ticket minimal; bounded 50-request inbox
+  const limit = endpoint === '/ticket' ? 32768 : 512 * 1024; // 50 × 4 KiB text plus bounded module IDs/typed metadata
   const reader = r.body?.getReader(), chunks: Uint8Array[] = []; let length = 0;
   if (reader) while (true) {
     const next = await reader.read(); if (next.done) break;

@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 test('serves an app-specific build identity', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('[data-app="editor"]')).toBeVisible();
-	await expect(page.getByRole('heading', { level: 1, name: 'Open a model file' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'New BOMC', exact: true })).toBeVisible();
 	await expect(page.getByTestId('source-fingerprint')).toHaveText(/^[a-f0-9]{64}$/);
 	const response = await page.request.get('/__build.json');
 	expect(response.ok()).toBeTruthy();

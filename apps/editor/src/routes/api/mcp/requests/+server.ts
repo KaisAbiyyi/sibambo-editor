@@ -1,6 +1,7 @@
 import { error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { csrf, expose, projectId, requestJson, respond, requireSession, service } from '$lib/server/mcp-bff';
+import { moduleId } from '$lib/mcp/draft-protocol';
 export const GET: RequestHandler = async (event) => {
   const owner = requireSession(event), project = projectId(event.url.searchParams.get('project'));
   return respond(expose(await service(event, owner, project, '/requests', 'GET')));
@@ -12,7 +13,7 @@ export const POST: RequestHandler = async (event) => {
   if (body.action === 'create') {
     if (typeof body.body !== 'string' || !body.body.trim() || body.body.length > 2000 ||
       !Array.isArray(body.moduleIds) || body.moduleIds.length > 8 ||
-      body.moduleIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(id))) throw error(400, 'Invalid revision request');
+      new Set(body.moduleIds).size !== body.moduleIds.length || body.moduleIds.some(id => !moduleId(id))) throw error(400, 'Invalid revision request');
     if (!['instruction','typed-parameters'].includes(String(body.kind)) ||
       !body.parameters || typeof body.parameters !== 'object' || Array.isArray(body.parameters)) throw error(400, 'Invalid request kind');
     const params = Object.entries(body.parameters as Record<string, unknown>);

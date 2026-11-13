@@ -43,7 +43,15 @@ BOMC import has no fixed app-level file, section, record, geometry, or render-wo
 
 E4 remains **candidate_pending_cross_model_validation**. Automated tests cover the bounded authoring operations, history and actual downloaded-file reopen; manual usability and native parity remain separate gates. General CAD editing, native SketchUp compatibility, and complex-model round-tripping are outside this subset.
 
-Imported model data and the Editor session are held in page memory. There is no hosted database, model upload service, account sync, or server-side editing history in this app. Saving a view downloads an image to the user’s device.
+Imported model data and local authoring sessions are held in page memory. Live Builder drafts use the separate authenticated volatile service described below. There is no automatic model database or saved editing history. Saving a view downloads an image to the user’s device.
+
+## Live Builder draft (SE-05)
+
+With the owner BFF and exact WSS origin configured, choose **Extensions → MCP Extension…**, sign in, explicitly open the authorized project, then choose **Hubungkan draft live**. Operations from an owner-approved agent enter the existing canonical Builder actor. Editor validates hashes and the public Module IR schema in a worker, swaps every module in the transaction together, renders, and acknowledges the completed revision. The last attached tab is the primary viewer; followers do not authorize the next write. No active viewer means no new writes.
+
+Drafts remain unsaved RAM state. The last good model stays in the open tab during reconnect failure, hash/gap resync or server epoch change. New/Open/Close and beforeunload warn about dirty drafts. **Bingkai draft** frames the geometry explicitly. Builder draft Save/reopen and explicit restart restore are separate later milestones (SE-07/08); the local authoring Save button does not save a Builder draft.
+
+On Windows, run `tooling/testing/se05-acceptance.ps1` from this repository with the matching Builder checkout alongside it. The helper prepares the hash-locked synthetic TLS service, browser and reports on D:. `bun run test:se05` is the portable equivalent when `SE05_BUILDER_ROOT`, `SE05_PYTHON`, `SE05_OUTPUT_ROOT`, temp and Playwright paths are already prepared. The [public compatibility contract](docs/integrations/SE05-DRAFT-CONTRACT.md) and [owner SOP](docs/owner-acceptance/SE-05.md) distinguish repeatable automated evidence from real Auth0, external agents and tunnel acceptance.
 
 ## Run the workspace
 

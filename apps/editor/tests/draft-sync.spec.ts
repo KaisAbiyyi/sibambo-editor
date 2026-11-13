@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { seal } from '../src/lib/server/mcp-oidc';
-const fixture = JSON.parse(readFileSync(process.env.SE05_BOOTSTRAP!, 'utf8'));
+const fixture = process.env.SE05_BOOTSTRAP ? JSON.parse(readFileSync(process.env.SE05_BOOTSTRAP, 'utf8')) : null;
+test.skip(!fixture, 'SE-05 real cross-repo tests run through tooling/testing/run-se05.ts with the synthetic TLS service');
 async function driver(action: string, body: object = {}) {
   const response = await fetch(fixture.base + '/__se05_test/' + action, { method: 'POST', headers: {
     authorization: 'Bearer ' + fixture.driver, 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -66,7 +67,7 @@ test('owner request status is independent of geometry revision and becomes addre
   await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
   const before = await driver('status');
   const created = await page.request.post('/api/mcp/requests', { headers: { origin: 'http://localhost:5175', 'x-se04-csrf': 'synthetic-csrf' },
-    data: { projectId: 'live-test', action: 'create', body: 'synthetic revision request', moduleIds: [], kind: 'instruction', parameters: {} } });
+    data: { projectId: 'live-test', action: 'create', body: 'synthetic revision request', moduleIds: ['house/room'], kind: 'typed-parameters', parameters: { width: 3.5 } } });
   expect(created.ok()).toBe(true);
   const request = (await created.json()).requests.at(-1);
   expect((await driver('status')).revision).toBe(before.revision);
@@ -74,4 +75,68 @@ test('owner request status is independent of geometry revision and becomes addre
   await expect.poll(async () => (await driver('status')).acked).toBe(result.projectRevision);
   const session = await page.request.get('/api/mcp/session?project=live-test');
   expect((await session.json()).requests.find((item: any) => item.id === request.id).status).toBe('addressed');
+});
+
+test('late old-project ticket response cannot replace a newly connected project', async ({ page }) => {
+  await open(page);
+  await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
+  const result = await driver('operation'); expect(result.ok).toBe(true);
+  await expect.poll(async () => (await driver('status')).acked).toBe(result.projectRevision);
+  let release!: () => void, entered!: () => void, finished!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const delivered = new Promise<void>(resolve => { finished = resolve; });
+  let first = true;
+  await page.route('**/api/mcp/ticket', async route => {
+    if (!first || route.request().postDataJSON().projectId !== 'live-test') return route.continue();
+    first = false; const response = await route.fetch(); entered(); await held;
+    await route.fulfill({ response }).catch(() => {}); finished();
+  });
+  await driver('close'); await waiting;
+  await page.locator('summary').filter({ hasText: 'Extensions' }).click();
+  await page.getByRole('button', { name: 'MCP Extension…' }).click();
+  await page.getByLabel('ID proyek (hanya proyek yang diizinkan server)').fill('other-live');
+  await page.getByRole('button', { name: 'Buka proyek' }).click();
+  await page.getByRole('button', { name: 'Hubungkan draft live' }).click();
+  await page.getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(status(page)).toHaveAttribute('data-project-id', 'other-live');
+  release(); await delivered;
+  await expect(status(page)).toHaveAttribute('data-revision', '0');
+  await expect(status(page)).toHaveAttribute('data-module-count', '0');
+  await expect.poll(async () => (await driver('status', { project: 'other-live' })).acked).toBe(0);
+  await expect(status(page)).toHaveAttribute('data-project-id', 'other-live');
+});
+
+test('bounded reconnect failure retains the last frame and explicit retry recovers it', async ({ page }) => {
+  await open(page);
+  await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
+  const before = await driver('status'); expect(before.revision).toBeGreaterThan(0);
+  await page.clock.install();
+  let attempts = 0;
+  await page.route('**/api/mcp/ticket', route => { attempts++; return route.fulfill({ status: 503, body: '{}' }); });
+  await driver('close');
+  await expect(status(page)).toContainText('reconnecting');
+  for (let count = 1; count <= 6; count++) {
+    await page.clock.fastForward(13000);
+    await expect.poll(() => attempts).toBe(count);
+  }
+  await expect(status(page)).toContainText('Batas percobaan sambungan tercapai');
+  await expect(status(page)).toHaveAttribute('data-revision', String(before.revision));
+  await expect(status(page)).toHaveAttribute('data-module-count', '1');
+  await page.unroute('**/api/mcp/ticket');
+  await page.clock.setSystemTime(new Date());
+  await status(page).getByRole('button', { name: 'Sambungkan ulang' }).click();
+  await expect.poll(async () => (await driver('status')).acked).toBe(before.revision);
+  expect((await driver('status')).events).toBe(before.events);
+});
+
+test('changed server epoch is a visible stop that preserves the previous canonical model', async ({ page }) => {
+  await open(page);
+  await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
+  const before = await driver('status'); expect(before.revision).toBeGreaterThan(0);
+  await driver('new-epoch');
+  await expect(status(page)).toContainText('Epoch server berubah');
+  await expect(status(page)).toHaveAttribute('data-revision', String(before.revision));
+  await expect(status(page)).toHaveAttribute('data-module-count', '1');
+  expect((await driver('status')).revision).toBe(0);
 });

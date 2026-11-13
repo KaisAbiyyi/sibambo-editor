@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { loadedModelTabTitle } from '../src/lib/model-tab-title';
+import { loadedModelTabTitle } from '../../src/lib/model-tab-title';
 
 describe('loadedModelTabTitle', () => {
 	it('prefers the trimmed embedded model name and preserves internal spaces and Unicode', () => {

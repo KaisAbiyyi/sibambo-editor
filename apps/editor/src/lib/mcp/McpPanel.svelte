@@ -51,11 +51,10 @@
     busy = true; errorText = '';
     try {
       await client.logout(session.csrf);
-      onLogout?.();
       projectId = ''; session = null;
       await refresh();
     } catch (err) { failClosed(err, 'Aksi ditolak.'); }
-    finally { busy = false; }
+    finally { onLogout?.(); busy = false; }
   }
   async function chooseProject() {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(projectId)) { errorText = 'ID proyek 1–64 karakter: huruf, angka, minus, garis bawah.'; return; }
@@ -87,7 +86,7 @@
   onDestroy(() => { activeRead += 1; client.dispose(); });
 </script>
 
-<aside bind:this={panel} class="mcp-panel" role="dialog" aria-label="MCP Extension" aria-modal="false" hidden={!open} onkeydown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }}>
+<div bind:this={panel} class="mcp-panel" role="dialog" tabindex="-1" aria-label="MCP Extension" aria-modal="false" hidden={!open} onkeydown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }}>
   <div class="mcp-panel-head"><div><p class="mcp-eyebrow">Extensions</p><h2>MCP Extension</h2></div>
     <button type="button" data-mcp-first onclick={close} aria-label="Tutup MCP Extension">Tutup</button>
   </div>
@@ -170,4 +169,4 @@
       </section>
     {/if}
   {/if}
-</aside>
+</div>
