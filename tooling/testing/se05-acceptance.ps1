@@ -43,8 +43,8 @@ try {
   try {
     Invoke-Checked $bunCommand @('install','--frozen-lockfile') '04-bun.log'
     Invoke-Checked $bunCommand @('tooling/testing/generate-draft-validator.ts','--check') '05-schema.log'
-    Invoke-Checked $bunCommand @('test','./apps/editor/unit/mcp','./apps/editor/unit/editor') '06-unit.log'
-    Invoke-Checked $bunCommand @('run','check') '07-check.log'
+    Invoke-Checked $bunCommand @('run','check') '06-check.log'
+    Invoke-Checked $bunCommand @('test','./apps/editor/unit/mcp','./apps/editor/unit/editor') '07-unit.log'
     Invoke-Checked $bunCommand @('x','tsc','--project','packages/tsconfig.json') '08-packages.log'
     Invoke-Checked $bunCommand @('x','playwright','install','chromium') '09-browser-install.log'
     Invoke-Checked $bunCommand @('tooling/testing/run-se05.ts') '10-integration.log'

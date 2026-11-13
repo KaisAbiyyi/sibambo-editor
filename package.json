@@ -10,7 +10,7 @@
     "check": "bun run --cwd apps/editor check",
     "test": "bun run --cwd apps/editor test",
     "build": "bun run --cwd apps/editor build",
-    "test:se05": "bun test ./apps/editor/unit/mcp ./apps/editor/unit/editor && bun tooling/testing/generate-draft-validator.ts --check && bun tooling/testing/run-se05.ts"
+    "test:se05": "bun run check && bun test ./apps/editor/unit/mcp ./apps/editor/unit/editor && bun tooling/testing/generate-draft-validator.ts --check && bun tooling/testing/run-se05.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

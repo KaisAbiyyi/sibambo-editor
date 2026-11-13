@@ -57,7 +57,7 @@ jobs:
         run: bun tooling/testing/generate-draft-validator.ts --check
         working-directory: editor
       - name: Portable unit regressions
-        run: bun test ./apps/editor/unit/mcp ./apps/editor/unit/editor
+        run: bun run check && bun test ./apps/editor/unit/mcp ./apps/editor/unit/editor
         working-directory: editor
       - name: Install browser
         run: bun x playwright install chromium --with-deps
