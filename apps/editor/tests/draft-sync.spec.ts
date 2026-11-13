@@ -20,7 +20,9 @@ async function open(page: Page) {
   await page.getByRole('button', { name: 'Hubungkan draft live' }).click();
   const ticket = await ticketResponse;
   expect(ticket.status(), ticket.status() === 200 ? '' : `${await ticket.text()}; origin=${ticket.request().headers()['origin']}; csrfMatches=${ticket.request().headers()['x-se04-csrf'] === 'synthetic-csrf'}`).toBe(200);
+  await ticket.finished();
   await expect(page.getByRole('region', { name: 'Draft live', exact: true })).toBeVisible();
+  return { ticketLatencyMs: ticket.request().timing().responseEnd };
 }
 const status = (page: Page) => page.getByRole('region', { name: 'Draft live', exact: true });
 async function warmGeometryPixels(page: Page, png: Buffer) {
@@ -38,7 +40,10 @@ async function warmGeometryPixels(page: Page, png: Buffer) {
 
 test('actual BFF ticket → WSS → worker validation → completed frame ACK; no duplicate after reconnect', async ({ page }, testInfo) => {
   const socketUrls: string[] = []; page.on('websocket', ws => socketUrls.push(ws.url()));
-  await open(page);
+  const firstTicket = await open(page);
+  expect(firstTicket.ticketLatencyMs).toBeGreaterThanOrEqual(0);
+  await testInfo.attach('first-ticket-latency', { body: JSON.stringify({ syntheticOnly: true, ...firstTicket,
+    scope: 'first ticket in the production Node test process; real Vercel cold-start NOT_RUN' }), contentType: 'application/json' });
   const before = await driver('status');
   await expect.poll(async () => (await driver('status')).acked).toBe(before.revision);
   const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');

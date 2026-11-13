@@ -2,8 +2,6 @@ name: SE-05 cross-repository live draft
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [work/se-05/full-sync-20261113]
   workflow_dispatch:
 permissions:
   contents: read
