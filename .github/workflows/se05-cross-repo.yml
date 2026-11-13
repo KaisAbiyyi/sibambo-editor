@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 30
     env:
       EXPECTED_EDITOR_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      EXPECTED_BUILDER_SHA: 52025a299bd1e088db38379da313dca42754fa95
+      EXPECTED_BUILDER_SHA: eb28489ab8504e96eb1dde36f6bb1dce2d83eca4
       SE05_BUILDER_ROOT: ${{ github.workspace }}/builder
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: KaisAbiyyi/sibambo-bomc-builder
-          ref: 52025a299bd1e088db38379da313dca42754fa95
+          ref: eb28489ab8504e96eb1dde36f6bb1dce2d83eca4
           path: builder
           persist-credentials: false
       - name: Exact source identities and isolated artifacts

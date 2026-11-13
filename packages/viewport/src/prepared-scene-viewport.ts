@@ -329,10 +329,11 @@ export class PreparedSceneViewport {
 	}
 
 	/** Atomic draft swap; retired resources survive until the replacement frame completes. */
+	private externalDraftBounds: ViewportBounds | null = null;
 	async setExternalDraftProjection(changes: Array<{ moduleId: string; object: Object3D | null }>, bounds: ViewportBounds, isCurrent = () => true) {
 		if (this.disposed) throw Error('Viewport disposed');
 		if (!this.initialFitComplete) { cancelAnimationFrame(this.initialFitHandle); this.initialFitComplete = true; }
-		const previousBounds = this.fittedBounds, previous = new Map<string, Object3D | undefined>();
+		const previousBounds = this.fittedBounds, previousExternalBounds = this.externalDraftBounds, previous = new Map<string, Object3D | undefined>();
 		for (const change of changes) {
 			const key = 'builder/module/' + change.moduleId;
 			if (previous.has(key)) throw Error('Duplicate draft module');
@@ -345,7 +346,7 @@ export class PreparedSceneViewport {
 				if (change.object) { this.domainOverlays.set(key, change.object); this.scene3d.add(change.object); }
 				else this.domainOverlays.delete(key);
 			}
-			this.fittedBounds = bounds; this.rendererHost.updateClipRange(bounds); this.renderOnce();
+			this.externalDraftBounds = bounds; this.fittedBounds = bounds; this.rendererHost.updateClipRange(bounds); this.renderOnce();
 			await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 			if (this.disposed || !isCurrent()) throw Error('Draft transaction superseded during render');
 		} catch (error) {
@@ -356,12 +357,13 @@ export class PreparedSceneViewport {
 				else this.domainOverlays.delete(key);
 			}
 			if (this.disposed) for (const old of previous.values()) { if (old) this.disposeOverlay(old); }
-			else { this.fittedBounds = previousBounds; this.rendererHost.updateClipRange(previousBounds); this.renderOnce(); }
+			else { this.externalDraftBounds = previousExternalBounds; this.fittedBounds = previousBounds; this.rendererHost.updateClipRange(previousBounds); this.renderOnce(); }
 			throw error;
 		}
 		for (const old of previous.values()) if (old) this.disposeOverlay(old);
 	}
 	clearExternalDraftProjection() {
+		this.externalDraftBounds = null;
 		for (const [key, object] of [...this.domainOverlays]) if (key.startsWith('builder/module/')) {
 			this.scene3d.remove(object); this.disposeOverlay(object); this.domainOverlays.delete(key);
 		}
@@ -600,7 +602,7 @@ export class PreparedSceneViewport {
 
 	fit() {
 		this.invalidateNavigationState();
-		const bounds = visibleSceneBounds(this.meshRecords);
+		const bounds = this.externalDraftBounds ?? visibleSceneBounds(this.meshRecords);
 		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 		this.refreshNavigationAxes();
 		this.rendererHost.focusBounds(this.fittedBounds);

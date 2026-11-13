@@ -23,17 +23,36 @@ async function open(page: Page) {
   await expect(page.getByRole('region', { name: 'Draft live', exact: true })).toBeVisible();
 }
 const status = (page: Page) => page.getByRole('region', { name: 'Draft live', exact: true });
+async function warmGeometryPixels(page: Page, png: Buffer) {
+  return page.evaluate(async base64 => {
+    const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: 'image/png' }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), context = canvas.getContext('2d')!;
+    context.drawImage(bitmap, 0, 0); bitmap.close();
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let warm = 0;
+    // The synthetic room's tan flooring has R>G>B; the empty gray/blue grid and axes do not.
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i]! > 40 && pixels[i]! >= pixels[i+1]! + 4 && pixels[i+1]! >= pixels[i+2]! + 4 && pixels[i+3]! > 200) warm++;
+    return warm;
+  }, png.toString('base64'));
+}
 
-test('actual BFF ticket → WSS → worker validation → completed frame ACK; no duplicate after reconnect', async ({ page }) => {
+test('actual BFF ticket → WSS → worker validation → completed frame ACK; no duplicate after reconnect', async ({ page }, testInfo) => {
   const socketUrls: string[] = []; page.on('websocket', ws => socketUrls.push(ws.url()));
   await open(page);
   const before = await driver('status');
   await expect.poll(async () => (await driver('status')).acked).toBe(before.revision);
+  const canvas = page.locator('canvas[aria-label="Interactive 3D model viewport"]');
+  const emptyPixels = await warmGeometryPixels(page, await canvas.screenshot());
   const result = await driver('operation');
   expect(result.ok).toBe(true);
   await expect(status(page)).toHaveAttribute('data-revision', String(before.revision + 1));
   await expect(status(page)).toHaveAttribute('data-module-count', '1');
   await expect.poll(async () => (await driver('status')).acked).toBe(before.revision + 1);
+  await status(page).getByRole('button', { name: 'Bingkai draft' }).click();
+  await page.locator('summary').filter({ hasText: 'Camera' }).click();
+  await page.getByRole('button', { name: 'Top', exact: true }).click();
+  const visible = await canvas.screenshot({ path: testInfo.outputPath('live-draft.png') });
+  expect(await warmGeometryPixels(page, visible)).toBeGreaterThan(emptyPixels + 200);
   const after = await driver('status');
   await driver('close');
   await expect(status(page)).toContainText('reconnecting');

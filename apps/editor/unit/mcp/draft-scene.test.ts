@@ -22,6 +22,16 @@ function viewport(throwRender = false) {
   return { instance, scene, overlays, restore: () => { globalThis.requestAnimationFrame = frame; } };
 }
 const bounds = { min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2, z: 2 } };
+test('explicit framing uses live draft bounds and applying a draft never moves the camera', async () => {
+  const v = viewport(); let focused: unknown = null;
+  Object.assign(v.instance, { meshRecords: [], invalidateNavigationState() {}, refreshNavigationAxes() {} });
+  (v.instance as any).rendererHost.focusBounds = (value: unknown) => { focused = value; };
+  try {
+    await v.instance.setExternalDraftProjection([{ moduleId: 'a', object: group().root }], bounds);
+    expect(focused).toBeNull();
+    v.instance.fit(); expect(focused).toEqual(bounds);
+  } finally { v.restore(); }
+});
 test('two-module transaction swaps once and disposes only retired resources after the frame', async () => {
   const v = viewport(), oldA = group(), oldB = group(), unchanged = group(), nextA = group(), nextB = group();
   for (const [name, item] of [['a', oldA], ['b', oldB], ['same', unchanged]] as const) { v.overlays.set('builder/module/' + name, item.root); v.scene.add(item.root); }
