@@ -24,7 +24,7 @@ describe('browser transport re-verifies the project scope of every BFF answer', 
   });
   test('ticket is validated, returned to the caller only and never retained', async () => {
     const c = new McpConnection();
-    const expires = new Date(Date.now() + 60_000).toISOString();
+    const expires = new Date(Date.now() + 15_000).toISOString();
     reply({ contract: 'se04-owner-mcp-v1', projectId: A, ticket: TICKET, ticketExpiresAt: expires });
     expect(await c.ticket(A, 'csrf')).toEqual({ contract: 'se04-owner-mcp-v1', projectId: A, ticket: TICKET, ticketExpiresAt: expires });
     expect(JSON.stringify(c)).not.toContain(TICKET);

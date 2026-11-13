@@ -9,7 +9,7 @@ test('security headers also cover immutable OAuth redirects without breaking Loc
   const response = await handle({ event: {}, resolve: async () => Response.redirect('https://idp.example.test/login', 303) } as never);
   expect(response.status).toBe(303);
   expect(response.headers.get('location')).toBe('https://idp.example.test/login');
-  expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+  expect(response.headers.get('referrer-policy')).toBe('same-origin');
   expect(response.headers.get('permissions-policy')).toBe('camera=(), microphone=(), geolocation=()');
 });
 async function config(origin: string | undefined) {

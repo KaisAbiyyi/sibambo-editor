@@ -120,8 +120,17 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
   }).catch(() => { throw error(503, 'MCP service unavailable'); });
   if (r.status === 401 || r.status === 403) throw error(r.status, 'Owner or project authorization denied');
   if (!r.ok) throw error(502, 'MCP service rejected request');
-  const raw = await r.text();
-  if (raw.length > 32768) throw error(502, 'MCP service response too large');
+  const limit = endpoint === '/ticket' ? 32768 : 256 * 1024; // ticket minimal; bounded 50-request inbox
+  const reader = r.body?.getReader(), chunks: Uint8Array[] = []; let length = 0;
+  if (reader) while (true) {
+    const next = await reader.read(); if (next.done) break;
+    length += next.value.byteLength;
+    if (length > limit) { await reader.cancel(); throw error(502, 'MCP service response too large'); }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const raw = new TextDecoder().decode(bytes);
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw error(502, 'Invalid service response'); }
   if (!data || typeof data !== 'object' || Array.isArray(data) || (data as Record<string, unknown>).contract !== 'se04-owner-mcp-v1')
@@ -136,7 +145,7 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
 }
 /** Short-lived WebSocket tickets: generous token alphabet, bounded size, never URL-shaped. */
 export const TICKET_PATTERN = /^[A-Za-z0-9._~-]{32,512}$/;
-export const TICKET_MAX_TTL_MS = 300_000;
+export const TICKET_MAX_TTL_MS = 30_000;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 /**
  * P1-A: dedicated serializer for POST /api/mcp/ticket. Returns only the contract marker,
@@ -161,7 +170,22 @@ export function ticketResponse(data: Record<string, unknown>, owner: OwnerSessio
 }
 export function expose(data: Record<string, unknown>) {
   // Explicit allowlist; a compromised service must not leak bearer/cookies via JSON.
-  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'error'];
+  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'error', 'epoch'];
   return Object.fromEntries(fields.filter(f => Object.prototype.hasOwnProperty.call(data, f)).map(f => [f, data[f]]));
 }
 export { token };
+export async function disconnectOwner(session: OwnerSession) {
+  if (!process.env.SE04_SERVICE_BASE_URL) return;
+  const response = await fetch(serviceBase() + '/owner/v1/logout', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+    headers: { authorization: 'Bearer ' + session.accessToken, 'content-type': 'application/json' }, body: '{}' });
+  if (!response.ok) throw error(503, 'Owner channel disconnect unavailable');
+}
+export function draftWebSocketUrl(): string | undefined {
+  const raw = process.env.SE05_DRAFT_WS_ORIGIN;
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'wss:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || url.hostname.includes('*')) throw Error();
+    return url.origin + '/draft';
+  } catch { throw error(503, 'Draft WebSocket origin is invalid'); }
+}

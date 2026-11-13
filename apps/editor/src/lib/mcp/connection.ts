@@ -16,6 +16,7 @@ export type McpSessionView = {
   capabilities?: string[]; pending?: Agent[]; grants?: Agent[]; writer?: string | null;
   seenRevision?: number; renderedRevision?: number; paused?: boolean;
   requests?: RevisionRequest[]; error?: string;
+  draftWebSocketUrl?: string; epoch?: string;
 };
 /** Raised when a response does not belong to the project the owner asked for. Fail closed. */
 export class McpScopeError extends Error {
@@ -35,7 +36,7 @@ export class McpConnection {
     this.pending.add(abort);
     try {
       const response = await fetch('/api/mcp/' + path, {
-        method: options.method ?? 'GET', credentials: 'same-origin', signal: abort.signal,
+        method: options.method ?? 'GET', credentials: 'same-origin', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(10000)]),
         cache: 'no-store', redirect: 'error',
         headers: { accept: 'application/json', ...(options.method === 'POST' ? {
           'content-type': 'application/json', 'x-se04-csrf': options.csrf ?? ''
@@ -72,7 +73,7 @@ export class McpConnection {
     const data = await this.request<Partial<WebSocketTicket>>('ticket', { method: 'POST', csrf, body: { projectId: project } });
     assertProjectScope(data, project);
     if (data.contract !== 'se04-owner-mcp-v1' || typeof data.ticket !== 'string' || !/^[A-Za-z0-9._~-]{32,512}$/.test(data.ticket) ||
-        typeof data.ticketExpiresAt !== 'string' || !(Date.parse(data.ticketExpiresAt) > Date.now()))
+        typeof data.ticketExpiresAt !== 'string' || !(Date.parse(data.ticketExpiresAt) > Date.now()) || Date.parse(data.ticketExpiresAt) - Date.now() > 30_000)
       throw new Error('Respons ticket MCP tidak valid.');
     return { contract: data.contract, projectId: project, ticket: data.ticket, ticketExpiresAt: data.ticketExpiresAt };
   }

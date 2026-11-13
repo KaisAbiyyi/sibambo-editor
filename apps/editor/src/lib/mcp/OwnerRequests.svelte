@@ -63,8 +63,6 @@
     {#each requests as item (item.id)}
       <li><span>{item.body}</span><small>{item.status} · {item.moduleIds?.join(', ') ?? 'tanpa modul'}</small>
         {#if item.status === 'open'}<button type="button" disabled={sending} onclick={() => void act('withdraw', item.id)}>Tarik</button>{/if}
-        {#if item.status === 'open'}<button type="button" disabled={sending} onclick={() => void act('mark-read', item.id)}>Tandai dibaca</button>{/if}
-        {#if item.status === 'read'}<button type="button" disabled={sending} onclick={() => void act('mark-addressed', item.id)}>Tandai ditangani</button>{/if}
       </li>
     {/each}
   </ul>

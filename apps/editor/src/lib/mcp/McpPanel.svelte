@@ -3,7 +3,7 @@
   import { McpConnection, McpScopeError, type McpSessionView, type Agent } from './connection';
   import OwnerRequests from './OwnerRequests.svelte';
 
-  let { open, onClose }: { open: boolean; onClose: () => void } = $props();
+  let { open, onClose, onConnect, onLogout, requestStatuses = [] }: { open: boolean; onClose: () => void; onConnect?: (session: McpSessionView) => void; onLogout?: () => void; requestStatuses?: Array<{ id: string; status: string }> } = $props();
   const client = new McpConnection();
   let session = $state<McpSessionView | null>(null);
   let projectId = $state('');
@@ -17,6 +17,8 @@
   const selectedProject = $derived(session?.projectId ?? '');
   const isSignedIn = $derived(!!session?.csrf);
   const stateName = $derived(session?.phase ?? 'disconnected');
+  const liveRequests = $derived((session?.requests ?? []).map(item => ({ ...item,
+    status: (requestStatuses.find(status => status.id === item.id)?.status ?? item.status) as typeof item.status })));
 
   async function refresh() {
     const seq = ++activeRead;
@@ -49,6 +51,7 @@
     busy = true; errorText = '';
     try {
       await client.logout(session.csrf);
+      onLogout?.();
       projectId = ''; session = null;
       await refresh();
     } catch (err) { failClosed(err, 'Aksi ditolak.'); }
@@ -57,7 +60,10 @@
   async function chooseProject() {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(projectId)) { errorText = 'ID proyek 1–64 karakter: huruf, angka, minus, garis bawah.'; return; }
     busy = true;
-    try { await refresh(); } finally { busy = false; }
+    try {
+      if (session?.csrf) await client.request('session', { method: 'POST', csrf: session.csrf, body: { projectId } });
+      await refresh();
+    } catch (err) { failClosed(err, 'Gagal membuka proyek.'); } finally { busy = false; }
   }
   function grantAction(agent: Agent, action: 'approve' | 'deny' | 'revoke' | 'remove') {
     const code = (pairingConfirmation[agent.id] ?? '').trim().toUpperCase();
@@ -112,6 +118,7 @@
         <p>Kapabilitas dari server: {(session?.capabilities ?? []).join(', ') || 'tidak tersedia'}</p>
         <p>Writer aktif: <strong>{session?.writer ?? 'tidak ada'}</strong></p>
         <p>Revisi diterima: {session?.seenRevision ?? '—'} · Revisi tergambar: {session?.renderedRevision ?? '—'}</p>
+        {#if session?.draftWebSocketUrl}<button type="button" disabled={busy} onclick={() => session && onConnect?.(session)}>Hubungkan draft live</button>{/if}
         <div class="mcp-inline">
           <button type="button" disabled={busy} onclick={() => void perform('pause', {projectId: selectedProject, paused: !session?.paused})}>{session?.paused ? 'Lanjutkan proyek' : 'Jeda semua perubahan'}</button>
           <button type="button" disabled={busy} onclick={() => void refresh()}>Segarkan status</button>
@@ -154,7 +161,7 @@
           {/each}
         </ul>
       </section>
-      <OwnerRequests {client} projectId={selectedProject} csrf={session?.csrf ?? ''} requests={session?.requests ?? []} onChanged={refresh} />
+      <OwnerRequests {client} projectId={selectedProject} csrf={session?.csrf ?? ''} requests={liveRequests} onChanged={refresh} />
       <section class="mcp-subsection" aria-label="Panduan agent">
         <h3>Cara menghubungkan agent</h3>
         <p>Daftarkan server MCP HTTPS dan lakukan OAuth melalui aplikasi resmi; jangan salin bearer token atau client secret ke command, URL, atau screenshot.</p>

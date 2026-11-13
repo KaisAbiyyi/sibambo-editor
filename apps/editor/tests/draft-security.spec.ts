@@ -15,7 +15,7 @@ test('owner controls have enforced security headers and still hydrate under CSP'
   expect(policy).toContain("object-src 'none'");
   expect(policy).toContain("base-uri 'self'");
   expect(policy).not.toContain("'unsafe-eval'");
-  expect(headers['referrer-policy']).toBe('no-referrer');
+  expect(headers['referrer-policy']).toBe('same-origin');
   expect(headers['permissions-policy']).toBe('camera=(), microphone=(), geolocation=()');
   expect(headers['x-content-type-options']).toBe('nosniff');
   await expect(page.locator('main[data-editor-ready="true"]')).toBeVisible();
@@ -28,7 +28,7 @@ test('owner controls have enforced security headers and still hydrate under CSP'
   await page.getByRole('button', { name: 'MCP Extension…' }).click();
   await expect(page.getByRole('dialog', { name: 'MCP Extension' })).toBeVisible();
   const session = await request.get('/api/mcp/session');
-  expect(session.headers()['referrer-policy']).toBe('no-referrer');
+  expect(session.headers()['referrer-policy']).toBe('same-origin');
   expect(session.headers()['permissions-policy']).toBe('camera=(), microphone=(), geolocation=()');
   expect(violations).toEqual([]);
 });

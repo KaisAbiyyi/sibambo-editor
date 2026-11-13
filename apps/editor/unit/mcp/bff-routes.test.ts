@@ -101,7 +101,7 @@ async function run(handler: (e: never) => Promise<Response> | Response, ev: neve
   }
 }
 const postTicket = (project: string = A, opts: Options = {}) => run(routes.ticket.POST as never, event('/api/mcp/ticket', { ...opts, body: opts.body ?? { projectId: project } }));
-const validTicketBody = (extra: Record<string, unknown> = {}) => envelope(A, { ticket: TICKET, ticketExpiresAt: iso(60_000), ...extra });
+const validTicketBody = (extra: Record<string, unknown> = {}) => envelope(A, { ticket: TICKET, ticketExpiresAt: iso(15_000), ...extra });
 
 describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticket', () => {
   test('valid upstream ticket is delivered once, minimal, no-store, with no bearer and no persistence', async () => {
@@ -158,7 +158,7 @@ describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticke
   }
   const badExpiry: Array<[string, unknown]> = [
     ['missing', undefined], ['null', null], ['epoch number', Math.floor(NOW() / 1000) + 60], ['free text', 'tomorrow'],
-    ['already expired', iso(-1000)], ['exactly now', iso(0)], ['beyond 5 minute budget', iso(301_000)], ['far future', '2999-01-01T00:00:00Z'],
+    ['already expired', iso(-1000)], ['exactly now', iso(0)], ['beyond 30 second budget', iso(31_000)], ['far future', '2999-01-01T00:00:00Z'],
     ['impossible calendar date', '2999-13-45T25:61:61Z'], ['non UTC offset form', '2999-01-01T00:00:00+07:00']
   ];
   for (const [name, ticketExpiresAt] of badExpiry) {
@@ -176,14 +176,14 @@ describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticke
     expect(() => bff.ticketResponse(at(1), owner, A, now + 1)).toThrow();
   });
   test('ticket scoped to a different project (A requested, B returned) never reaches the browser', async () => {
-    responder = () => json(envelope(B, { ticket: TICKET, ticketExpiresAt: iso(60_000) }));
+    responder = () => json(envelope(B, { ticket: TICKET, ticketExpiresAt: iso(15_000) }));
     const result = await postTicket(A);
     expect(result.status).toBe(502);
     expect(result.text).toBe('');
   });
   for (const [name, projectId] of [['missing', undefined], ['null', null], ['number', 1], ['array', [A]], ['object', { id: A }], ['different case', 'PROJECT-A'], ['trailing space', A + ' '], ['empty', '']] as const) {
     test(`malformed upstream projectId fails closed: ${name}`, async () => {
-      const body: Record<string, unknown> = { contract: 'se04-owner-mcp-v1', ticket: TICKET, ticketExpiresAt: iso(60_000) };
+      const body: Record<string, unknown> = { contract: 'se04-owner-mcp-v1', ticket: TICKET, ticketExpiresAt: iso(15_000) };
       if (projectId !== undefined) body.projectId = projectId;
       responder = () => json(body);
       expect((await postTicket(A)).status).toBe(502);
@@ -236,7 +236,7 @@ describe('P1-B: project isolation of every service response', () => {
     seenRevision: 3, renderedRevision: 3, paused: false, requests: [], ...extra
   });
   test('matching project is exposed through the allowlist only (ticket and credentials are stripped)', async () => {
-    responder = () => json(view(A, { ticket: TICKET, ticketExpiresAt: iso(60_000), accessToken: 'leak', cookies: ['x'], secret: 's' }));
+    responder = () => json(view(A, { ticket: TICKET, ticketExpiresAt: iso(15_000), accessToken: 'leak', cookies: ['x'], secret: 's' }));
     const result = await run(routes.session.GET as never, event('/api/mcp/session', { method: 'GET', query: '?project=' + A }));
     expect(result.status).toBe(200);
     expect(result.body).toMatchObject({ projectId: A, projectName: 'Name of ' + A, subject: 'auth0|owner', csrf: CSRF, serviceReady: true });

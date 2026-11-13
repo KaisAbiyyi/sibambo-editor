@@ -9,6 +9,6 @@ export default defineConfig({
 		url: 'http://127.0.0.1:5175',
 		reuseExistingServer: false,
 		timeout: 120000,
-		env: { HOST: '127.0.0.1', PORT: '5175' }
+		env: { HOST: '127.0.0.1', PORT: '5175', ORIGIN: 'http://localhost:5175' }
 	}
 });
