@@ -1,0 +1,53 @@
+{
+  "editorBase": "4166e829840e393541506f4963995f193cc93d07",
+  "builderBase": "6e3990f4cc57a3b2e8eab431aa263003a69afc16",
+  "fixture": "synthetic RSA IdP + loopback TLS",
+  "result": "BLOCKED_CONTRACT_MISMATCH",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/v1/projects/se05-contract/owner/mcp",
+      "httpStatus": 404
+    },
+    {
+      "method": "POST",
+      "path": "/v1/projects/se05-contract/owner/mcp/ticket",
+      "httpStatus": 404
+    },
+    {
+      "method": "GET",
+      "path": "/owner/v1/projects/se05-contract",
+      "httpStatus": 200,
+      "responseKeys": [
+        "epoch",
+        "fence",
+        "moduleRevisions",
+        "ownerAlive",
+        "paused",
+        "project",
+        "projectId",
+        "projectRevision",
+        "removedModules",
+        "tenant",
+        "writer"
+      ],
+      "contract": null,
+      "ttlSeconds": null,
+      "epochType": "int"
+    },
+    {
+      "method": "POST",
+      "path": "/owner/v1/projects/se05-contract/ticket",
+      "httpStatus": 200,
+      "responseKeys": [
+        "expiresAt",
+        "projectId",
+        "ticket",
+        "ttlSeconds"
+      ],
+      "contract": null,
+      "ttlSeconds": 120,
+      "epochType": "NoneType"
+    }
+  ]
+}
