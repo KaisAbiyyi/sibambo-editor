@@ -8,6 +8,10 @@
  * admission, and records the stored-graph coordinate convention.
  * These tests assert the behaviour observed on Editor 9965b3a; they are
  * evidence for the next PLAN, not product behaviour.
+ *
+ * Since v2.1 (WP1A) they document why v2.1 exists: the v2.0 encoding must STILL be
+ * rejected after the `arch` admission extension, while the v2.1 encoding is proved
+ * admissible in admission-e-l2.test.ts.
  */
 import { describe, expect, test } from 'bun:test';
 import { writeFileSync } from 'node:fs';
@@ -118,7 +122,7 @@ describe('E-L1 managed-module encoding vs BOMC format and authoring admission', 
 		expect(layers.afterZeroFaceCodes).not.toBe('editable');
 	});
 
-	test('(i-d) root metadata cannot carry an extra arch key', () => {
+	test('(i-d) root metadata rejects an arch key without the v2.1 C9a schema shape', () => {
 		const base = BomcDocument.create({ documentId: DOC, name: 'meta' });
 		const graph = structuredClone(base.snapshot().graph) as any;
 		base.dispose();
