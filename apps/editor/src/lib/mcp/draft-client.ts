@@ -28,7 +28,8 @@ export class DraftClient {
   private suspended = false;
   constructor(private options: DraftOptions) {
     const url = new URL(options.url);
-    if (url.protocol !== 'wss:' || url.pathname !== '/draft' || url.search || url.hash || url.username || url.password) throw Error('URL draft WSS tidak valid.');
+    const loopbackWs = url.protocol === 'ws:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    if ((url.protocol !== 'wss:' && !loopbackWs) || url.pathname !== '/draft' || url.search || url.hash || url.username || url.password) throw Error('URL draft WSS tidak valid.');
     this.worker = new Worker(new URL('./draft.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = ({ data }) => { const waiter = this.waiters.get(data.id); this.waiters.delete(data.id); if (data.error) waiter?.reject(Error(data.error)); else waiter?.resolve(data); };
     this.worker.onerror = () => this.fatal('Worker validasi draft gagal. Model terakhir tetap dipertahankan.');

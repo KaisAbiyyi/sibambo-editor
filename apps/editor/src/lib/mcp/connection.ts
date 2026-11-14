@@ -17,6 +17,7 @@ export type McpSessionView = {
   seenRevision?: number; renderedRevision?: number; paused?: boolean;
   requests?: RevisionRequest[]; error?: string;
   draftWebSocketUrl?: string; epoch?: string;
+  localDemo?: boolean; defaultProject?: string;
 };
 /** Raised when a response does not belong to the project the owner asked for. Fail closed. */
 export class McpScopeError extends Error {

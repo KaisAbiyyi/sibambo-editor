@@ -9,7 +9,8 @@ if (process.env.SE05_DRAFT_WS_ORIGIN) {
 	let origin;
 	try {
 		const url = new URL(process.env.SE05_DRAFT_WS_ORIGIN);
-		if (url.protocol !== 'wss:' || !url.hostname || url.hostname.includes('*') ||
+		const loopbackWs = process.env.SIBAMBO_LOCAL_DEMO === '1' && url.protocol === 'ws:' && ['127.0.0.1', 'localhost'].includes(url.hostname);
+		if ((url.protocol !== 'wss:' && !loopbackWs) || !url.hostname || url.hostname.includes('*') ||
 			url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
 			!([url.origin, url.origin + '/'].includes(process.env.SE05_DRAFT_WS_ORIGIN))) throw Error();
 		origin = url.origin;

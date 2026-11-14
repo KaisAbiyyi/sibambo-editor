@@ -17,6 +17,7 @@
   const selectedProject = $derived(session?.projectId ?? '');
   const isSignedIn = $derived(!!session?.csrf);
   const stateName = $derived(session?.phase ?? 'disconnected');
+  const isLocalDemo = $derived(!!session?.localDemo);
   const liveRequests = $derived((session?.requests ?? []).map(item => ({ ...item,
     status: (requestStatuses.find(status => status.id === item.id)?.status ?? item.status) as typeof item.status })));
 
@@ -25,7 +26,7 @@
     errorText = '';
     try {
       const result = await client.session(projectId || undefined);
-      if (seq === activeRead) session = result;
+      if (seq === activeRead) { session = result; if (result.localDemo && result.csrf && result.defaultProject && !projectId) projectId = result.defaultProject; }
     } catch (err) {
       if (seq === activeRead) failClosed(err, 'Gagal memuat sesi.');
     }
@@ -94,11 +95,17 @@
   <div class="mcp-status" role="status" aria-live="polite"><strong>Status: {stateName}</strong>
     {#if session?.paused}<span>Proyek dijeda — semua penulisan harus ditolak oleh server.</span>{/if}
   </div>
+  {#if isLocalDemo}<p class="mcp-warning" role="note" data-local-demo>MODE DEMO LOKAL · loopback saja · tanpa Auth0 · bukan konfigurasi remote/produksi</p>{/if}
   {#if errorText}<p role="alert" class="mcp-error">{errorText}</p>{/if}
   {#if !isSignedIn}
     {#if session?.configured}
+      {#if isLocalDemo}
+        <p>Mode demo lokal: satu klik membuat sesi owner di mesin ini. Tidak ada token disimpan di localStorage.</p>
+        <a class="mcp-action" href="/api/mcp/login">Masuk (demo lokal)</a>
+      {:else}
       <p>Masuk sebagai owner lewat penyedia identitas yang dikonfigurasi. Tidak ada token disimpan di localStorage.</p>
       <a class="mcp-action" href="/api/mcp/login">Masuk dengan OIDC</a>
+      {/if}
     {:else}
       <p class="mcp-warning">OIDC belum dikonfigurasi. Hubungi operator untuk mengatur nonproduction Auth0 terlebih dahulu.</p>
       <button type="button" onclick={() => void refresh()}>Periksa ulang konfigurasi</button>
