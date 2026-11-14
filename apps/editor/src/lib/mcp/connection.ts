@@ -22,6 +22,9 @@ export type McpSessionView = {
 export class McpScopeError extends Error {
   constructor() { super('Respons MCP untuk proyek yang berbeda ditolak. Tidak ada aksi owner yang dikirim.'); this.name = 'McpScopeError'; }
 }
+export class McpHttpError extends Error {
+  constructor(public readonly status: number, message: string) { super(message); this.name = 'McpHttpError'; }
+}
 const PROJECT_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 export function assertProjectScope(data: { projectId?: unknown }, expected: string): void {
   if (!PROJECT_ID.test(expected) || data.projectId !== expected) throw new McpScopeError();
@@ -44,10 +47,10 @@ export class McpConnection {
         body: options.method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined
       });
       if (!response.ok) {
-        if (response.status === 401) throw new Error('Sesi login habis. Masuk ulang.');
-        if (response.status === 403) throw new Error('Izin, asal permintaan, atau kode CSRF ditolak.');
-        if (response.status === 503) throw new Error('Layanan MCP belum tersedia / belum dikonfigurasi.');
-        throw new Error('Permintaan ditolak (HTTP ' + response.status + ').');
+        if (response.status === 401) throw new McpHttpError(401, 'Sesi login habis. Masuk ulang.');
+        if (response.status === 403) throw new McpHttpError(403, 'Izin, asal permintaan, atau kode CSRF ditolak.');
+        if (response.status === 503) throw new McpHttpError(503, 'Layanan MCP belum tersedia / belum dikonfigurasi.');
+        throw new McpHttpError(response.status, 'Permintaan ditolak (HTTP ' + response.status + ').');
       }
       const data: unknown = await response.json();
       if (!data || typeof data !== 'object') throw new Error('Respons MCP tidak valid.');
@@ -69,7 +72,15 @@ export class McpConnection {
    * Single-use WebSocket ticket for the SE-05 first message. Returned to the caller only: never
    * kept in a field, storage, URL or log by this class.
    */
-  async ticket(project: string, csrf: string): Promise<WebSocketTicket> {
+  async ticket(project: string, csrf: string, refreshSession = false): Promise<WebSocketTicket> {
+    if (refreshSession) {
+      const view = await this.request<McpSessionView>('session?project=' + encodeURIComponent(project));
+      if (view.phase === 'disconnected' || !view.csrf)
+        throw new McpHttpError(401, 'Sesi login habis. Masuk ulang.');
+      assertProjectScope(view, project);
+      if (view.contract !== 'se04-owner-mcp-v1') throw new McpScopeError();
+      csrf = view.csrf;
+    }
     const data = await this.request<Partial<WebSocketTicket>>('ticket', { method: 'POST', csrf, body: { projectId: project } });
     assertProjectScope(data, project);
     if (data.contract !== 'se04-owner-mcp-v1' || typeof data.ticket !== 'string' || !/^[A-Za-z0-9._~-]{32,512}$/.test(data.ticket) ||

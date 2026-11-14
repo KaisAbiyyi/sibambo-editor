@@ -1,4 +1,4 @@
-import { McpConnection } from './connection';
+import { McpConnection, McpHttpError, McpScopeError } from './connection';
 import type { DraftProposal, DraftState, DraftStatus } from './draft-protocol';
 
 export type DraftOptions = {
@@ -49,12 +49,12 @@ export class DraftClient {
     if (!this.suspended && this.state && this.status.role === 'primary' && document.visibilityState === 'visible' && !this.needsSnapshot)
       this.send({ type: 'ACK', revision: this.state.revision, draftSha256: this.state.draftSha256 });
   }
-  private async connect() {
+  private async connect(refreshSession = false) {
     const generation = ++this.generation;
     this.status.phase = this.attempts ? 'reconnecting' : 'connecting'; this.emit();
     try {
       const started = performance.now();
-      const ticket = await this.client.ticket(this.options.projectId, this.options.csrf);
+      const ticket = await this.client.ticket(this.options.projectId, this.options.csrf, refreshSession);
       let attachmentTicket: string | null = ticket.ticket;
       if (this.disposed || generation !== this.generation) return;
       this.status.ticketLatencyMs = performance.now() - started;
@@ -81,7 +81,12 @@ export class DraftClient {
         else this.reconnect();
       };
       socket.onerror = () => { if (isCurrent()) socket.close(); };
-    } catch { if (!this.disposed && generation === this.generation) this.reconnect(); }
+    } catch (error) {
+      if (this.disposed || generation !== this.generation) return;
+      if (error instanceof McpScopeError || error instanceof McpHttpError && [401, 403].includes(error.status))
+        this.fatal(error.message);
+      else this.reconnect();
+    }
   }
   private async pump(generation: number) {
     if (this.pumping) return;
@@ -138,12 +143,12 @@ export class DraftClient {
     if (++this.attempts > 6) { this.fatal('Batas percobaan sambungan tercapai. Pilih Sambungkan ulang; model terakhir dipertahankan.'); return; }
     this.emit();
     const delay = Math.min(8000, 500 * 2 ** (this.attempts - 1)) * (.5 + Math.random());
-    this.retry = window.setTimeout(() => { if (!this.disposed) void this.connect(); }, delay);
+    this.retry = window.setTimeout(() => { if (!this.disposed) void this.connect(true); }, delay);
   }
   reconnectNow() {
     window.clearTimeout(this.retry); window.clearInterval(this.heartbeat);
     this.attempts = 0; this.messageGeneration++; this.queue = []; this.queuedBytes = 0; this.needsSnapshot = true;
-    this.socket?.close(); void this.connect();
+    this.socket?.close(); void this.connect(true);
   }
   suspend() { this.suspended = true; this.messageGeneration++; this.visibility(); }
   resume() { this.suspended = false; this.visibility(); this.resync(); }

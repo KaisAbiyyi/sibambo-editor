@@ -154,6 +154,38 @@ test('bounded reconnect failure retains the last frame and explicit retry recove
   expect((await driver('status')).events).toBe(before.events);
 });
 
+test('an already mounted draft reconnects after owner session renewal using the new CSRF', async ({ page }) => {
+  await open(page);
+  await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
+  const before = await driver('status');
+  const cookie = seal({ sub: 'owner-1', accessToken: fixture.ownerToken, exp: Date.now() / 1000 + 300,
+    csrf: 'renewed-owner-csrf', issuer: fixture.issuer }, Buffer.from(fixture.sessionKey, 'base64url'));
+  await page.context().addCookies([{ name: '__Host-se04_session', value: cookie, domain: 'localhost', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }]);
+  const response = page.waitForResponse(value => value.url().endsWith('/api/mcp/ticket'));
+  await driver('close');
+  const ticket = await response;
+  expect(ticket.status()).toBe(200);
+  expect(ticket.request().headers()['x-se04-csrf']).toBe('renewed-owner-csrf');
+  await expect(status(page)).toContainText('live · Viewer utama');
+  await expect(status(page)).toHaveAttribute('data-revision', String(before.revision));
+  await expect(status(page)).toHaveAttribute('data-module-count', '1');
+  expect((await driver('status')).events).toBe(before.events);
+});
+
+test('expired owner login stops reconnect without discarding the last rendered draft', async ({ page }) => {
+  await open(page);
+  await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
+  const before = await driver('status');
+  await page.context().clearCookies();
+  let tickets = 0;
+  page.on('request', request => { if (request.url().endsWith('/api/mcp/ticket')) tickets++; });
+  await driver('close');
+  await expect(status(page)).toContainText('Masuk ulang');
+  await expect(status(page)).toHaveAttribute('data-revision', String(before.revision));
+  await expect(status(page)).toHaveAttribute('data-module-count', '1');
+  expect(tickets).toBe(0);
+});
+
 test('changed server epoch is a visible stop that preserves the previous canonical model', async ({ page }) => {
   await open(page);
   await expect.poll(async () => (await driver('status')).acked).toBe((await driver('status')).revision);
