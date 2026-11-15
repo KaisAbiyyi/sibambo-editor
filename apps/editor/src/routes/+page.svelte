@@ -2,6 +2,8 @@
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import ModelingPanel from '$lib/authoring/ModelingPanel.svelte';
 	import McpPanel from '$lib/mcp/McpPanel.svelte';
+	import AgentPanel from '$lib/agent/AgentPanel.svelte';
+	import { AgentHost, type AgentHostState } from '$lib/agent/agent-host';
 	import { DraftClient } from '$lib/mcp/draft-client';
 	import { DraftScene } from '$lib/mcp/draft-scene';
 	import type { DraftState, DraftStatus } from '$lib/mcp/draft-protocol';
@@ -110,6 +112,22 @@
 	let provenanceInput: HTMLInputElement;
 	let provenanceUpgradeInput: HTMLInputElement;
 	let busy = $state(false);
+	// SIB-MCP-MODELING-001 C15: agent calls run against the open authoring document through the
+	// same client, history and acceptAuthoringResult path as owner commands.
+	let agentOpen = $state(false);
+	let agentAvailable = $state(false);
+	let agentHostState = $state.raw<AgentHostState | null>(null);
+	const agentHost = new AgentHost<AuthoringClient>({
+		getClient: () => authoringClient,
+		getCheckpoint: () => authoringCheckpoint,
+		accept: (client, acknowledged, token) => acceptAuthoringResult(client, acknowledged, token as number),
+		isOwnerBusy: () => busy || saveBusy || authoringOperationBusy || authoringRecovery.phase !== 'ready' || !!pendingTransition,
+		getModeling: () => ({ path: modelingState.path, selection: modelingState.selection }),
+		getMode: () => mode,
+		captureGeneration: () => generation,
+		onBusy: (value) => { authoringOperationBusy = value; },
+		onChange: (state) => { agentHostState = state; }
+	});
 	let clientReady = $state(false);
 	let loadStatus = $state('Choose a BOMC 1.2 model file.');
 	let ready = $state(false);
@@ -1508,6 +1526,7 @@
 	onDestroy(() => {
 		cancelPendingDraft?.(); pendingDraftClient?.dispose(); draftClient?.dispose();
 		mcpOpen = false;
+		agentOpen = false; agentHost.dispose();
 		modeling.dispose();
 			generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
 			unsubscribeAuthoringRecovery?.(); unsubscribeAuthoringRecovery = null;
@@ -1613,6 +1632,7 @@
 			<summary>Extensions</summary>
 			<div class="menu-popover">
 				<button type="button" onclick={() => { mcpOpen = true; }} aria-haspopup="dialog" aria-expanded={mcpOpen}>MCP Extension…</button>
+				{#if agentAvailable}<button type="button" onclick={() => { agentOpen = true; }} aria-haspopup="dialog" aria-expanded={agentOpen}>Agent…</button>{/if}
 			<button type="button" onclick={(event) => openBuilderPreviewPicker(event.currentTarget)} disabled={busy || saveBusy || authoringOperationBusy || !clientReady || !!pendingTransition}>Preview Builder Artifact…</button>
 				<span class="menu-status">Local BOMC 1.2 handoff. Builder owns construction; Editor provides read-only preview and inspection.</span>
 			</div>
@@ -1622,6 +1642,9 @@
 	<McpPanel open={mcpOpen} {requestStatuses} onConnect={(owner) => requestTransition({ kind: 'draft', owner })}
 		onLogout={() => { draftClient?.dispose(); draftClient = null; if (draftStatus) draftStatus = { ...draftStatus, phase: 'paused', error: 'Sesi owner ditutup. Model terakhir tetap ada di tab ini.' }; }}
 		onClose={() => { mcpOpen = false; }} />
+	<AgentPanel open={agentOpen} host={agentHost} hostState={agentHostState ?? agentHost.state}
+		revision={mode === 'authoring' ? authoringCheckpoint?.snapshot.revision ?? null : null}
+		onAvailable={(value) => { agentAvailable = value; }} onClose={() => { agentOpen = false; }} />
 	{#if mode === 'builder-draft' && draftStatus}
 		<section class="draft-live-status" aria-label="Draft live" data-project-id={draftState?.projectId} data-revision={draftStatus.revision} data-rendered-revision={draftStatus.renderedRevision} data-module-count={draftState?.modules.length ?? 0}>
 			<p role="status">Draft live · {draftStatus.phase} · {draftStatus.role === 'primary' ? 'Viewer utama' : 'Pengikut baca-saja'} · revisi {draftStatus.revision} / tergambar {draftStatus.renderedRevision} · {draftState?.modules.length ?? 0} modul</p>
