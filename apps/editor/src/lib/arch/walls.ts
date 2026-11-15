@@ -25,7 +25,7 @@
  * Conventions: a segment runs a→b with unit direction `d` and left normal `n = (−d.y, d.x)`. `yL ≥ 0 ≥ yR` are
  * the lateral offsets of the left/right body lines (side=center: ±t/2, left: t/0, right: 0/−t).
  */
-import { budgetExceeded, invalidGeometry } from './errors.js';
+import { ArchError, budgetExceeded, invalidGeometry } from './errors.js';
 import { canonicalRing, signedArea, type Kernel, type Ring, type Solid, type Vec2 } from './kernel.js';
 
 export const JOIN_TOL = 0.001;
@@ -45,6 +45,11 @@ const BRIDGE_SIN = 1e-4;
 const BRIDGE_DEPTH = 1e-4;
 /** Lateral inset of the bridge strip from the shared lateral range (m): no coincident faces with the bodies. */
 const BRIDGE_INSET = 1e-5;
+/**
+ * Shared lateral width (m) below which two straight-continuation bodies are NOT bonded. From schema-valid input the
+ * overlap is exactly 0 (opposite sides) or at least min(t)/2 ≥ 0.005, so this threshold is never ambiguous.
+ */
+const STAGGER_MIN_OVERLAP = 2 * BRIDGE_INSET + 1e-6;
 const COORD = 1e9;
 const snap = (v: number) => Math.round(v * COORD) / COORD + 0;
 const snapPoint = (p: Vec2): Vec2 => [snap(p[0]), snap(p[1])];
@@ -122,6 +127,35 @@ export type WallNode = {
 export type JunctionType = 'free-end' | 'L' | 'T' | 'X' | 'Y' | 'multi';
 export type Junction = { at: Vec2; type: JunctionType; with: string[] };
 
+/**
+ * Two collinear walls (same node, opposite outward directions) whose bodies lie on opposite sides of the shared line:
+ * they overlap in height but share no lateral width, so the solids touch only along an edge line and do not form one
+ * bonded component. Reported explicitly; see `WallNetworkOptions.staggered`.
+ */
+export type StaggeredContinuation = {
+	at: Vec2;
+	/** Element ids, ordered by segment tag. */
+	elements: [string, string];
+	tags: [number, number];
+	/** Shared lateral width in metres (0 when the bodies are on opposite sides). */
+	overlap: number;
+};
+
+export type WallNetworkOptions = {
+	/**
+	 * `'hardened'` (default): the solid is quads ∪ node fan ∪ butt-ended bodies ∪ bridges (see the header). `'plan-literal'`:
+	 * ONLY the quads and node fan exactly as C7.4–5 are written. It exists as the reference for the deviation's negative
+	 * tests (it leaves holes at acute/mixed-thickness junctions); production callers must not use it.
+	 */
+	construction?: 'hardened' | 'plan-literal';
+	/**
+	 * What to do with a staggered continuation. `'report'` (default, the WP4 behaviour): build the geometry as authored
+	 * and list the pair in `WallNetwork.staggered`. `'reject'`: fail with `INVALID_GEOMETRY WALL_STAGGERED_CONTINUATION`
+	 * before any solid is built. Joining would have to invent material, so there is deliberately no `'join'`.
+	 */
+	staggered?: 'report' | 'reject';
+};
+
 export type WallNetwork = {
 	/** Union of all quads and node pieces; `null` when there are no walls. The caller releases it. */
 	solid: Solid | null;
@@ -129,6 +163,8 @@ export type WallNetwork = {
 	nodes: WallNode[];
 	footprintRings: Vec2[][];
 	junctions: Map<string, Junction[]>;
+	/** Sorted by node point, then tags. Empty when every straight continuation is bonded. */
+	staggered: StaggeredContinuation[];
 };
 
 type Raw = { elementId: string; index: number; a: Vec2; b: Vec2; offset: number; el: WallElement };
@@ -299,12 +335,12 @@ function isSimpleQuad(q: readonly Vec2[]): boolean {
 	return !segmentsProperlyIntersect(q[0]!, q[1]!, q[2]!, q[3]!) && !segmentsProperlyIntersect(q[1]!, q[2]!, q[3]!, q[0]!);
 }
 
-export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]): WallNetwork {
+export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[], options: WallNetworkOptions = {}): WallNetwork {
 	// ── 1–2 ─────────────────────────────────────────────────────────────────────────────────────
 	const raws: Raw[] = [];
 	for (const el of [...walls].sort((p, q) => cmp(p.elementId, q.elementId))) raws.push(...authoredSegments(el));
 	if (raws.length > MAX_WALL_SEGMENTS) throw budgetExceeded('WALL_SEGMENTS');
-	if (raws.length === 0) return { solid: null, segments: [], nodes: [], footprintRings: [], junctions: new Map() };
+	if (raws.length === 0) return { solid: null, segments: [], nodes: [], footprintRings: [], junctions: new Map(), staggered: [] };
 	clusterEndpoints(raws);
 	checkCollinearOverlap(raws);
 	splitToFixpoint(raws);
@@ -348,6 +384,7 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 	const nodes: WallNode[] = [];
 	type Extra = { ring: Vec2[]; tag: number; z0: number; z1: number };
 	const extras: Extra[] = [];
+	const staggered: StaggeredContinuation[] = [];
 	const orderedNodes = [...byNode.values()].sort((p, q) => p.point[0] - q.point[0] || p.point[1] - q.point[1]);
 	for (const node of orderedNodes) {
 		const items = node.items.sort((p, q) => (Math.abs(p.angle - q.angle) > 1e-12 ? p.angle - q.angle : p.seg.tag - q.seg.tag));
@@ -402,9 +439,20 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 				for (let j = i + 1; j < degree; j++) {
 					const A = items[i]!, B = items[j]!;
 					if (!(Math.abs(cross(A.u, B.u)) <= BRIDGE_SIN && dot(A.u, B.u) < 0)) continue;
-					const y0 = Math.max(A.ro, -B.lo) + BRIDGE_INSET, y1 = Math.min(A.lo, -B.ro) - BRIDGE_INSET;
+					const overlap = Math.min(A.lo, -B.ro) - Math.max(A.ro, -B.lo);
 					const z0 = Math.max(A.seg.z0, B.seg.z0), z1 = Math.min(A.seg.z0 + A.seg.h, B.seg.z0 + B.seg.h);
-					if (!(y1 - y0 > 1e-6) || !(z1 - z0 > 1e-6)) continue;
+					if (!(z1 - z0 > 1e-6)) continue; // no shared height: the bodies do not touch at all, nothing to bond or report
+					if (overlap < STAGGER_MIN_OVERLAP) {
+						const [first, second] = A.seg.tag <= B.seg.tag ? [A, B] : [B, A];
+						staggered.push({
+							at: node.point,
+							elements: [first.seg.elementId, second.seg.elementId],
+							tags: [first.seg.tag, second.seg.tag],
+							overlap: Math.max(0, overlap)
+						});
+						continue;
+					}
+					const y0 = Math.max(A.ro, -B.lo) + BRIDGE_INSET, y1 = Math.min(A.lo, -B.ro) - BRIDGE_INSET;
 					const at = (y: number, depth: number): Vec2 => snapPoint(add(add(node.point, scale(A.nl, y)), scale(A.u, depth)));
 					const ring = [at(y0, -BRIDGE_DEPTH), at(y1, -BRIDGE_DEPTH), at(y1, BRIDGE_DEPTH), at(y0, BRIDGE_DEPTH)];
 					bridges.push(ring);
@@ -438,6 +486,16 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 		seg.body = [fa.footR, fb.footL, fb.footR, fa.footL];
 	}
 
+	staggered.sort((p, q) => p.at[0] - q.at[0] || p.at[1] - q.at[1] || p.tags[0] - q.tags[0] || p.tags[1] - q.tags[1]);
+	if (options.staggered === 'reject' && staggered.length > 0) {
+		const first = staggered[0]!;
+		throw new ArchError(
+			'INVALID_GEOMETRY',
+			{ reason: 'WALL_STAGGERED_CONTINUATION', elementId: first.elements[0], at: first.at },
+			`Walls '${first.elements[0]}' and '${first.elements[1]}' continue in a straight line but lie on opposite sides of the path, so they only touch along an edge. Put both on the same side, or add a connecting wall.`
+		);
+	}
+
 	// ── 4 ───────────────────────────────────────────────────────────────────────────────────────
 	// A corner pair whose end quad folds over itself means the segment is too short for its neighbours' miters.
 	for (const seg of segments) {
@@ -451,15 +509,19 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 	type Part = { ring: Ring; z0: number; z1: number; tag: number; key: string };
 	const parts: Part[] = [];
 	const keyFor = (ring: Ring, z0: number, z1: number) => `${canonicalRing(ring, true).map((p) => `${p[0]},${p[1]}`).join(';')}@${z0},${z1}`;
+	const hardened = options.construction !== 'plan-literal';
 	for (const seg of segments) {
 		parts.push({ ring: seg.quad, z0: seg.z0, z1: seg.z0 + seg.h, tag: seg.tag, key: keyFor(seg.quad, seg.z0, seg.z0 + seg.h) });
-		parts.push({ ring: seg.body, z0: seg.z0, z1: seg.z0 + seg.h, tag: seg.tag, key: keyFor(seg.body, seg.z0, seg.z0 + seg.h) });
+		if (hardened) parts.push({ ring: seg.body, z0: seg.z0, z1: seg.z0 + seg.h, tag: seg.tag, key: keyFor(seg.body, seg.z0, seg.z0 + seg.h) });
 	}
-	for (const e of extras) parts.push({ ring: e.ring, z0: e.z0, z1: e.z1, tag: e.tag, key: keyFor(e.ring, e.z0, e.z1) });
+	// the node fan is part of the plan; the bridge strips are not
+	const bridgeRings = new Set(nodes.flatMap((n) => n.bridges));
+	for (const e of extras) if (hardened || !bridgeRings.has(e.ring)) parts.push({ ring: e.ring, z0: e.z0, z1: e.z1, tag: e.tag, key: keyFor(e.ring, e.z0, e.z1) });
 	parts.sort((p, q) => cmp(p.key, q.key));
-	const prisms = parts.map((part) => kernel.prism(part.ring, part.z0, part.z1, part.tag));
+	const prisms: Solid[] = [];
 	let solid: Solid;
 	try {
+		for (const part of parts) prisms.push(kernel.prism(part.ring, part.z0, part.z1, part.tag));
 		solid = kernel.union(prisms);
 	} finally {
 		kernel.release(...prisms);
@@ -468,7 +530,7 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 	// ── 6 ───────────────────────────────────────────────────────────────────────────────────────
 	let footprintRings: Vec2[][];
 	try {
-		footprintRings = kernel.union2d([...segments.flatMap((s) => [s.quad, s.body]), ...extras.map((e) => e.ring)]);
+		footprintRings = kernel.union2d([...segments.flatMap((s) => (hardened ? [s.quad, s.body] : [s.quad])), ...extras.filter((e) => hardened || !bridgeRings.has(e.ring)).map((e) => e.ring)]);
 	} catch (error) {
 		kernel.release(solid);
 		throw error;
@@ -504,5 +566,5 @@ export function buildWallNetwork(kernel: Kernel, walls: readonly WallElement[]):
 			junctions.set(elementId, list);
 		}
 	}
-	return { solid, segments, nodes, footprintRings, junctions };
+	return { solid, segments, nodes, footprintRings, junctions, staggered };
 }

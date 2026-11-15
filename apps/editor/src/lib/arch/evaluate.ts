@@ -14,7 +14,7 @@ import { ArchError } from './errors.js';
 import { meshVolume, sharedKernel, type Kernel, type MeshExport, type Solid, type SolidStats, type Vec2 } from './kernel.js';
 import { canonicalJson, validateArchModule, type ArchModule } from './schema.js';
 import { sha256Hex } from './sha256.js';
-import { buildWallNetwork, type Junction, type WallElement, type WallSegment } from './walls.js';
+import { buildWallNetwork, type Junction, type StaggeredContinuation, type WallElement, type WallNetworkOptions, type WallSegment } from './walls.js';
 
 export const DEFAULT_MATERIAL = 'sib-default';
 const CACHE_SIZE = 32;
@@ -45,6 +45,10 @@ export type EvaluatedOpening = {
 	authoredEnd: number;
 };
 
+export type EvaluationDiagnostic = { code: 'WALL_STAGGERED_CONTINUATION'; at: Vec2; elements: [string, string]; overlap: number };
+
+export type EvaluateOptions = { cache?: boolean } & WallNetworkOptions;
+
 export type EvaluatedModule = {
 	moduleId: string;
 	/** SHA-256 of the canonical module JSON. */
@@ -57,6 +61,8 @@ export type EvaluatedModule = {
 	junctions: Record<string, Junction[]>;
 	openings: EvaluatedOpening[];
 	spaces: SpaceResult[];
+	/** Explicit, non-blocking observations about the authored geometry (never silent behaviour). */
+	diagnostics: EvaluationDiagnostic[];
 	bounds: { min: [number, number, number]; max: [number, number, number] } | null;
 	stats: { elements: number; segments: number; nodes: number; parts: number; triangles: number; wallVolume: number };
 };
@@ -69,33 +75,35 @@ function elementsOf<T>(module: ArchModule, kind: string): T[] {
 	return module.elements.filter((e) => e.kind === kind) as unknown as T[];
 }
 
-export function evaluateModule(module: ArchModule, kernel: Kernel = sharedKernel, options: { cache?: boolean } = {}): EvaluatedModule {
+export function evaluateModule(module: ArchModule, kernel: Kernel = sharedKernel, options: EvaluateOptions = {}): EvaluatedModule {
 	validateArchModule(module);
 	const hash = sha256Hex(canonicalJson(module));
+	const policy = options.staggered ?? 'report';
+	const cacheKey = `${hash}:${policy}`; // the policy changes the outcome, so it is part of the key
 	const useCache = options.cache !== false;
 	const cache = caches.get(kernel) ?? new Map<string, EvaluatedModule>();
 	caches.set(kernel, cache);
-	const hit = useCache ? cache.get(hash) : undefined;
+	const hit = useCache ? cache.get(cacheKey) : undefined;
 	if (hit) {
-		cache.delete(hash);
-		cache.set(hash, hit);
+		cache.delete(cacheKey);
+		cache.set(cacheKey, hit);
 		return hit;
 	}
 	let result: EvaluatedModule;
 	try {
-		result = evaluate(module, hash, kernel);
+		result = evaluate(module, hash, kernel, options);
 	} catch (error) {
 		if (error instanceof ArchError) throw error.withModule(module.moduleId);
 		throw error;
 	}
 	if (useCache) {
-		cache.set(hash, result);
+		cache.set(cacheKey, result);
 		while (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value as string);
 	}
 	return result;
 }
 
-function evaluate(module: ArchModule, hash: string, kernel: Kernel): EvaluatedModule {
+function evaluate(module: ArchModule, hash: string, kernel: Kernel, options: EvaluateOptions): EvaluatedModule {
 	const walls = elementsOf<WallElement>(module, 'wall');
 	const slabs = elementsOf<SlabElement>(module, 'slab');
 	const openings = elementsOf<OpeningElement>(module, 'opening');
@@ -109,7 +117,7 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel): EvaluatedMo
 		return value;
 	};
 	try {
-		const network = buildWallNetwork(kernel, walls);
+		const network = buildWallNetwork(kernel, walls, { staggered: options.staggered });
 		keep(network.solid);
 		const tags: TagInfo[] = network.segments.map((s) => ({ elementId: s.elementId, role: 'wall', materialId: materialOf(wallById.get(s.elementId)) }));
 		const newTag = (info: TagInfo) => tags.push(info) - 1;
@@ -150,8 +158,9 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel): EvaluatedMo
 				if (!insertTags.has(kind)) insertTags.set(kind, newTag({ elementId: placement.opening.elementId, role: kind, materialId: materials[kind] }));
 				return insertTags.get(kind)!;
 			};
-			for (const insert of openingInserts(kernel, placement, tagFor)) {
-				keep(insert.solid);
+			const inserts = openingInserts(kernel, placement, tagFor);
+			inserts.forEach((insert) => keep(insert.solid)); // hold ALL before exporting any: a later failure must not strand the rest
+			for (const insert of inserts) {
 				pushPart(`${placement.opening.elementId}/${insert.kind}`, insert.kind, placement.opening.elementId, insert.solid);
 			}
 		}
@@ -187,6 +196,7 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel): EvaluatedMo
 				x0: p.x0, x1: p.x1, zBottom: p.zBottom, zTop: p.zTop, authoredStart: p.authoredStart, authoredEnd: p.authoredEnd
 			})),
 			spaces: spaceResults,
+			diagnostics: network.staggered.map((s: StaggeredContinuation) => ({ code: 'WALL_STAGGERED_CONTINUATION' as const, at: s.at, elements: s.elements, overlap: s.overlap })),
 			bounds: min && max ? { min, max } : null,
 			stats: {
 				elements: module.elements.length,

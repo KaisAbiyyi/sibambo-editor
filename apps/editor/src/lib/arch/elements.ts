@@ -190,31 +190,33 @@ export function openingInserts(kernel: Kernel, placement: OpeningPlacement, tagF
 	const box = (a0: number, a1: number, y0: number, y1: number, z0: number, z1: number, kind: InsertKind) =>
 		kernel.boxLocal(s.a, s.d, s.n, a0, a1, y0, y1, z0, z1, tagFor(kind));
 	const parts: InsertPart[] = [];
-	const frameBoxes = [
-		box(x0, x0 + fw, s.yR, s.yL, zBottom, zTop, 'frame'), // left jamb
-		box(x1 - fw, x1, s.yR, s.yL, zBottom, zTop, 'frame'), // right jamb
-		box(x0, x1, s.yR, s.yL, zTop - fw, zTop, 'frame') // head
-	];
-	if (opening.openingType === 'window') frameBoxes.push(box(x0, x1, s.yR, s.yL, zBottom, zBottom + fw, 'frame')); // sill
+	const frameBoxes: Solid[] = [];
 	try {
+		frameBoxes.push(box(x0, x0 + fw, s.yR, s.yL, zBottom, zTop, 'frame')); // left jamb
+		frameBoxes.push(box(x1 - fw, x1, s.yR, s.yL, zBottom, zTop, 'frame')); // right jamb
+		frameBoxes.push(box(x0, x1, s.yR, s.yL, zTop - fw, zTop, 'frame')); // head
+		if (opening.openingType === 'window') frameBoxes.push(box(x0, x1, s.yR, s.yL, zBottom, zBottom + fw, 'frame')); // sill
 		parts.push({ kind: 'frame', solid: kernel.union(frameBoxes), materialId: opening.materialId ?? 'sib-frame' });
+		if (opening.openingType === 'window') {
+			const centre = (s.yL + s.yR) / 2;
+			const depth = Math.min(0.008, s.t / 3);
+			parts.push({ kind: 'glazing', solid: box(x0 + fw, x1 - fw, centre - depth / 2, centre + depth / 2, zBottom + fw, zTop - fw, 'glazing'), materialId: 'sib-glass' });
+		} else {
+			const swing = opening.swing ?? { hinge: 'start', side: 'left' };
+			const thickness = Math.min(0.035, 0.75 * fw);
+			const length = opening.width - 2 * fw;
+			const hingeX = swing.hinge === 'start' ? x0 + fw : x1 - fw;
+			const [lx0, lx1] = swing.hinge === 'start' ? [hingeX, hingeX + thickness] : [hingeX - thickness, hingeX];
+			const [ly0, ly1] = swing.side === 'left' ? [s.yL, s.yL + length] : [s.yR - length, s.yR];
+			parts.push({ kind: 'leaf', solid: box(lx0, lx1, ly0, ly1, zBottom, zTop - fw, 'leaf'), materialId: 'sib-door' });
+		}
+		return parts;
+	} catch (error) {
+		kernel.release(...parts.map((part) => part.solid)); // nothing is returned on failure, so nothing may stay alive
+		throw error;
 	} finally {
 		kernel.release(...frameBoxes);
 	}
-	if (opening.openingType === 'window') {
-		const centre = (s.yL + s.yR) / 2;
-		const depth = Math.min(0.008, s.t / 3);
-		parts.push({ kind: 'glazing', solid: box(x0 + fw, x1 - fw, centre - depth / 2, centre + depth / 2, zBottom + fw, zTop - fw, 'glazing'), materialId: 'sib-glass' });
-	} else {
-		const swing = opening.swing ?? { hinge: 'start', side: 'left' };
-		const thickness = Math.min(0.035, 0.75 * fw);
-		const length = opening.width - 2 * fw;
-		const hingeX = swing.hinge === 'start' ? x0 + fw : x1 - fw;
-		const [lx0, lx1] = swing.hinge === 'start' ? [hingeX, hingeX + thickness] : [hingeX - thickness, hingeX];
-		const [ly0, ly1] = swing.side === 'left' ? [s.yL, s.yL + length] : [s.yR - length, s.yR];
-		parts.push({ kind: 'leaf', solid: box(lx0, lx1, ly0, ly1, zBottom, zTop - fw, 'leaf'), materialId: 'sib-door' });
-	}
-	return parts;
 }
 
 // ── spaces ────────────────────────────────────────────────────────────────────────────────────────
@@ -235,7 +237,7 @@ export type SpaceResult = {
 	bbox: { minX: number; minY: number; maxX: number; maxY: number } | null;
 };
 
-function windingNumber(p: Vec2, ring: readonly Vec2[]): number {
+export function windingNumber(p: Vec2, ring: readonly Vec2[]): number {
 	let wn = 0;
 	for (let i = 0; i < ring.length; i++) {
 		const a = ring[i]!, b = ring[(i + 1) % ring.length]!;
@@ -247,7 +249,7 @@ function windingNumber(p: Vec2, ring: readonly Vec2[]): number {
 	return wn;
 }
 
-function distanceToRings(p: Vec2, rings: readonly (readonly Vec2[])[]): number {
+export function distanceToRings(p: Vec2, rings: readonly (readonly Vec2[])[]): number {
 	let best = Infinity;
 	for (const ring of rings)
 		for (let i = 0; i < ring.length; i++) {
