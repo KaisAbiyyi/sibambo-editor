@@ -1,0 +1,22 @@
+{
+  "note": "Mandatory WP5 gates, taken unchanged from master v2.3 (Golden geometry G1-G10 CP5 parts; Kernel/topology/bake T-T*, T-B*) and restated by master v2.4 A6. Owner disposition D2: these targets are NOT relaxed. unit/arch/cp5-gates-manifest.test.ts pins every number below to the v2.3 text and to v2.4; WP5 must turn each entry into a passing test on the RAW output of the shipped WP4 construction. This file is a contract, not a result: no entry has been implemented or run in WP4.",
+  "status": "REQUIRED_NOT_YET_IMPLEMENTED",
+  "gates": [
+    { "id": "G1-CP5", "required": true, "faces": 10, "exteriorFaces": 4, "interiorFaces": 4, "topRingFaces": 1, "topRingHoles": 1, "bottomFaces": 1, "hardEdges": 24, "minDihedralDegrees": 20 },
+    { "id": "T-T2", "required": true, "fixture": "G1", "topFaceLoopVertices": 8 },
+    { "id": "G2-CP5", "required": true, "bakedIdenticalTo": "G1", "compared": ["positions", "faceRings", "triangles", "normals", "materials"], "idsExcluded": true },
+    { "id": "G3-CP5", "required": true, "interiorFacePlanes": ["x=0", "x=4", "y=0", "y=3"] },
+    { "id": "G4-CP5", "required": true, "faces": 14, "hardEdges": 36 },
+    { "id": "G8-CP5", "required": true, "revealFaceRole": "reveal:<openingId>", "openings": ["door", "win"] },
+    { "id": "T-T1", "required": true },
+    { "id": "T-T3", "required": true },
+    { "id": "T-T4", "required": true },
+    { "id": "T-B1", "required": true },
+    { "id": "T-B2", "required": true },
+    { "id": "T-B3", "required": true },
+    { "id": "T-B4", "required": true },
+    { "id": "T-B5", "required": true },
+    { "id": "T-B6", "required": true },
+    { "id": "V24-RAW-ARTIFACTS", "required": true, "rule": "Collinear/interior vertices, degenerate triangles and sub-1e-6 m2 fragments of the shipped WP4 construction must not survive as faces or edges, and no target above may be adjusted to accommodate them (v2.4 A6)." }
+  ]
+}
