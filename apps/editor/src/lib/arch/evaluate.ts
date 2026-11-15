@@ -10,6 +10,7 @@
  * immutable by callers.
  */
 import { buildSlab, buildSpaces, openingCutter, openingInserts, placeOpenings, type OpeningElement, type SlabElement, type SpaceElement, type SpaceResult } from './elements.js';
+import { centerlineEnclosure } from './connectivity.js';
 import { ArchError } from './errors.js';
 import { meshVolume, sharedKernel, type Kernel, type MeshExport, type Solid, type SolidStats, type Vec2 } from './kernel.js';
 import { canonicalJson, validateArchModule, type ArchModule } from './schema.js';
@@ -47,7 +48,22 @@ export type EvaluatedOpening = {
 
 export type EvaluationDiagnostic = { code: 'WALL_STAGGERED_CONTINUATION'; at: Vec2; elements: [string, string]; overlap: number };
 
-export type EvaluateOptions = { cache?: boolean } & WallNetworkOptions;
+/** Owner disposition D3: an agent WRITE rejects staggered continuations, a READ/evaluation only reports them. */
+export type EvaluationPurpose = 'read' | 'write';
+
+/**
+ * `purpose` selects the staggered-continuation policy (`write` → reject, `read` → report; default `read`, because reads
+ * must describe documents that already exist). An explicit `staggered` overrides it. Nothing is ever auto-joined.
+ */
+export type EvaluateOptions = { cache?: boolean; purpose?: EvaluationPurpose } & WallNetworkOptions;
+
+/**
+ * A room as the evaluator reports it. `enclosed` is SOLID closure (the 3D wall bodies, owner disposition D1-B: its meaning
+ * is unchanged); `authoredEnclosed` is CENTRELINE connectivity (wall paths joined with JOIN_TOL), `null` only for a seed that
+ * lies on a centreline. They differ exactly where walls overlap without being joined (G9) or are joined without closing
+ * the solid. Neither value alters a mesh.
+ */
+export type EvaluatedSpace = SpaceResult & { authoredEnclosed: boolean | null };
 
 export type EvaluatedModule = {
 	moduleId: string;
@@ -60,7 +76,7 @@ export type EvaluatedModule = {
 	footprintRings: Vec2[][];
 	junctions: Record<string, Junction[]>;
 	openings: EvaluatedOpening[];
-	spaces: SpaceResult[];
+	spaces: EvaluatedSpace[];
 	/** Explicit, non-blocking observations about the authored geometry (never silent behaviour). */
 	diagnostics: EvaluationDiagnostic[];
 	bounds: { min: [number, number, number]; max: [number, number, number] } | null;
@@ -78,7 +94,7 @@ function elementsOf<T>(module: ArchModule, kind: string): T[] {
 export function evaluateModule(module: ArchModule, kernel: Kernel = sharedKernel, options: EvaluateOptions = {}): EvaluatedModule {
 	validateArchModule(module);
 	const hash = sha256Hex(canonicalJson(module));
-	const policy = options.staggered ?? 'report';
+	const policy = options.staggered ?? (options.purpose === 'write' ? 'reject' : 'report');
 	const cacheKey = `${hash}:${policy}`; // the policy changes the outcome, so it is part of the key
 	const useCache = options.cache !== false;
 	const cache = caches.get(kernel) ?? new Map<string, EvaluatedModule>();
@@ -91,7 +107,7 @@ export function evaluateModule(module: ArchModule, kernel: Kernel = sharedKernel
 	}
 	let result: EvaluatedModule;
 	try {
-		result = evaluate(module, hash, kernel, options);
+		result = evaluate(module, hash, kernel, { ...options, staggered: policy });
 	} catch (error) {
 		if (error instanceof ArchError) throw error.withModule(module.moduleId);
 		throw error;
@@ -166,7 +182,9 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel, options: Eva
 		}
 		parts.sort((p, q) => cmp(p.partId, q.partId));
 
-		const spaceResults = buildSpaces(kernel, network.footprintRings, spaces);
+		const solidSpaces = buildSpaces(kernel, network.footprintRings, spaces);
+		const authored = new Map(centerlineEnclosure(kernel, network.segments, spaces).map((r) => [r.elementId, r.centerlineEnclosed]));
+		const spaceResults: EvaluatedSpace[] = solidSpaces.map((space) => ({ ...space, authoredEnclosed: authored.get(space.elementId) ?? null }));
 
 		let min: [number, number, number] | null = null;
 		let max: [number, number, number] | null = null;

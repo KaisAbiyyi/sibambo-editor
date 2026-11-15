@@ -54,7 +54,8 @@ jobs:
             ./apps/editor/unit/arch/walls-deviation.test.ts \
             ./apps/editor/unit/arch/elements.test.ts \
             ./apps/editor/unit/arch/golden-cp4.test.ts \
-            ./apps/editor/unit/arch/connectivity.test.ts
+            ./apps/editor/unit/arch/connectivity.test.ts \
+            ./apps/editor/unit/arch/cp5-gates-manifest.test.ts
       - name: Production build
         if: matrix.bun == '1.4.4'
         run: bun run build

@@ -56,6 +56,7 @@ describe('G3 side:"right" CCW inner path 4×3 + seed (2,1.5)', () => {
 		expect(e.spaces).toHaveLength(1);
 		expect(e.spaces[0]!.area).toBeCloseTo(12, 6);
 		expect(e.spaces[0]!.enclosed).toBe(true);
+		expect(e.spaces[0]!.authoredEnclosed).toBe(true);
 		expect(e.bounds!.min[0]).toBeCloseTo(-0.15, 6);
 		expect(e.bounds!.min[1]).toBeCloseTo(-0.15, 6);
 		expect(e.bounds!.max[0]).toBeCloseTo(4.15, 6);
@@ -75,6 +76,7 @@ describe('G4 G1 + partition (2,0)→(2,3) + seeds (1,1.5),(3,1.5)', () => {
 			expect(s.area.toFixed(2)).toBe('5.27');
 		}
 		expect(junctionTypes(e)).toEqual({ L: 4, T: 2 });
+		expect(e.spaces.map((s) => [s.enclosed, s.authoredEnclosed])).toEqual([[true, true], [true, true]]);
 		expect(walls(e).stats).toMatchObject({ status: 'NoError', components: 1 });
 	});
 });
@@ -83,7 +85,7 @@ describe('G5 G1 + (0,1.5)→(4,1.5) and (2,0)→(2,3) + four seeds', () => {
 	test('4 enclosed spaces; one X, four T', () => {
 		const e = evaluate(g5());
 		expect(e.spaces).toHaveLength(4);
-		expect(e.spaces.every((s) => s.enclosed)).toBe(true);
+		expect(e.spaces.every((s) => s.enclosed && s.authoredEnclosed === true)).toBe(true);
 		expect(junctionTypes(e)).toEqual({ L: 4, T: 4, X: 1 });
 	});
 });
@@ -124,16 +126,35 @@ describe('G8 G3 + door (1.0, 0.9×2.1) + window (2.5, 1.0×1.2, sill 0.9) on the
 	});
 });
 
-describe('G9 north wall shortened 0.02 at its east end', () => {
-	test('the write commits (evaluation succeeds) and the near miss is NOT auto-snapped', () => {
+describe('G9 north wall shortened 0.02 at its east end (AMENDED by master v2.4, owner disposition D1-B)', () => {
+	// v2.3 wrote "space enclosed:false". The owner chose D1-B: `enclosed` keeps meaning SOLID closure and
+	// `authoredEnclosed` reports CENTRELINE connectivity. G9 now reads: write commits; `authoredEnclosed:false`;
+	// `enclosed:true` (the 0.15 m bodies still overlap); the mesh is not altered; `WALL_GAP` is CP8.
+	test('the write commits and the near miss is NOT auto-snapped', () => {
 		const e = evaluate(g9());
 		expect(walls(e).stats).toMatchObject({ status: 'NoError', components: 1 });
 		const free = Object.values(e.junctions).flat().filter((j) => j.type === 'free-end');
 		expect(free).toHaveLength(2);
+		expect(free.map((j) => j.at.join(',')).sort()).toEqual(['3.98,3', '4,3']);
 	});
-	// Plan G9 also states "space enclosed:false" for this 0.02 m fixture. With t = 0.15 the shortened north wall still
-	// overlaps the east wall body, so C7/C8 as written give enclosed:true. Not asserted as met: REVIEW/PLAN item.
-	test.todo('G9 plan assertion enclosed:false at 0.02 m — contradicts C7/C8 geometry (see WP4 evidence, open item 1)');
+	test('authoredEnclosed:false (centrelines end 0.02 m apart, beyond JOIN_TOL) while enclosed:true (solid closed)', () => {
+		const e = evaluate(g9());
+		expect(e.spaces).toHaveLength(1);
+		expect(e.spaces[0]).toMatchObject({ elementId: 'sp', enclosed: true, authoredEnclosed: false });
+		expect(e.spaces[0]!.area).toBeCloseTo(3.85 * 2.85, 6); // the physical room exists: 10.9725 m²
+		expect(e.diagnostics).toEqual([]);
+	});
+	test('the 3D mesh is not falsified: the wall mesh is byte-identical with and without the space element, and identical across kernels', async () => {
+		const withSpace = evaluate(g9());
+		const withoutSpace = evaluate(moduleOf(g9().elements.filter((x) => x.kind !== 'space')));
+		expect(exportDigest(withSpace)).toBe(exportDigest(withoutSpace));
+		const other = createKernel();
+		await other.init();
+		expect(exportDigest(evaluate(g9(), other))).toBe(exportDigest(withSpace));
+	});
+	test('the fixture itself is the plan fixture', () => {
+		expect((g9().elements.find((x) => x.elementId === 'w3') as any).path).toEqual([[3.98, 3], [0, 3]]);
+	});
 });
 
 describe('G10 determinism (CP4 on export)', () => {

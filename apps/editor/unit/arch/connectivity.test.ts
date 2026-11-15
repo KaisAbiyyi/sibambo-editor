@@ -28,6 +28,7 @@ const authored = (m: ArchModule) => {
 	return Object.fromEntries(result.map((r) => [r.elementId, r.centerlineEnclosed]));
 };
 const solid = (m: ArchModule) => Object.fromEntries(evaluateModule(m, kernel, { cache: false }).spaces.map((s) => [s.elementId, s.enclosed]));
+const reported = (m: ArchModule) => Object.fromEntries(evaluateModule(m, kernel, { cache: false }).spaces.map((s) => [s.elementId, s.authoredEnclosed]));
 
 describe('G9: authored enclosure is open, solid enclosure is closed, and the mesh is untouched', () => {
 	test('the fixture is exactly the plan fixture (north wall shortened by 0.02 at its east end)', () => {
@@ -48,6 +49,23 @@ describe('G9: authored enclosure is open, solid enclosure is closed, and the mes
 		await other.init();
 		expect(after).toBe(before);
 		expect(exportDigest(evaluateModule(g9(), other, { cache: false }))).toBe(before);
+		expect(kernel.liveCount()).toBe(0);
+	});
+});
+
+describe('evaluateModule reports both predicates (owner disposition D1-B)', () => {
+	test('`authoredEnclosed` equals the pure centreline answer and `enclosed` keeps its solid meaning, for every fixture with a space', () => {
+		for (const make of [g3, g4, g5, g8, g9]) {
+			const m = make();
+			expect(reported(m)).toEqual(authored(m));
+		}
+		expect(solid(g9())).toEqual({ sp: true });
+		expect(reported(g9())).toEqual({ sp: false });
+	});
+	test('a seed outside everything: both false; no seed: no spaces and no extra kernel work leaks', () => {
+		const out = evaluateModule(moduleOf([...g1().elements, space('out', 'Out', [10, 10])]), kernel, { cache: false });
+		expect(out.spaces[0]).toMatchObject({ enclosed: false, authoredEnclosed: false });
+		expect(evaluateModule(g1(), kernel, { cache: false }).spaces).toEqual([]);
 		expect(kernel.liveCount()).toBe(0);
 	});
 });

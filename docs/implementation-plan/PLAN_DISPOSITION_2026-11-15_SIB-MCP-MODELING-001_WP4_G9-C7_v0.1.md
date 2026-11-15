@@ -1,6 +1,6 @@
 # PLAN DISPOSITION (PROPOSED) — SIB-MCP-MODELING-001 WP4: G9 enclosure, C7.4–5 construction, staggered continuation
 
-ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-15 (Asia/Jakarta)** · Status **PROPOSED — owner authorization required. This file does not amend [master v2.3](MASTER_IMPLEMENTATION_PLAN_2026-11-15_SIB-MCP-MODELING-001_v2.3.md), which stays frozen.** CP4 stays **PARTIAL** until D1 and D2 below are resolved.
+ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-15 (Asia/Jakarta)** · Status **RESOLVED: the owner decided D1 = B, D2 = ratify (option a), D3 = reject for agent writes / report for read, never auto-join. The decisions are incorporated in [master v2.4](MASTER_IMPLEMENTATION_PLAN_2026-11-15_SIB-MCP-MODELING-001_v2.4.md); this file is kept unchanged below as the record of the options that were put to the owner (it was PROPOSED, `test.todo` and `'report'` default describe the state before the decision).**
 
 - **Trigger:** independent review verdict REVIEW/PLAN, CP4 PARTIAL, on Editor `29e5cbb`.
 - **Author:** implementor of WP4 (Claude Code cloud session `session_01JoynVtWpBxaEDZLfEkvFKf`); no subagents. This is a proposal by the implementor, not an approval.

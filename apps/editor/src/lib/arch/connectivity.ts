@@ -1,5 +1,5 @@
 /**
- * SIB-MCP-MODELING-001 — AUTHORED (centreline) enclosure, as a PURE, NOT-YET-WIRED function.
+ * SIB-MCP-MODELING-001 — AUTHORED (centreline) enclosure (pure; consumed by `evaluateModule`).
  *
  * Context (WP4 open item 1, G9). A room can be closed in two different senses:
  *  - SOLID enclosure: the wall BODIES leave no opening. This is what `buildSpaces` computes today (`SpaceResult.enclosed`)
@@ -8,12 +8,10 @@
  *    G9 shortens the north wall by 0.02 m: its centreline stops 0.02 m short of the east wall's (> JOIN_TOL, so no node
  *    is made and `WALL_GAP` applies) although the 0.15 m thick bodies still overlap and the solid is closed.
  *
- * Reporting the authored answer never alters a mesh: this function only reads the segments the wall solver already
- * produced and builds 2D strokes of width JOIN_TOL with square caps of JOIN_TOL/2. Strokes of segments that share a node
- * (endpoints equal after clustering) overlap by their caps; a gap wider than JOIN_TOL stays open.
- *
- * Which of the two (or both) `enclosed` should mean is a PLAN decision that the owner has not taken; see
- * docs/implementation-plan/PLAN_DISPOSITION_2026-11-15_SIB-MCP-MODELING-001_WP4_G9-C7_v0.1.md. Nothing calls this yet.
+ * Owner disposition D1-B (master v2.4): `SpaceResult.enclosed` keeps meaning SOLID closure and this answer is reported next to it
+ * as `authoredEnclosed` by `evaluateModule`. Reporting it never alters a mesh: the function only reads the segments the wall
+ * solver already produced and builds 2D strokes of width JOIN_TOL with square caps of JOIN_TOL/2. Strokes of segments that
+ * share a node (endpoints equal after clustering) overlap by their caps; a gap wider than JOIN_TOL stays open.
  */
 import { distanceToRings, windingNumber, type SpaceElement } from './elements.js';
 import type { Kernel, Ring, Vec2 } from './kernel.js';

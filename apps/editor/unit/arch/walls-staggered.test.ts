@@ -1,6 +1,7 @@
 /**
  * Straight continuation of walls on OPPOSITE sides of the path (side left/right mixes): deterministic classification,
- * explicit report, opt-in rejection. The default keeps the WP4 geometry; nothing is joined or dropped silently.
+ * explicit report, rejection. Owner disposition D3 (master v2.4): an agent WRITE rejects, a READ/evaluation reports, and
+ * nothing is ever joined or dropped silently. `purpose:'write'|'read'` selects the policy; `staggered` overrides it.
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { ArchError } from '../../src/lib/arch/errors';
@@ -145,6 +146,56 @@ describe('evaluateModule surfaces the diagnostic and honours the policy', () => 
 			expect((error as ArchError).detail).toMatchObject({ moduleId: 'test/ground', reason: 'WALL_STAGGERED_CONTINUATION' });
 		}
 		expect(evaluateModule(module(), kernel)).toBe(first);
+		expect(kernel.liveCount()).toBe(0);
+	});
+});
+
+describe('owner disposition D3: purpose "write" rejects, "read" reports, no auto-join', () => {
+	const staggered = () => moduleOf([wall('a', [[0, 0], [3, 0]], { side: 'right' }), wall('b', [[0, 0], [-2, 0]], { side: 'right' })]);
+	test('read (and the default) report: the document is described exactly as authored — two touching solids, nothing joined', () => {
+		for (const options of [{}, { purpose: 'read' as const }]) {
+			const e = evaluateModule(staggered(), kernel, { cache: false, ...options });
+			expect(e.diagnostics).toHaveLength(1);
+			expect(e.parts.find((p) => p.partId === 'walls')!.stats.components).toBe(2);
+			expect(e.parts.find((p) => p.partId === 'walls')!.stats.volume).toBeCloseTo((3 * 0.15 + 2 * 0.15) * 2.7, 6); // no material invented
+		}
+	});
+	test('write rejects with WALL_STAGGERED_CONTINUATION, the module id, the node and a next action; no solid survives', () => {
+		try {
+			evaluateModule(staggered(), kernel, { cache: false, purpose: 'write' });
+			throw new Error('expected failure');
+		} catch (error) {
+			expect(error).toBeInstanceOf(ArchError);
+			const e = error as ArchError;
+			expect(e.code).toBe('INVALID_GEOMETRY');
+			expect(e.detail).toMatchObject({ moduleId: 'test/ground', reason: 'WALL_STAGGERED_CONTINUATION', elementId: 'a', at: [0, 0] });
+			expect(e.message).toMatch(/same side|connecting wall/);
+		}
+		expect(kernel.liveCount()).toBe(0);
+	});
+	test('write never rejects a bonded continuation, any golden, or an ordinary room; read and write agree on every non-staggered module', () => {
+		for (const make of [g1, g3, g4, g5, g6, g7, g8]) {
+			const m = make();
+			const read = evaluateModule(m, kernel, { cache: false, purpose: 'read' });
+			const write = evaluateModule(m, kernel, { cache: false, purpose: 'write' });
+			expect(write.hash).toBe(read.hash);
+			expect(write.diagnostics).toEqual([]);
+			expect(write.stats).toEqual(read.stats);
+		}
+		const bonded = moduleOf([wall('a', [[0, 0], [3, 0]], { side: 'left' }), wall('b', [[0, 0], [-2, 0]], { side: 'right' })]);
+		expect(() => evaluateModule(bonded, kernel, { cache: false, purpose: 'write' })).not.toThrow();
+	});
+	test('an explicit `staggered` overrides the purpose; the policy is part of the cache key so a read never serves a write', () => {
+		expect(evaluateModule(staggered(), kernel, { cache: false, purpose: 'write', staggered: 'report' }).diagnostics).toHaveLength(1);
+		expect(() => evaluateModule(staggered(), kernel, { cache: false, purpose: 'read', staggered: 'reject' })).toThrow(ArchError);
+		const read = evaluateModule(staggered(), kernel); // cached under "report"
+		expect(() => evaluateModule(staggered(), kernel, { purpose: 'write' })).toThrow(ArchError);
+		expect(evaluateModule(staggered(), kernel, { purpose: 'read' })).toBe(read);
+	});
+	test('a rejected write does not poison the cache or the kernel for the next call', () => {
+		expect(() => evaluateModule(staggered(), kernel, { purpose: 'write' })).toThrow();
+		expect(() => evaluateModule(staggered(), kernel, { purpose: 'write' })).toThrow(); // still rejected, not cached as a result
+		expect(evaluateModule(g1(), kernel, { purpose: 'write' }).parts).toHaveLength(1);
 		expect(kernel.liveCount()).toBe(0);
 	});
 });
