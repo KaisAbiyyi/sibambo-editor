@@ -1,5 +1,10 @@
 # Sibambo editor — claimable task index
 
+> **Phase order correction — 2026-11-08:** Stable SE-00…11 only now. All Experimental XB tasks are LOCKED until accepted SE-11 and a subsequent owner Phase2 instruction. [Stable-only IMPLEMENT handoff](two-phase/NEXT-STABLE-IMPLEMENT-PROMPT.md).
+
+> **Product architecture update — 2026-11-08:** the [two-phase MASTER IMPLEMENTATION PLAN v1.3](two-phase/MASTER_IMPLEMENTATION_PLAN_2026-11-08_SIB-TWO-PHASE-001_v1.3.md) governs new Stable Editor remote MCP/live draft/owner Save delivery and the separate **EXPERIMENTAL** native agentic application. This older document is retained as foundation/history; its task/component completion is not product readiness. [Gap audit](two-phase/GAP-AUDIT.md) · [ADRs](two-phase/ADR-LEDGER.md) · [task contracts](two-phase/TASK-CONTRACTS.md) · [Notion/GitHub resource map](two-phase/RESOURCE-MAP.md). No product implementation/deployment/release is performed by this documentation update.
+
+
 Parent [Sibambo six-phase implementation roadmap](https://github.com/KaisAbiyyi/sibambo/blob/main/docs/BIG-IMPLEMENTATION-PLAN.md) is the **canonical multi-repository DAG** and source of truth for exact complete acceptance criteria. This local index is only the sibambo-editor subset, not an alternative roadmap. A task is **unassigned** until an agent explicitly declares `CLAIM SIB-F... ` with its branch, session, base SHA, logical resource locks and expected checks.
 
 | Task | Deliverable | Predecessor tasks | Resource lock |
