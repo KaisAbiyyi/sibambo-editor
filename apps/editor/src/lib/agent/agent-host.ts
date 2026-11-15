@@ -31,7 +31,21 @@ export const WRITER_LEASE_MS = 60000;
 export const ACTIVITY_LIMIT = 50;
 
 export type AgentCall = { id: string; slot: string; session: string | null; tool: string; args: unknown };
-export type AgentReply = { ok: true; result: unknown } | { ok: false; error: AgentToolError };
+/** Main-thread metadata for a write the worker committed. Never sent on the wire as such. */
+export type AgentCommitted = { revision: number; entityIds: string[] };
+/**
+ * `committed` is present exactly when the worker committed a write (success or
+ * EDITOR_RENDER_FAILED), so transport fallbacks never report such a call as unchanged.
+ */
+export type AgentReply =
+	| { ok: true; result: unknown; committed?: AgentCommitted }
+	| { ok: false; error: AgentToolError; committed?: AgentCommitted };
+/**
+ * Outcome of applying a committed result on the page: `rendered` only when the checkpoint was
+ * applied AND the viewport projection succeeded; `render-failed` when it was applied but not
+ * shown; `stale` when the page had moved on (other document, mode or generation).
+ */
+export type AgentAcceptOutcome = 'rendered' | 'render-failed' | 'stale';
 
 /** `committed` marks the single committed-with-error outcome (EDITOR_RENDER_FAILED). */
 export type AgentActivity = Readonly<{ at: number; slot: string; tool: string; outcome: 'ok' | 'rejected' | 'committed'; code: string | null; ms: number }>;
@@ -52,8 +66,8 @@ export type AgentClientPort = {
 export type AgentHostOptions<TClient extends AgentClientPort = AgentClientPort> = {
 	getClient: () => TClient | null;
 	getCheckpoint: () => AuthoringCheckpoint | null;
-	/** The page's acceptAuthoringResult. Returning false means the page did not apply it. */
-	accept: (client: TClient, result: AuthoringResult, token: unknown) => boolean | void;
+	/** The page's applyAuthoringResult; only `rendered` counts as shown (C5a step 8). */
+	accept: (client: TClient, result: AuthoringResult, token: unknown) => AgentAcceptOutcome;
 	isOwnerBusy: () => boolean;
 	getModeling: () => { path: readonly string[]; selection: readonly ModelSelection[] };
 	getMode: () => string;
@@ -196,17 +210,24 @@ export class AgentHost<TClient extends AgentClientPort = AgentClientPort> {
 			}
 			if (!result.toolResult.ok) return finish({ ok: false, error: result.toolResult.error });
 			if (result.authoring === null) return finish({ ok: true, result: result.toolResult.result });
-			let accepted = false;
-			try { accepted = this.options.accept(client, result.authoring, token) !== false; }
-			catch { accepted = false; }
-			if (!accepted) {
-				const receipt = result.toolResult.result;
-				const entityIds = isRecord(receipt) && Array.isArray(receipt.entityIds) ? receipt.entityIds : [];
-				return finish(rejected('EDITOR_RENDER_FAILED', 'The worker committed the change, but the Editor could not show it.', {
-					committed: true, revision: result.authoring.checkpoint.snapshot.revision, entityIds
-				}), 'committed');
+			// The worker has committed. From here on the reply must say so, whatever happens on
+			// the page; the committed checkpoint is never reverted and the call never retried.
+			const receipt = result.toolResult.result;
+			const committed: AgentCommitted = {
+				revision: result.authoring.checkpoint.snapshot.revision,
+				entityIds: isRecord(receipt) && Array.isArray(receipt.entityIds) ? receipt.entityIds.filter((id): id is string => typeof id === 'string') : []
+			};
+			let outcome: AgentAcceptOutcome | 'threw';
+			try { outcome = this.options.accept(client, result.authoring, token); }
+			catch { outcome = 'threw'; }
+			if (outcome !== 'rendered') {
+				const message = outcome === 'stale'
+					? 'The worker committed the change, but the Editor switched document or mode before showing it.'
+					: 'The worker committed the change, but the Editor viewport could not show it.';
+				const reply = rejected('EDITOR_RENDER_FAILED', message, { committed: true, revision: committed.revision, entityIds: committed.entityIds });
+				return finish({ ...reply, committed }, 'committed');
 			}
-			return finish({ ok: true, result: result.toolResult.result });
+			return finish({ ok: true, result: receipt, committed });
 		} finally {
 			if (write) this.options.onBusy?.(false);
 		}

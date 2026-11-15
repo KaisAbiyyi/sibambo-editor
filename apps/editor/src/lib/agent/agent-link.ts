@@ -74,6 +74,43 @@ function parseCall(raw: unknown): AgentCall | 'superseded' | null {
 	return { id: frame.id, slot: frame.slot, session: frame.session as string | null, tool: frame.tool, args: frame.args };
 }
 
+const frameBytes = (frame: string) => new TextEncoder().encode(frame).length;
+const COMPACT_ID_LIMIT = 100;
+const COMPACT_ID_LENGTH = 256;
+
+/**
+ * The `agent_result` frame for a reply, kept within 4 MiB (A18). A reply that does not fit is
+ * replaced by a compact frame. A committed write must stay committed in that frame (invariant
+ * 3/3a), so it never becomes BUDGET_EXCEEDED (review finding 3): a committed success becomes a
+ * compact success receipt, a committed EDITOR_RENDER_FAILED keeps its code with compact detail.
+ * Only an uncommitted reply (nothing changed) may become BUDGET_EXCEEDED.
+ */
+export function resultFrame(id: string, reply: AgentReply): string {
+	const frame = JSON.stringify(reply.ok ? { type: 'agent_result', id, ok: true, result: reply.result } : { type: 'agent_result', id, ok: false, error: reply.error });
+	if (frameBytes(frame) <= AGENT_RESULT_FRAME_LIMIT) return frame;
+	const committed = reply.committed;
+	if (!committed) {
+		return JSON.stringify({ type: 'agent_result', id, ok: false, error: {
+			code: 'BUDGET_EXCEEDED', message: 'The tool result exceeds 4 MiB; nothing was changed.', retryable: false, nextAction: 'Ask for a smaller page or limit.'
+		} });
+	}
+	const compact = (entityIds: string[]) => ({
+		committed: true, truncated: true, revision: committed.revision,
+		entityIds, entityCount: committed.entityIds.length
+	});
+	const build = (entityIds: string[]) => reply.ok
+		? JSON.stringify({ type: 'agent_result', id, ok: true, result: {
+			...compact(entityIds), message: 'The change was committed; its full result exceeded 4 MiB. Call describe_scene for details.'
+		} })
+		: JSON.stringify({ type: 'agent_result', id, ok: false, error: {
+			code: reply.error.code, message: reply.error.message.slice(0, 1024), retryable: false, nextAction: reply.error.nextAction.slice(0, 1024),
+			detail: compact(entityIds)
+		} });
+	const shortIds = committed.entityIds.filter((entityId) => entityId.length <= COMPACT_ID_LENGTH).slice(0, COMPACT_ID_LIMIT);
+	const withIds = build(shortIds);
+	return frameBytes(withIds) <= AGENT_RESULT_FRAME_LIMIT ? withIds : build([]);
+}
+
 export class AgentLink {
 	private readonly options: AgentLinkOptions;
 	private readonly tickets: NonNullable<AgentLinkOptions['tickets']>;
@@ -82,7 +119,8 @@ export class AgentLink {
 	private generation = 0;
 	private attempts = 0;
 	private retryHandle: unknown = null;
-	private queue: AgentCall[] = [];
+	/** Calls tagged with the socket generation that delivered them (only that socket can be answered). */
+	private queue: { call: AgentCall; generation: number }[] = [];
 	private pumping = false;
 	private statusValue: AgentLinkStatus = Object.freeze({ phase: 'connecting', error: '', calls: 0, lastCallAt: null });
 	private stopped = false;
@@ -153,8 +191,8 @@ export class AgentLink {
 			const parsed = parseCall(event.data);
 			if (parsed === null) return; // ping and malformed frames are ignored
 			if (parsed === 'superseded') { this.supersede(); return; }
-			this.queue.push(parsed);
-			void this.pump(generation);
+			this.queue.push({ call: parsed, generation });
+			void this.pump();
 		};
 		socket.onclose = () => {
 			if (!current()) return;
@@ -164,12 +202,18 @@ export class AgentLink {
 		socket.onerror = () => { if (current()) { try { socket.close(); } catch { /* closing */ } } };
 	}
 
-	private async pump(generation: number) {
+	/**
+	 * One call at a time, in arrival order. The loop is not bound to the generation it started
+	 * in: an old in-flight call that finishes after a reconnect has its reply dropped, and the
+	 * loop carries on with calls delivered by the new socket (review finding 2).
+	 */
+	private async pump() {
 		if (this.pumping) return;
 		this.pumping = true;
 		try {
-			while (this.queue.length && !this.stopped && generation === this.generation) {
-				const call = this.queue.shift()!;
+			while (this.queue.length && !this.stopped) {
+				const { call, generation } = this.queue.shift()!;
+				if (generation !== this.generation) continue; // delivered by a socket that is gone
 				this.update({ calls: this.statusValue.calls + 1, lastCallAt: (this.options.now ?? Date.now)() });
 				let reply: AgentReply;
 				try { reply = await this.options.host.handle(call); }
@@ -178,19 +222,16 @@ export class AgentLink {
 				}
 				this.reply(generation, call.id, reply);
 			}
-		} finally { this.pumping = false; }
+		} finally {
+			this.pumping = false;
+			if (this.queue.length && !this.stopped) void this.pump();
+		}
 	}
 
 	private reply(generation: number, id: string, reply: AgentReply) {
 		const socket = this.socket;
 		if (!socket || generation !== this.generation || socket.readyState !== OPEN) return; // relay reports EDITOR_OFFLINE
-		let frame = JSON.stringify(reply.ok ? { type: 'agent_result', id, ok: true, result: reply.result } : { type: 'agent_result', id, ok: false, error: reply.error });
-		if (new TextEncoder().encode(frame).length > AGENT_RESULT_FRAME_LIMIT) {
-			frame = JSON.stringify({ type: 'agent_result', id, ok: false, error: {
-				code: 'BUDGET_EXCEEDED', message: 'The tool result exceeds 4 MiB.', retryable: false, nextAction: 'Ask for a smaller page or limit.'
-			} });
-		}
-		try { socket.send(frame); } catch { /* socket closing; relay reports EDITOR_OFFLINE */ }
+		try { socket.send(resultFrame(id, reply)); } catch { /* socket closing; relay reports EDITOR_OFFLINE */ }
 	}
 
 	private supersede() {

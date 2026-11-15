@@ -111,6 +111,63 @@ describe('AgentLink', () => {
 		expect(statuses.at(-1)!.phase).toBe('superseded');
 	});
 
+	test('finding 2: an old in-flight call overlapping a new socket generation does not stall calls on the new socket', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const { link, sockets, timers, handled } = setup(async (call) => {
+			if (call.id === 'old') await gate;
+			return { ok: true, result: { id: call.id } };
+		});
+		await flush();
+		sockets[0]!.open();
+		sockets[0]!.receive(JSON.stringify({ type: 'agent_call', id: 'old', slot: 'codex', session: null, tool: 'describe_scene', args: {} }));
+		await flush();
+		expect(handled.map((c) => c.id)).toEqual(['old']);
+		sockets[0]!.drop();
+		timers[0]!.callback();
+		await flush();
+		sockets[1]!.open();
+		sockets[1]!.receive(JSON.stringify({ type: 'agent_call', id: 'new-1', slot: 'codex', session: null, tool: 'check_model', args: {} }));
+		await flush();
+		release();
+		for (let i = 0; i < 6; i += 1) await flush();
+		// new-1 must be answered on its own; no later call may be needed to restart the pump.
+		expect(sockets[1]!.sent.slice(1).map((frame) => JSON.parse(frame).id)).toEqual(['new-1']);
+		sockets[1]!.receive(JSON.stringify({ type: 'agent_call', id: 'new-2', slot: 'codex', session: null, tool: 'measure', args: {} }));
+		for (let i = 0; i < 6; i += 1) await flush();
+		const replies = sockets[1]!.sent.slice(1).map((frame) => JSON.parse(frame));
+		expect(replies.map((frame) => frame.id)).toEqual(['new-1', 'new-2']);
+		expect(sockets[0]!.sent.slice(1)).toEqual([]); // the old reply is dropped, never sent anywhere
+		link.dispose();
+	});
+
+	test('finding 3: an oversized result of a committed write stays a committed success, never BUDGET_EXCEEDED', async () => {
+		const huge = 'x'.repeat(4 * 1024 * 1024 + 16);
+		const replies: AgentReply[] = [
+			{ ok: true, result: { receipt: huge }, committed: { revision: 9, entityIds: ['a', 'b'] } },
+			{ ok: false, error: { code: 'EDITOR_RENDER_FAILED', message: 'm', retryable: false, nextAction: 'n', detail: { committed: true, revision: 10, entityIds: [huge] } }, committed: { revision: 10, entityIds: [huge] } },
+			{ ok: true, result: { page: huge } }
+		];
+		let index = 0;
+		const { link, sockets } = setup(async () => replies[index++]!);
+		await flush();
+		const socket = sockets[0]!;
+		socket.open();
+		for (const id of ['c1', 'c2', 'c3']) {
+			socket.receive(JSON.stringify({ type: 'agent_call', id, slot: 'codex', session: null, tool: 'model_ops', args: {} }));
+			for (let i = 0; i < 4; i += 1) await flush();
+		}
+		const frames = socket.sent.slice(1);
+		expect(frames).toHaveLength(3);
+		for (const frame of frames) expect(new TextEncoder().encode(frame).length).toBeLessThanOrEqual(4 * 1024 * 1024);
+		const [committedOk, renderFailed, read] = frames.map((frame) => JSON.parse(frame));
+		expect(Object.keys(committedOk).sort()).toEqual(['id', 'ok', 'result', 'type']);
+		expect(committedOk).toMatchObject({ id: 'c1', ok: true, result: { committed: true, truncated: true, revision: 9, entityIds: ['a', 'b'], entityCount: 2 } });
+		expect(renderFailed).toMatchObject({ id: 'c2', ok: false, error: { code: 'EDITOR_RENDER_FAILED', retryable: false, detail: { committed: true, truncated: true, revision: 10, entityCount: 1 } } });
+		expect(read).toMatchObject({ id: 'c3', ok: false, error: { code: 'BUDGET_EXCEEDED' } });
+		link.dispose();
+	});
+
 	test('a rejected owner session (401) stops with an error instead of retrying', async () => {
 		const setupResult = setup();
 		setupResult.failTickets(new McpHttpError(401, 'Sesi login habis. Masuk ulang.'));

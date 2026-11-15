@@ -3,7 +3,7 @@
 	import ModelingPanel from '$lib/authoring/ModelingPanel.svelte';
 	import McpPanel from '$lib/mcp/McpPanel.svelte';
 	import AgentPanel from '$lib/agent/AgentPanel.svelte';
-	import { AgentHost, type AgentHostState } from '$lib/agent/agent-host';
+	import { AgentHost, type AgentHostState, type AgentAcceptOutcome as AuthoringApplyOutcome } from '$lib/agent/agent-host';
 	import { DraftClient } from '$lib/mcp/draft-client';
 	import { DraftScene } from '$lib/mcp/draft-scene';
 	import type { DraftState, DraftStatus } from '$lib/mcp/draft-protocol';
@@ -120,7 +120,7 @@
 	const agentHost = new AgentHost<AuthoringClient>({
 		getClient: () => authoringClient,
 		getCheckpoint: () => authoringCheckpoint,
-		accept: (client, acknowledged, token) => acceptAuthoringResult(client, acknowledged, token as number),
+		accept: (client, acknowledged, token) => applyAuthoringResult(client, acknowledged, token as number),
 		isOwnerBusy: () => busy || saveBusy || authoringOperationBusy || authoringRecovery.phase !== 'ready' || !!pendingTransition,
 		getModeling: () => ({ path: modelingState.path, selection: modelingState.selection }),
 		getMode: () => mode,
@@ -412,15 +412,19 @@
 		}
 	}
 
-	function acceptAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation) {
-		if (request !== generation || client !== authoringClient || mode !== 'authoring') return false;
+	/** Applies an acknowledged result and reports whether the viewport actually shows it. */
+	function applyAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation): AuthoringApplyOutcome {
+		if (request !== generation || client !== authoringClient || mode !== 'authoring') return 'stale';
 		authoringCheckpoint = acknowledged.checkpoint;
 		authoringTools?.setCheckpoint(toolCheckpoint(acknowledged.checkpoint));
 		if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
 		else if (selectedEntityId && !hasEntityId(acknowledged.checkpoint.snapshot.graph, selectedEntityId)) selectedEntityId = '';
 		modelTabTitle = authoringTitle(acknowledged.checkpoint);
-		refreshAuthoringProjection(false);
-		return true;
+		return refreshAuthoringProjection(false) ? 'rendered' : 'render-failed';
+	}
+
+	function acceptAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation) {
+		return applyAuthoringResult(client, acknowledged, request) !== 'stale';
 	}
 
 	async function runAuthoringHistory(direction: 'undo' | 'redo') {

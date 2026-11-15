@@ -23,6 +23,7 @@ import {
 	type FlatAuthoringCommand
 } from '../../src/lib/authoring/protocol.js';
 import { AgentToolFailure, type AgentEditBuilder, type ToolOutcome } from '../../src/lib/arch/tools.js';
+import { AgentHost } from '../../src/lib/agent/agent-host.js';
 import { IDENTITY_ROW_MAJOR } from '../../src/lib/arch/convention.js';
 
 const DOC = '6f1c2b3a-4d5e-4f60-8a7b-9c8d7e6f5a4b';
@@ -567,6 +568,38 @@ describe('AuthoringClient.agent end-to-end (C5 plumbing)', () => {
 			expect(graphsEqual(client.checkpoint!.snapshot.graph, initial.snapshot.graph)).toBe(true);
 			const redone = await client.redo();
 			expect(redone.checkpoint.history.undo.at(-1)!.origin).toBe('agent:codex');
+		} finally { await client.close(); }
+	});
+
+	test('review finding 1: a projection failure after a real commit is EDITOR_RENDER_FAILED; the committed checkpoint is kept, nothing retried or rolled back', async () => {
+		let worker!: AdapterWorker;
+		const client = new AuthoringClient({ sessionId: SESSION, documentIdFactory: () => DOC, workerFactory: () => (worker = new AdapterWorker()) as unknown as Worker });
+		try {
+			await client.create();
+			(worker.dispatcher as any).agentTools = () => ({ kind: 'write', builders: mixedOps(), failure: 'ops', receipt: (commit: any) => commit });
+			let agentCalls = 0;
+			const port = { get isClosed() { return client.isClosed; }, agent: (...args: Parameters<AuthoringClient['agent']>) => { agentCalls += 1; return client.agent(...args); } };
+			const accepted: number[] = [];
+			const host = new AgentHost({
+				getClient: () => port,
+				getCheckpoint: () => client.checkpoint,
+				accept: (_c, result) => { accepted.push(result.checkpoint.snapshot.revision); return 'render-failed'; },
+				isOwnerBusy: () => false,
+				getModeling: () => ({ path: [], selection: [] }),
+				getMode: () => 'authoring'
+			});
+			const before = client.checkpoint!;
+			const reply = await host.handle({ id: 'r1', slot: 'codex', session: null, tool: 'model_ops', args: {} });
+			const committedRevision = before.snapshot.revision + 1;
+			expect(reply).toMatchObject({ ok: false, error: { code: 'EDITOR_RENDER_FAILED', retryable: false, detail: { committed: true, revision: committedRevision } } });
+			expect(agentCalls).toBe(1);
+			expect(accepted).toEqual([committedRevision]);
+			expect(client.checkpoint!.snapshot.revision).toBe(committedRevision);
+			expect(client.checkpoint!.history.undo.at(-1)!.origin).toBe('agent:codex');
+			const dispatcher = worker.dispatcher as any;
+			expect(dispatcher.document.snapshot().revision).toBe(committedRevision);
+			expect(dispatcher.history.checkpoint().undo).toHaveLength(1);
+			expect(dispatcher.history.checkpoint().redo).toHaveLength(0);
 		} finally { await client.close(); }
 	});
 });

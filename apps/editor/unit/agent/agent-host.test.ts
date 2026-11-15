@@ -36,7 +36,7 @@ function setup(overrides: Partial<AgentHostOptions<FakeClient>> = {}) {
 	const host = new AgentHost<FakeClient>({
 		getClient: () => state.client,
 		getCheckpoint: () => state.checkpoint,
-		accept: (_client, result) => { accepted.push(result); return true; },
+		accept: (_client, result) => { accepted.push(result); return 'rendered'; },
 		isOwnerBusy: () => state.ownerBusy,
 		getModeling: () => ({ path: ['outer'], selection: [{ type: 'face', id: 'f1' }] }),
 		getMode: () => state.mode,
@@ -172,9 +172,11 @@ describe('AgentHost stale revision and worker errors', () => {
 describe('AgentHost committed results (C5a step 8)', () => {
 	test('a committed write is accepted once with the captured generation and logged ok', async () => {
 		const tokens: unknown[] = [];
-		const { host, client, accepted, busy } = setup({ accept: (_c, result, token) => { accepted.push(result); tokens.push(token); return true; } });
+		const { host, client, accepted, busy } = setup({ accept: (_c, result, token) => { accepted.push(result); tokens.push(token); return 'rendered'; } });
 		client.reply = async () => committed();
-		expect(await host.handle(call('model_ops'))).toEqual({ ok: true, result: { changed: true, entityIds: ['e1'], revision: REVISION + 1 } });
+		expect(await host.handle(call('model_ops'))).toEqual({
+			ok: true, result: { changed: true, entityIds: ['e1'], revision: REVISION + 1 }, committed: { revision: REVISION + 1, entityIds: ['e1'] }
+		});
 		expect(accepted).toHaveLength(1);
 		expect(tokens).toEqual(['generation-1']);
 		expect(busy).toEqual([true, false]);
@@ -191,7 +193,8 @@ describe('AgentHost committed results (C5a step 8)', () => {
 			error: {
 				code: 'EDITOR_RENDER_FAILED', retryable: false, message: expect.any(String), nextAction: expect.stringContaining('committed'),
 				detail: { committed: true, revision: REVISION + 1, entityIds: ['a', 'b'] }
-			}
+			},
+			committed: { revision: REVISION + 1, entityIds: ['a', 'b'] }
 		});
 		expect(client.calls).toHaveLength(1);
 		expect(accepts).toBe(1);
@@ -199,10 +202,50 @@ describe('AgentHost committed results (C5a step 8)', () => {
 		expect(host.state.lastCall!.outcome).not.toBe('rejected');
 	});
 
-	test('accept returning false (page moved on) is also a committed EDITOR_RENDER_FAILED', async () => {
-		const { host, client } = setup({ accept: () => false });
+	test('accept reporting stale (page moved on) is also a committed EDITOR_RENDER_FAILED', async () => {
+		const { host, client } = setup({ accept: () => 'stale' });
 		client.reply = async () => ({ ...committed(REVISION + 1), toolResult: { ok: true, result: { undone: 1, revision: REVISION + 1 } } });
 		expect(await host.handle(call('undo'))).toMatchObject({ ok: false, error: { code: 'EDITOR_RENDER_FAILED', detail: { committed: true, revision: REVISION + 1, entityIds: [] } } });
+	});
+});
+
+describe('review remediation — finding 1: real projection failure after a commit', () => {
+	test('accept that applied the checkpoint but whose projection failed → committed EDITOR_RENDER_FAILED, no retry', async () => {
+		let accepts = 0;
+		const { host, client } = setup({ accept: () => { accepts += 1; return 'render-failed'; } });
+		client.reply = async () => committed(REVISION + 1, ['e9']);
+		const reply = await host.handle(call('model_ops'));
+		expect(reply).toMatchObject({ ok: false, error: { code: 'EDITOR_RENDER_FAILED', retryable: false, detail: { committed: true, revision: REVISION + 1, entityIds: ['e9'] } } });
+		expect(client.calls).toHaveLength(1);
+		expect(accepts).toBe(1);
+		expect(host.state.lastCall).toMatchObject({ outcome: 'committed', code: 'EDITOR_RENDER_FAILED' });
+	});
+
+	test('any accept result other than rendered (e.g. a legacy truthy value) is not treated as shown', async () => {
+		const { host, client } = setup({ accept: (() => true) as any });
+		client.reply = async () => committed(REVISION + 1);
+		expect(await host.handle(call('edit_model'))).toMatchObject({ ok: false, error: { code: 'EDITOR_RENDER_FAILED', detail: { committed: true } } });
+	});
+});
+
+describe('review remediation — finding 3 (host side): committed metadata for the link', () => {
+	test('a committed, rendered write carries committed {revision, entityIds}; reads and rejections carry none', async () => {
+		const { host, client } = setup();
+		client.reply = async () => committed(REVISION + 1, ['x', 'y']);
+		const write = await host.handle(call('model_ops'));
+		expect(write).toMatchObject({ ok: true, committed: { revision: REVISION + 1, entityIds: ['x', 'y'] } });
+		client.reply = async () => ({ kind: 'agent', authoring: null, toolResult: { ok: true, result: { big: true } } });
+		const read = await host.handle(call('describe_scene'));
+		expect(read.ok && 'committed' in read).toBe(false);
+		client.reply = async () => ({ kind: 'agent', authoring: null, toolResult: { ok: false, error: { code: 'INVALID_COMMAND', message: 'm', retryable: false, nextAction: 'n' } } });
+		const rejected = await host.handle(call('model_ops'));
+		expect('committed' in rejected).toBe(false);
+	});
+
+	test('EDITOR_RENDER_FAILED also carries committed metadata', async () => {
+		const { host, client } = setup({ accept: () => 'render-failed' });
+		client.reply = async () => committed(REVISION + 1, ['z']);
+		expect(await host.handle(call('model_ops'))).toMatchObject({ ok: false, committed: { revision: REVISION + 1, entityIds: ['z'] } });
 	});
 });
 
