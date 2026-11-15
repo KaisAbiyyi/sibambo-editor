@@ -21,7 +21,9 @@ if (/\brequire\(|\beval\(|new Function\b/.test(code)) throw Error('Unexpected dy
 const hash = createHash('sha256').update(source).digest('hex');
 const generated = '// @ts-nocheck\n// GENERATED from apps/editor/src/lib/arch/schemas/arch-module-v2.schema.json; do not edit.\n' +
 	'// LF source SHA-256: ' + hash + '\n// Regenerate: bun tooling/testing/generate-arch-validators.ts --write\n' +
-	'import * as unicodeRuntime from "ajv/dist/runtime/ucs2length";\nimport * as equalRuntime from "ajv/dist/runtime/equal";\n' +
+	// Explicit .js: this module is reached from SSR, Bun and Playwright's Node loader (via
+	// authoring/model.ts), and Node ESM cannot resolve extensionless deep imports into ajv.
+	'import * as unicodeRuntime from "ajv/dist/runtime/ucs2length.js";\nimport * as equalRuntime from "ajv/dist/runtime/equal.js";\n' +
 	'const ucs2length = typeof unicodeRuntime.default === "function" ? unicodeRuntime.default : unicodeRuntime.default.default;\n' +
 	'const equal = typeof equalRuntime.default === "function" ? equalRuntime.default : equalRuntime.default.default;\n' + code + '\n';
 const target = Bun.file(path.join(repo, 'apps/editor/src/lib/arch/arch-module-v2.validator.generated.js'));
