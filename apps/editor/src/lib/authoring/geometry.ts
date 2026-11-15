@@ -375,7 +375,7 @@ function orientedTriangle(
 	return alignment > 0 ? [...triangle] : [triangle[0], triangle[2], triangle[1]];
 }
 
-function triangulateFaceRings(
+export function triangulateFaceRings(
 	mesh: Mesh,
 	outer: readonly number[],
 	holes: readonly (readonly number[])[],
@@ -609,7 +609,7 @@ function insertionHostFace(previousMesh: Mesh, candidatePoints: readonly Point3[
 	return host;
 }
 
-function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull' | 'split', operationId?: string): string {
+export function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull' | 'split', operationId?: string): string {
 	return jsonLabel(operationId === undefined
 		? [SHAPE_SCHEMA_V2, operation, faceId]
 		: [SHAPE_SCHEMA_V2, operation, faceId, operationId]);

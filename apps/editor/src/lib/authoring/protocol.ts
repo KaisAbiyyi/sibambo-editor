@@ -46,6 +46,25 @@ export type AuthoringCommand = FlatAuthoringCommand | { kind: 'MODEL_EDIT'; path
 export type AuthoringJournalEntry = {
 	forward: readonly DocumentEdit[];
 	inverse: readonly DocumentEdit[];
+	/** SIB-MCP-MODELING-001 A12: present only on agent write entries, `agent:<slot>`. */
+	origin?: string;
+};
+
+/** A14 local add-on tool surface (exactly 10). `read_guide` is normally answered by the relay. */
+export const AGENT_TOOL_NAMES = [
+	'read_guide', 'describe_scene', 'describe_element', 'query_region', 'measure',
+	'check_model', 'get_floor_plan', 'edit_model', 'model_ops', 'undo'
+] as const;
+export type AgentToolName = typeof AGENT_TOOL_NAMES[number];
+/** Tools that may change the document; every other tool is read-only (invariant 9). */
+export const AGENT_WRITE_TOOLS: ReadonlySet<AgentToolName> = new Set<AgentToolName>(['edit_model', 'model_ops', 'undo']);
+export const AGENT_SLOT_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+export const AGENT_ORIGIN_PATTERN = /^agent:[a-z][a-z0-9-]{0,31}$/;
+export type AgentContext = {
+	mode: 'authoring' | 'viewer';
+	/** Copied from ModelingState.path; selection entries are relative to it. */
+	path: readonly string[];
+	selection: readonly ModelSelection[];
 };
 
 export type AuthoringHistoryCheckpoint = {
@@ -93,6 +112,12 @@ export type AckDownloadRequest = RequestBase & {
 	data: { writeId: string; revision: number };
 };
 export type CloseRequest = RequestBase & { type: 'CLOSE' };
+export type AgentRequest = RequestBase & {
+	type: 'AGENT';
+	/** null for read tools; write tools pass the acknowledged revision (CAS). */
+	expectedRevision: number | null;
+	data: { tool: AgentToolName; args: Record<string, unknown>; slot: string; context: AgentContext };
+};
 
 export type AuthoringRequest =
 	| CreateRequest
@@ -103,7 +128,8 @@ export type AuthoringRequest =
 	| RedoRequest
 	| WriteRequest
 	| AckDownloadRequest
-	| CloseRequest;
+	| CloseRequest
+	| AgentRequest;
 
 export type AuthoringResult = {
 	kind: 'authoring';
@@ -134,6 +160,23 @@ export type WriteResult = {
 
 export type ClosedResult = { kind: 'closed' };
 
+/** Agent tool error body (A16 catalogue). */
+export type AgentToolError = {
+	code: string;
+	message: string;
+	retryable: boolean;
+	nextAction: string;
+	detail?: Record<string, unknown>;
+};
+/** Tool outcome inside an AGENT result: either a payload or a catalogue error (nothing changed). */
+export type AgentToolResult = { ok: true; result: unknown } | { ok: false; error: AgentToolError };
+export type AgentResult = {
+	kind: 'agent';
+	toolResult: AgentToolResult;
+	/** Non-null only when the worker committed a write (C5); the main thread then accepts it. */
+	authoring: AuthoringResult | null;
+};
+
 export type AuthoringResultByRequest = {
 	CREATE: AuthoringResult;
 	OPEN: OpenResult;
@@ -144,6 +187,7 @@ export type AuthoringResultByRequest = {
 	WRITE: WriteResult;
 	ACK_DOWNLOAD: AuthoringResult;
 	CLOSE: ClosedResult;
+	AGENT: AgentResult;
 };
 
 export type WorkerReadyMessage = {
@@ -323,7 +367,29 @@ export function isAuthoringRequest(value: unknown): value is AuthoringRequest {
 			&& isSafeRevision(value.data.revision);
 	}
 	if (value.type === 'CLOSE') return hasExactKeys(value, base);
+	if (value.type === 'AGENT') {
+		return hasExactKeys(value, [...base, 'expectedRevision', 'data'])
+			&& (value.expectedRevision === null || isSafeRevision(value.expectedRevision))
+			&& isRecord(value.data) && hasExactKeys(value.data, ['tool', 'args', 'slot', 'context'])
+			&& (AGENT_TOOL_NAMES as readonly string[]).includes(value.data.tool as string)
+			&& isRecord(value.data.args)
+			&& typeof value.data.slot === 'string' && AGENT_SLOT_PATTERN.test(value.data.slot)
+			&& isAgentContext(value.data.context);
+	}
 	return false;
+}
+
+function isModelSelectionEntry(item: unknown): item is ModelSelection {
+	return isRecord(item) && ((item.type === 'face' || item.type === 'instance')
+		? hasExactKeys(item, ['type', 'id']) && typeof item.id === 'string' && item.id.length > 0
+		: item.type === 'edge' && hasExactKeys(item, ['type', 'start', 'end']) && isPoint(item.start) && isPoint(item.end));
+}
+
+export function isAgentContext(value: unknown): value is AgentContext {
+	return isRecord(value) && hasExactKeys(value, ['mode', 'path', 'selection'])
+		&& (value.mode === 'authoring' || value.mode === 'viewer')
+		&& Array.isArray(value.path) && value.path.length <= 32 && value.path.every((id) => typeof id === 'string' && id.length > 0)
+		&& Array.isArray(value.selection) && value.selection.length <= 4096 && value.selection.every(isModelSelectionEntry);
 }
 
 export function isWorkerReadyMessage(value: unknown): value is WorkerReadyMessage {
@@ -344,8 +410,10 @@ export function isAuthoringCheckpointShape(value: unknown): value is AuthoringCh
 	const history = value.history;
 	if (!Array.isArray(history.undo) || !Array.isArray(history.redo)) return false;
 	if (history.savedGraph !== null && !isRecord(history.savedGraph)) return false;
+	// v2.3: agent entries carry `origin`; history.ts validates its pattern.
 	const validEntry = (entry: unknown) => isRecord(entry)
-		&& hasExactKeys(entry, ['forward', 'inverse'])
+		&& (hasExactKeys(entry, ['forward', 'inverse'])
+			|| (hasExactKeys(entry, ['forward', 'inverse', 'origin']) && typeof entry.origin === 'string'))
 		&& Array.isArray(entry.forward) && Array.isArray(entry.inverse);
 	for (const entry of [...history.undo, ...history.redo]) if (!validEntry(entry)) return false;
 	return true;

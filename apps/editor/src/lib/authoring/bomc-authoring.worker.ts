@@ -1,8 +1,9 @@
 import { BomcDocument, BomcDocumentError } from '@sibambo/bomc-document/document';
 import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
-import type { BomcGraph } from '@sibambo/bomc-document';
+import type { BomcGraph, DocumentEdit } from '@sibambo/bomc-document';
 import { BomcContainer } from '@sibambo/e4-import';
+import { AgentToolFailure, runTool, type AgentCommit, type AgentEditBuilder } from '../arch/tools.js';
 import {
 	AuthoringGeometryError,
 	buildExtrusionEdit,
@@ -14,13 +15,18 @@ import {
 	type GeometryEdit
 } from './geometry.js';
 import { buildModelEdit, nextModelSequence as nextAuthoringSequence, validateAuthoringDocument as validateEditableSubset } from './model.js';
-import { AuthoringHistory, AuthoringHistoryError, validateAuthoringCheckpoint } from './history.js';
+import { AuthoringHistory, AuthoringHistoryError, graphsEqual, validateAuthoringCheckpoint } from './history.js';
 import {
+	AGENT_SLOT_PATTERN,
+	AGENT_WRITE_TOOLS,
 	AUTHORING_PROTOCOL_VERSION,
 	isAuthoringRequest,
 	isRecord,
 	isUuid,
 	isPositiveRequestId,
+	type AgentRequest,
+	type AgentResult,
+	type AuthoringCommand,
 	type AuthoringCheckpoint,
 	type AuthoringErrorCode,
 	type AuthoringRequest,
@@ -62,6 +68,83 @@ function lifecycleType(type: AuthoringRequest['type']) {
 	return type === 'CREATE' || type === 'OPEN' || type === 'RESTORE_CHECKPOINT';
 }
 
+/** v2.3 C5a: composite journals hold at most this many compacted edits (isModelJournal bound). */
+const AGENT_COMPOSITE_EDIT_LIMIT = 20000;
+const AGENT_UNDO_MAX_STEPS = 10;
+const EDIT_FAMILY: Readonly<Record<string, string>> = {
+	'put-material': 'material', 'delete-material': 'material',
+	'put-definition': 'definition', 'delete-definition': 'definition',
+	'put-mesh': 'mesh', 'delete-mesh': 'mesh',
+	'put-instance': 'instance', 'delete-instance': 'instance'
+};
+
+function editKey(edit: DocumentEdit, index: number): string {
+	const family = EDIT_FAMILY[edit.type];
+	if (!family) return `unkeyed:${index}`; // never compacted; execute rejects unsupported edits
+	const id = edit.type.startsWith('put-') ? (edit as { value: { id: string } }).value.id : (edit as { id: string }).id;
+	return `${family}:${id}`;
+}
+
+/**
+ * v2.3 C5a step 4: keep only the LAST edit per `family:id`, in the order of those last
+ * occurrences. Transact applies edits sequentially and only each id's final value is validated,
+ * so the compacted list reaches the same final graph as the raw list.
+ */
+export function compactAgentEdits(edits: readonly DocumentEdit[]): DocumentEdit[] {
+	const last = new Map<string, number>();
+	edits.forEach((edit, index) => last.set(editKey(edit, index), index));
+	return edits.filter((edit, index) => last.get(editKey(edit, index)) === index);
+}
+
+type CommandEdit = { entityId: string; pair: GeometryEdit; consumesSequence: boolean };
+
+/**
+ * The owner COMMAND edit builder, extracted unchanged from `AuthoringWorkerDispatcher.command`
+ * (v2.3 WP3). Owner commands keep committing it directly through `history.execute`; agent
+ * writes never use it (agent ops are lowered to MODEL_EDIT and built with buildModelEdit).
+ */
+export function buildCommandEdit(graph: BomcGraph, command: AuthoringCommand, sequence: number): CommandEdit {
+	let entityId: string;
+	let pair: GeometryEdit;
+	let consumesSequence = false;
+	if (command.kind === 'MODEL_EDIT') {
+		const edit = buildModelEdit(graph, command.path, command.action, sequence);
+		entityId = edit.entityId;
+		pair = { forward: edit.forward, inverse: edit.inverse };
+		consumesSequence = true;
+	} else if (command.kind === 'CREATE_RECTANGLE') {
+		if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence >= Number.MAX_SAFE_INTEGER) {
+			throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
+		}
+		entityId = `${graph.documentId}:rectangle:${sequence}`;
+		if ('points' in command) {
+			pair = buildPlanarRectangleEdit(graph, entityId, command.points, command.normal);
+		} else {
+			validateRectangleInput(command.first, command.opposite);
+			pair = buildRectangleEdit(graph, entityId, command.first, command.opposite);
+		}
+		consumesSequence = true;
+	} else if (command.kind === 'CREATE_FACE_LOOP') {
+		if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence >= Number.MAX_SAFE_INTEGER) {
+			throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
+		}
+		entityId = `${graph.documentId}:face:${sequence}`;
+		pair = buildFaceLoopEdit(graph, entityId, command.points, command.normal, 'line');
+		consumesSequence = true;
+	} else if (command.kind === 'PUSH_PULL_FACE') {
+		if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence >= Number.MAX_SAFE_INTEGER) {
+			throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
+		}
+		entityId = command.faceId;
+		pair = buildPushPullFaceEdit(graph, command.faceId, command.distance, sequence);
+		consumesSequence = true;
+	} else {
+		entityId = command.entityId;
+		pair = buildExtrusionEdit(graph, entityId, command.distance);
+	}
+	return { entityId, pair, consumesSequence };
+}
+
 /**
  * The complete in-worker authority. Exported so unit tests can exercise the
  * actual dispatcher with a structured-clone MessagePort adapter.
@@ -81,6 +164,8 @@ export class AuthoringWorkerDispatcher {
 	private history: AuthoringHistory | null = null;
 	private sequence = 1;
 	private issuedWrite: IssuedWrite | null = null;
+	/** The C5 tool dispatcher (arch/tools.ts). Unit tests substitute it per instance. */
+	private readonly agentTools: typeof runTool = runTool;
 
 	constructor(post: PostMessage, uuid: () => string = makeUuid) {
 		this.post = post;
@@ -170,7 +255,7 @@ export class AuthoringWorkerDispatcher {
 		}
 	}
 
-	private async execute(request: AuthoringRequest): Promise<AuthoringResult | OpenResult | WriteResult | ClosedResult> {
+	private async execute(request: AuthoringRequest): Promise<AuthoringResult | OpenResult | WriteResult | ClosedResult | AgentResult> {
 		if (this.closed && request.type === 'CLOSE') return { kind: 'closed' };
 		switch (request.type) {
 			case 'CREATE': return this.create(request);
@@ -182,7 +267,152 @@ export class AuthoringWorkerDispatcher {
 			case 'WRITE': return await this.write(request.requestId, request.expectedRevision);
 			case 'ACK_DOWNLOAD': return this.acknowledgeDownload(request);
 			case 'CLOSE': this.closeState(); return { kind: 'closed' };
+			case 'AGENT': return await this.agent(request);
 		}
+	}
+
+	/**
+	 * C5: one agent tool call. Read tools ignore expectedRevision and never mutate. Write tools
+	 * check the CAS revision, then commit only through stageAndCommit / agentUndo. Tool-domain
+	 * failures become `toolResult.ok === false` with nothing changed; worker-level failures
+	 * (STALE_REVISION, BUSY, CLOSED) stay ordinary worker errors.
+	 */
+	private async agent(request: AgentRequest): Promise<AgentResult> {
+		this.requireActiveDocument();
+		const { tool, args, slot, context } = request.data;
+		const write = AGENT_WRITE_TOOLS.has(tool);
+		if (write && request.expectedRevision !== null) this.requireRevision(request.expectedRevision);
+		const snapshot = this.document!.snapshot();
+		const history = this.history!;
+		try {
+			const outcome = this.agentTools(tool, args, Object.freeze({
+				graph: snapshot.graph,
+				revision: snapshot.revision,
+				sequence: this.sequence,
+				context,
+				slot,
+				undoCount: history.undoCount,
+				topOrigins: (count: number) => history.topOrigins(count)
+			}));
+			if (outcome.kind === 'result') return { kind: 'agent', toolResult: outcome.toolResult, authoring: null };
+			if (!write) throw new AuthoringHistoryError(`Read tool ${tool} attempted a document change.`);
+			if (outcome.kind === 'write') {
+				const commit = this.stageAndCommit(outcome.builders, slot, outcome.failure);
+				let receipt: unknown;
+				try { receipt = outcome.receipt(commit); }
+				catch { receipt = commit; }
+				return { kind: 'agent', toolResult: { ok: true, result: receipt }, authoring: commit.changed ? this.authoringResult() : null };
+			}
+			this.agentUndo(outcome.steps);
+			const revision = this.document!.snapshot().revision;
+			return { kind: 'agent', toolResult: { ok: true, result: { undone: outcome.steps, revision } }, authoring: this.authoringResult() };
+		} catch (error) {
+			if (error instanceof AgentToolFailure) return { kind: 'agent', toolResult: { ok: false, error: error.body }, authoring: null };
+			throw error;
+		}
+	}
+
+	/**
+	 * v2.3 C5a stage-then-commit. Every op is built and applied on a scratch copy; only a fully
+	 * staged call is committed, as ONE composite history entry with origin `agent:<slot>`.
+	 * Any failure leaves graph, revision, both history stacks and sequence untouched; no
+	 * rollback through undo/redo/inverse edits ever happens.
+	 */
+	private stageAndCommit(builders: readonly AgentEditBuilder[], slot: string, failure: 'ops' | 'single' = 'ops'): AgentCommit {
+		// 1. Guards before staging (the revision CAS already ran in agent()).
+		this.requireActiveDocument();
+		if (this.issuedWrite) throw new BomcDocumentError('BUSY', 'Editing is locked while a BOMC download awaits acknowledgment.');
+		if (!AGENT_SLOT_PATTERN.test(slot)) throw new AgentToolFailure('INVALID_REQUEST', 'Agent slot is malformed.');
+		const live = this.document!.snapshot();
+		const start = this.sequence;
+		const forwardRaw: DocumentEdit[] = [];
+		const inverses: (readonly DocumentEdit[])[] = [];
+		const entityIds: string[] = [];
+		// 2. Stage on a scratch copy; the live document, history, sequence and issuedWrite are not touched.
+		const scratch = BomcDocument.fromGraph(live.graph, live.revision);
+		try {
+			for (let index = 0; index < builders.length; index += 1) {
+				try {
+					const edit = builders[index]!(scratch.snapshot().graph, start + index);
+					scratch.transact(edit.forward);
+					forwardRaw.push(...edit.forward);
+					inverses.push(edit.inverse);
+					entityIds.push(edit.entityId);
+				} catch (error) {
+					// 3. Failure during staging: nothing was applied anywhere. A single-builder call keeps
+					// its catalogue code; a model_ops op k always reports INVALID_COMMAND {opIndex:k}.
+					if (failure === 'single') {
+						if (error instanceof AgentToolFailure) throw error;
+						throw new AgentToolFailure('INVALID_COMMAND', safeMessage(error));
+					}
+					throw new AgentToolFailure('INVALID_COMMAND', safeMessage(error), { opIndex: index });
+				}
+			}
+		} finally { scratch.dispose(); }
+
+		// 4. Commit one compacted composite entry.
+		const forward = compactAgentEdits(forwardRaw);
+		const inverse = compactAgentEdits([...inverses].reverse().flat());
+		// 5. No-op. history.execute rejects an empty journal shape, so an empty composite returns
+		// here, before execute: no entry, redo stack and sequence untouched.
+		if (forward.length === 0 && inverse.length === 0) return { changed: false, entityIds, revision: live.revision };
+		if (forward.length > AGENT_COMPOSITE_EDIT_LIMIT || inverse.length > AGENT_COMPOSITE_EDIT_LIMIT) {
+			throw new AgentToolFailure('BUDGET_EXCEEDED', `The composite change has more than ${AGENT_COMPOSITE_EDIT_LIMIT} edits.`, { edits: Math.max(forward.length, inverse.length) });
+		}
+		if (forward.length !== inverse.length) {
+			throw new AgentToolFailure('INVALID_COMMAND', 'Composite forward and inverse journals have different lengths.', { reason: 'COMMIT_REJECTED' });
+		}
+		let changed: boolean;
+		try {
+			changed = this.history!.execute(this.document!, { forward, inverse, origin: `agent:${slot}` });
+		} catch (error) {
+			throw new AgentToolFailure('INVALID_COMMAND', safeMessage(error), { reason: 'COMMIT_REJECTED' });
+		}
+		if (!changed) return { changed: false, entityIds, revision: live.revision };
+		// 6. Success.
+		this.sequence = Math.max(start + builders.length, nextAuthoringSequence(this.document!.snapshot().graph));
+		return { changed: true, entityIds, revision: this.document!.snapshot().revision };
+	}
+
+	/**
+	 * v2.3 C5a step 7: failure-atomic agent undo of the top `steps` entries. All guards and a
+	 * scratch pre-check run before anything changes; the commit is one AuthoringHistory.undoMany
+	 * transact (revision +1). Never sequential undo, never redo-based recovery.
+	 */
+	private agentUndo(steps: number): void {
+		this.requireActiveDocument();
+		if (this.issuedWrite) throw new BomcDocumentError('BUSY', 'Editing is locked while a BOMC download awaits acknowledgment.');
+		if (!Number.isSafeInteger(steps) || steps < 1 || steps > AGENT_UNDO_MAX_STEPS) {
+			throw new AgentToolFailure('INVALID_REQUEST', `steps must be an integer from 1 to ${AGENT_UNDO_MAX_STEPS}.`);
+		}
+		const history = this.history!;
+		if (steps > history.undoCount) {
+			throw new AgentToolFailure('NOTHING_TO_UNDO', `Only ${history.undoCount} history entries can be undone.`, { available: history.undoCount });
+		}
+		const origins = history.topOrigins(steps);
+		if (origins.some((origin) => origin === null || !origin.startsWith('agent:'))) {
+			throw new AgentToolFailure('UNDO_NOT_AGENT', 'The requested entries include owner work; nothing was undone.', { origins });
+		}
+		const snapshot = this.document!.snapshot();
+		const entries = history.checkpoint().undo.slice(-steps).reverse();
+		const probe = BomcDocument.fromGraph(snapshot.graph, snapshot.revision);
+		try {
+			for (const entry of entries) {
+				const before = probe.snapshot();
+				try { probe.transact(entry.inverse); }
+				catch (error) { throw new AgentToolFailure('INVALID_COMMAND', safeMessage(error), { reason: 'UNDO_REJECTED' }); }
+				const after = probe.snapshot();
+				if (graphsEqual(before.graph, after.graph)) {
+					throw new AgentToolFailure('INVALID_COMMAND', 'An agent history entry would not change the document; nothing was undone.', { reason: 'UNDO_NOOP' });
+				}
+				const admission = validateEditableSubset(after.graph);
+				if (!admission.editable) throw new AgentToolFailure('INVALID_COMMAND', admission.reason, { reason: 'UNDO_REJECTED' });
+			}
+		} finally { probe.dispose(); }
+		let changed: boolean;
+		try { changed = history.undoMany(this.document!, steps); }
+		catch (error) { throw new AgentToolFailure('INVALID_COMMAND', safeMessage(error), { reason: 'UNDO_COMMIT_REJECTED' }); }
+		if (!changed) throw new AgentToolFailure('INVALID_COMMAND', 'Agent undo did not change the document; nothing was undone.', { reason: 'UNDO_COMMIT_REJECTED' });
 	}
 
 	private create(request: Extract<AuthoringRequest, { type: 'CREATE' }>): AuthoringResult {
@@ -266,44 +496,7 @@ export class AuthoringWorkerDispatcher {
 		this.requireRevision(request.expectedRevision);
 		this.requireActiveDocument();
 		const graph = this.document!.snapshot().graph;
-		let entityId: string;
-		let pair: GeometryEdit;
-		let consumesSequence = false;
-		if (request.data.kind === 'MODEL_EDIT') {
-			const edit = buildModelEdit(graph, request.data.path, request.data.action, this.sequence);
-			entityId = edit.entityId;
-			pair = { forward: edit.forward, inverse: edit.inverse };
-			consumesSequence = true;
-		} else if (request.data.kind === 'CREATE_RECTANGLE') {
-			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
-				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
-			}
-			entityId = `${graph.documentId}:rectangle:${this.sequence}`;
-			if ('points' in request.data) {
-				pair = buildPlanarRectangleEdit(graph, entityId, request.data.points, request.data.normal);
-			} else {
-				validateRectangleInput(request.data.first, request.data.opposite);
-				pair = buildRectangleEdit(graph, entityId, request.data.first, request.data.opposite);
-			}
-			consumesSequence = true;
-		} else if (request.data.kind === 'CREATE_FACE_LOOP') {
-			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
-				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
-			}
-			entityId = `${graph.documentId}:face:${this.sequence}`;
-			pair = buildFaceLoopEdit(graph, entityId, request.data.points, request.data.normal, 'line');
-			consumesSequence = true;
-		} else if (request.data.kind === 'PUSH_PULL_FACE') {
-			if (!Number.isSafeInteger(this.sequence) || this.sequence < 1 || this.sequence >= Number.MAX_SAFE_INTEGER) {
-				throw new AuthoringGeometryError('Authoring operation sequence is exhausted.');
-			}
-			entityId = request.data.faceId;
-			pair = buildPushPullFaceEdit(graph, request.data.faceId, request.data.distance, this.sequence);
-			consumesSequence = true;
-		} else {
-			entityId = request.data.entityId;
-			pair = buildExtrusionEdit(graph, entityId, request.data.distance);
-		}
+		const { entityId, pair, consumesSequence } = buildCommandEdit(graph, request.data, this.sequence);
 		const changed = this.history!.execute(this.document!, pair);
 		if (changed && consumesSequence) this.sequence += 1;
 		const result = this.authoringResult();

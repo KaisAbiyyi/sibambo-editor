@@ -1,14 +1,21 @@
 import { graphsEqual, validateAuthoringCheckpoint } from './history.js';
 import { hasEntityId } from './geometry.js';
 import {
+	AGENT_SLOT_PATTERN,
+	AGENT_TOOL_NAMES,
+	AGENT_WRITE_TOOLS,
 	AUTHORING_PROTOCOL_VERSION,
 	hasExactKeys,
+	isAgentContext,
 	isAuthoringCheckpointShape,
 	isAuthoringCommand,
 	isRecord,
 	isUuid,
 	isSafeRevision,
 	isWorkerReadyMessage,
+	type AgentRequest,
+	type AgentResult,
+	type AgentToolName,
 	type AuthoringCheckpoint,
 	type AuthoringCommand,
 	type AuthoringErrorCode,
@@ -52,8 +59,29 @@ type RequestEntry = {
 	removeAbort?: () => void;
 	internalRestore?: boolean;
 	closeHandshake?: boolean;
+	agent?: { tool: AgentToolName; slot: string };
 	settled: boolean;
 };
+
+function isAgentToolResult(value: unknown): boolean {
+	if (!isRecord(value) || typeof value.ok !== 'boolean') return false;
+	if (value.ok) return hasExactKeys(value, ['ok', 'result']);
+	if (!hasExactKeys(value, ['ok', 'error']) || !isRecord(value.error)) return false;
+	const error = value.error;
+	const keys = Object.keys(error);
+	return (hasExactKeys(error, ['code', 'message', 'retryable', 'nextAction'])
+		|| (keys.length === 5 && hasExactKeys(error, ['code', 'message', 'retryable', 'nextAction', 'detail']) && isRecord(error.detail)))
+		&& typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)
+		&& typeof error.message === 'string' && typeof error.retryable === 'boolean' && typeof error.nextAction === 'string';
+}
+
+function isAgentResultValue(value: unknown): value is AgentResult {
+	if (!isRecord(value) || !hasExactKeys(value, ['kind', 'toolResult', 'authoring']) || value.kind !== 'agent'
+		|| !isAgentToolResult(value.toolResult)) return false;
+	if (value.authoring === null) return true;
+	// A committed write is always a successful tool result.
+	return (value.toolResult as { ok: boolean }).ok && isAuthoringResultValue(value.authoring);
+}
 
 type ClientOptions = {
 	workerFactory?: WorkerFactory;
@@ -272,6 +300,31 @@ export class AuthoringClient {
 		}, { ...options, sequenceIncrement, command: ownedCommand });
 	}
 
+	/**
+	 * SIB-MCP-MODELING-001 C5: one agent tool call, mirroring command(). Read tools send
+	 * expectedRevision null. Write tools send an explicit base revision, or 'current' to bind
+	 * the acknowledged revision when the request is sent (as command() does).
+	 */
+	agent(data: AgentRequest['data'], expectedRevision: number | 'current' | null, options: { signal?: AbortSignal } = {}): Promise<AgentResult> {
+		if (!isRecord(data) || !hasExactKeys(data, ['tool', 'args', 'slot', 'context'])
+			|| !(AGENT_TOOL_NAMES as readonly string[]).includes(data.tool) || !isRecord(data.args)
+			|| typeof data.slot !== 'string' || !AGENT_SLOT_PATTERN.test(data.slot) || !isAgentContext(data.context)) {
+			return Promise.reject(new AuthoringClientError('INVALID_COMMAND', 'Agent request is malformed.'));
+		}
+		const write = AGENT_WRITE_TOOLS.has(data.tool);
+		if (write ? expectedRevision === null || (expectedRevision !== 'current' && !isSafeRevision(expectedRevision)) : expectedRevision !== null) {
+			return Promise.reject(new AuthoringClientError('INVALID_COMMAND', 'Agent write tools need a revision; read tools must not send one.'));
+		}
+		let owned: AgentRequest['data'];
+		try { owned = structuredClone(data); }
+		catch { return Promise.reject(new AuthoringClientError('INVALID_COMMAND', 'Agent arguments are not structured-clone data.')); }
+		return this.enqueue<AgentResult>('AGENT', (requestId) => ({
+			protocolVersion: AUTHORING_PROTOCOL_VERSION, sessionId: this.sessionId, requestId, type: 'AGENT',
+			expectedRevision: expectedRevision === 'current' ? this.requireCheckpoint().snapshot.revision : expectedRevision,
+			data: owned
+		}), { ...options, agent: { tool: owned.tool, slot: owned.slot } });
+	}
+
 	undo(options: { signal?: AbortSignal } = {}): Promise<AuthoringResult> {
 		return this.enqueue<AuthoringResult>('UNDO', (requestId) => ({
 			protocolVersion: AUTHORING_PROTOCOL_VERSION, sessionId: this.sessionId, requestId,
@@ -382,7 +435,7 @@ export class AuthoringClient {
 		return this.closePromise;
 	}
 
-	private enqueue<T>(type: AuthoringRequest['type'], build: (requestId: number) => AuthoringRequest, options: { signal?: AbortSignal; transfer?: Transferable[]; onProgress?: ProgressHandler; acknowledges?: { writeId: string; revision: number }; sequenceIncrement?: number; command?: AuthoringCommand } = {}): Promise<T> {
+	private enqueue<T>(type: AuthoringRequest['type'], build: (requestId: number) => AuthoringRequest, options: { signal?: AbortSignal; transfer?: Transferable[]; onProgress?: ProgressHandler; acknowledges?: { writeId: string; revision: number }; sequenceIncrement?: number; command?: AuthoringCommand; agent?: RequestEntry['agent'] } = {}): Promise<T> {
 		if (this.closed || this.closing) return Promise.reject(new AuthoringClientError('CLOSED', 'Authoring client is closed.'));
 		if (this.restoreErrorValue || this.recoveryPending) return Promise.reject(new AuthoringClientError('BUSY', 'Authoring worker is recovering; retry restore before editing.'));
 		if (options.signal?.aborted) return Promise.reject(new AuthoringClientError('ABORTED', 'Authoring request was aborted before it was queued.'));
@@ -399,6 +452,7 @@ export class AuthoringClient {
 			acknowledges: options.acknowledges,
 				sequenceIncrement: options.sequenceIncrement,
 				command: options.command,
+			agent: options.agent,
 			resolve: resolvePromise as (value: unknown) => void,
 			reject: rejectPromise
 		});
@@ -418,7 +472,7 @@ export class AuthoringClient {
 		type: AuthoringRequest['type'],
 		build: (requestId: number) => AuthoringRequest,
 		requestId: number,
-		options: Partial<Pick<RequestEntry, 'transfer' | 'signal' | 'onProgress' | 'acknowledges' | 'sequenceIncrement' | 'command' | 'resolve' | 'reject' | 'internalRestore' | 'closeHandshake'>> = {}
+		options: Partial<Pick<RequestEntry, 'transfer' | 'signal' | 'onProgress' | 'acknowledges' | 'sequenceIncrement' | 'command' | 'resolve' | 'reject' | 'internalRestore' | 'closeHandshake' | 'agent'>> = {}
 	): RequestEntry {
 		return {
 			requestId,
@@ -434,6 +488,7 @@ export class AuthoringClient {
 			reject: options.reject ?? (() => undefined),
 			internalRestore: options.internalRestore,
 			closeHandshake: options.closeHandshake,
+			agent: options.agent,
 			settled: false
 		};
 	}
@@ -582,6 +637,25 @@ export class AuthoringClient {
 			return;
 		}
 		let deliveredResult: unknown = result;
+		if (active.type === 'AGENT') {
+			const agentResult = result as AgentResult;
+			if (agentResult.authoring !== null) {
+				// A committed agent write/undo: same trusted-transition validation as COMMAND/UNDO.
+				const isUndo = active.agent?.tool === 'undo';
+				const checked = validateAuthoringResult(agentResult.authoring, false, true, !isUndo);
+				if (!checked || !this.validateAgentSemantics(active, checked)) {
+					this.handleTransportFailure(generation, new Error('Agent checkpoint failed validation; no partial checkpoint was published.'));
+					return;
+				}
+				this.reuseAcknowledgedHistory(active, checked);
+				const frozenCheckpoint = freezeValue(checked.checkpoint);
+				this.checkpointValue = frozenCheckpoint;
+				deliveredResult = { ...agentResult, authoring: { ...checked, checkpoint: frozenCheckpoint } };
+			}
+			this.finishEntry(active, deliveredResult);
+			this.sendNext();
+			return;
+		}
 		if (isAuthoringResultValue(result)) {
 			const trustedTransition = active.type === 'COMMAND' || active.type === 'UNDO' || active.type === 'REDO' || active.type === 'ACK_DOWNLOAD';
 			const checked = validateAuthoringResult(result, active.type === 'RESTORE_CHECKPOINT', trustedTransition, active.type === 'COMMAND');
@@ -633,7 +707,30 @@ export class AuthoringClient {
 		}
 		if (entry.type === 'WRITE') return validWriteResult(result, this.checkpointValue) ? result : null;
 		if (entry.type === 'CLOSE') return isRecord(result) && hasExactKeys(result, ['kind']) && result.kind === 'closed' ? result : null;
+		if (entry.type === 'AGENT') return isAgentResultValue(result) ? result : null;
 		return null;
+	}
+
+	/** C5/C5a state contract for a committed agent result (revision +1 exactly in both cases). */
+	private validateAgentSemantics(entry: RequestEntry, result: AuthoringResult): boolean {
+		const previous = this.checkpointValue;
+		const agent = entry.agent;
+		if (!previous || !agent || !AGENT_WRITE_TOOLS.has(agent.tool) || result.commandResult !== undefined) return false;
+		const checkpoint = result.checkpoint;
+		if (checkpoint.snapshot.revision !== previous.snapshot.revision + 1) return false;
+		const beforeSaved = previous.history.savedGraph;
+		const afterSaved = checkpoint.history.savedGraph;
+		if (beforeSaved === null ? afterSaved !== null : afterSaved === null || !graphsEqual(beforeSaved, afterSaved)) return false;
+		if (agent.tool === 'undo') {
+			const moved = previous.history.undo.length - checkpoint.history.undo.length;
+			if (checkpoint.sequence !== previous.sequence || moved < 1 || moved > 10
+				|| checkpoint.history.redo.length !== previous.history.redo.length + moved) return false;
+			return previous.history.undo.slice(-moved).every((item) => typeof item.origin === 'string' && item.origin.startsWith('agent:'));
+		}
+		return checkpoint.sequence > previous.sequence
+			&& checkpoint.history.undo.length === previous.history.undo.length + 1
+			&& checkpoint.history.redo.length === 0
+			&& checkpoint.history.undo.at(-1)?.origin === `agent:${agent.slot}`;
 	}
 
 	private validateAuthoringSemantics(entry: RequestEntry, result: AuthoringResult): boolean {
@@ -715,6 +812,16 @@ export class AuthoringClient {
 			undo = previous.history.undo;
 			redo = previous.history.redo;
 			savedGraph = result.checkpoint.snapshot.graph;
+		} else if (entry.type === 'AGENT' && entry.agent?.tool === 'undo') {
+			// Same stacks as `moved` sequential undo calls (C5 undoMany).
+			const moved = previous.history.undo.length - incoming.undo.length;
+			undo = previous.history.undo.slice(0, previous.history.undo.length - moved);
+			redo = [...previous.history.redo, ...previous.history.undo.slice(-moved).reverse()];
+			savedGraph = previous.history.savedGraph;
+		} else if (entry.type === 'AGENT') {
+			undo = [...previous.history.undo, incoming.undo.at(-1)!];
+			redo = [];
+			savedGraph = previous.history.savedGraph;
 		} else return;
 		result.checkpoint.history = Object.freeze({
 			undo: Object.isFrozen(undo) ? undo : Object.freeze([...undo]),
