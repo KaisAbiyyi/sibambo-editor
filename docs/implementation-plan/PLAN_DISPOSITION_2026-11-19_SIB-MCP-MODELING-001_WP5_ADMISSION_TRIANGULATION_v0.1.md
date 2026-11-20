@@ -1,6 +1,6 @@
 # PLAN DISPOSITION (PROPOSED) — SIB-MCP-MODELING-001 WP5: multi-hole Earcut triangle count vs `geometry.ts:2044`
 
-ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-19 (Asia/Jakarta)** · Status **PROPOSED (STOP → REVIEW/PLAN).**
+ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-19 (Asia/Jakarta)** · Status **RESOLVED (2026-11-20): Owner Decision D-WP5-1 APPROVED — Option A. Bounded modification applied to `apps/editor/src/lib/authoring/geometry.ts:2044-2047` only; canonical `sameTuple(..., triangulateFaceRings(...))` and all fail-closed security checks preserved. Original proposal preserved below as history.**
 
 - **Trigger:** WP5 CP5 qualification (`T-B2`, `G10-CP5` for `G4` and `G5`) on branch `work/mcp-modeling-001/wp5-topology-bake`.
 - **Author / Implementer:** Nazar (`NazarMuhammadFF`) via Antigravity agent session `9416ba1f-01ff-45a6-9a3a-ae1a6882457d`.

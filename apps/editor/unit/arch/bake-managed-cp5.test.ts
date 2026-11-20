@@ -1,11 +1,8 @@
 /**
  * SIB-MCP-MODELING-001 WP5 (CP5) — Bake, Managed Groups, and Determinism tests.
- * Covers G2-CP5 (baked comparison), G10-CP5 (baked determinism), T-B1–T-B6,
+ * Covers G2-CP5 (baked comparison), G10-CP5 (baked determinism for G1/G4/G8), T-B1–T-B6,
+ * D-WP5-1 Option A multi-hole triangulation & fail-closed admission regressions,
  * container transforms (B1), owner undo/redo/save preservation, and budget/ring guards.
- *
- * NOTE on G4/G5 (2+ aligned holes): see PLAN_DISPOSITION_2026-11-19_SIB-MCP-MODELING-001_WP5_ADMISSION_TRIANGULATION_v0.1.md.
- * `geometry.ts:2044` is READ-ONLY in WP5 and expects `rv + 2*holes - 2` triangles, while `geometry.ts:2064`
- * (`triangulateFaceRings` / Three Earcut) omits collinear bridge triangles and returns 12 (G4) / 22 (G5).
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { LineSegments } from 'three';
@@ -20,7 +17,7 @@ import { createKernel, type Kernel } from '../../src/lib/arch/kernel.js';
 import { effectiveModuleTransform, readManaged } from '../../src/lib/arch/managed.js';
 import type { ArchModule } from '../../src/lib/arch/schema.js';
 import { AuthoringWorkerDispatcher } from '../../src/lib/authoring/bomc-authoring.worker.js';
-import { faceFromRing, journalEntry, v2FaceLabel } from '../../src/lib/authoring/geometry.js';
+import { faceFromRing, journalEntry, triangulateFaceRings, v2FaceLabel } from '../../src/lib/authoring/geometry.js';
 import { AuthoringHistory, graphsEqual } from '../../src/lib/authoring/history.js';
 import { buildModelEdit, modelMetadata, nextModelSequence, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
 import { AUTHORING_PROTOCOL_VERSION, type AuthoringWorkerMessage, type ModelAction } from '../../src/lib/authoring/protocol.js';
@@ -98,7 +95,7 @@ async function storeOnlyBytes(graph: BomcGraph): Promise<ArrayBuffer> {
 }
 
 describe('Bake & Managed Modules (WP5 / CP5)', () => {
-	test('T-B1: create, re-bake (keeps instance/definition/mesh IDs), and remove forward -> inverse restores exact graphsEqual', () => {
+	test('T-B1: create (G1), re-bake (G4 then G8, keeping instance/definition/mesh IDs), and remove forward -> inverse restores exact graphsEqual', () => {
 		const g0 = newGraph();
 		const m1 = g1();
 		const createRes = bakeModule(g0, m1, evaluate(m1), 1, 1);
@@ -110,34 +107,43 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		expect(managed1.instance!.id).toBe(`${DOC}:instance:op:1:1`);
 		expect(managed1.entry.module.revision).toBe(1);
 
-		// Re-bake as G8 (doors/windows + multiple materials/parts) with sequence S=2: keeps instance/definition/mesh IDs and container label!
-		const m2 = g8();
-		const updateRes = bakeModule(gAfterCreate, m2, evaluate(m2), 2, 1);
-		const gAfterUpdate = applyEdits(gAfterCreate, updateRes.forward);
-		expect(graphsEqual(applyEdits(gAfterUpdate, updateRes.inverse), gAfterCreate)).toBe(true);
+		// Re-bake as G4 (partition with 2 aligned holes) at S=2: keeps instance/definition/mesh IDs and container label
+		const m2 = g4();
+		const update1Res = bakeModule(gAfterCreate, m2, evaluate(m2), 2, 1);
+		const gAfterUpdate1 = applyEdits(gAfterCreate, update1Res.forward);
+		expect(graphsEqual(applyEdits(gAfterUpdate1, update1Res.inverse), gAfterCreate)).toBe(true);
 
-		const managed2 = readManaged(gAfterUpdate).get(m2.moduleId)!;
+		const managed2 = readManaged(gAfterUpdate1).get(m2.moduleId)!;
 		expect(managed2.state).toBe('ok');
 		expect(managed2.instance!.id).toBe(managed1.instance!.id);
 		expect(managed2.instance!.definitionId).toBe(managed1.instance!.definitionId);
 		expect(managed2.instance!.label).toBe(managed1.instance!.label);
 		expect(managed2.entry.module.revision).toBe(2);
 
-		const def2 = gAfterUpdate.definitions.find((d) => d.id === managed2.instance!.definitionId)!;
 		const def1 = gAfterCreate.definitions.find((d) => d.id === managed1.instance!.definitionId)!;
+		const def2 = gAfterUpdate1.definitions.find((d) => d.id === managed2.instance!.definitionId)!;
 		expect(def2.meshId).toBe(def1.meshId);
-		const mesh2 = gAfterUpdate.meshes.find((m) => m.id === def2.meshId)!;
-		expect(mesh2.faces).toHaveLength(49);
+		const mesh2 = gAfterUpdate1.meshes.find((m) => m.id === def2.meshId)!;
+		expect(mesh2.faces).toHaveLength(14);
 		expect(mesh2.faces.every((f) => f.id.startsWith(`${DOC}:op:2:arch-face:`))).toBe(true);
 
-		// Remove attached module: forward -> inverse restores exact graph!
-		const removeRes = bakeModule(gAfterUpdate, m2, null, 3, 1);
-		const gAfterRemove = applyEdits(gAfterUpdate, removeRes.forward);
+		// Re-bake as G8 (doors/windows + multiple parts/materials) at S=3
+		const m3 = g8();
+		const update2Res = bakeModule(gAfterUpdate1, m3, evaluate(m3), 3, 1);
+		const gAfterUpdate2 = applyEdits(gAfterUpdate1, update2Res.forward);
+		expect(graphsEqual(applyEdits(gAfterUpdate2, update2Res.inverse), gAfterUpdate1)).toBe(true);
+		const managed3 = readManaged(gAfterUpdate2).get(m3.moduleId)!;
+		expect(managed3.entry.module.revision).toBe(3);
+		expect(gAfterUpdate2.meshes.find((m) => m.id === def2.meshId)!.faces).toHaveLength(49);
+
+		// Remove attached module: forward -> inverse restores exact graph
+		const removeRes = bakeModule(gAfterUpdate2, m3, null, 4, 1);
+		const gAfterRemove = applyEdits(gAfterUpdate2, removeRes.forward);
 		expect(readManaged(gAfterRemove).size).toBe(0);
 		expect(gAfterRemove.instances).toHaveLength(1);
 		expect(gAfterRemove.definitions).toHaveLength(1);
 		expect(gAfterRemove.meshes).toHaveLength(0);
-		expect(graphsEqual(applyEdits(gAfterRemove, removeRes.inverse), gAfterUpdate)).toBe(true);
+		expect(graphsEqual(applyEdits(gAfterRemove, removeRes.inverse), gAfterUpdate2)).toBe(true);
 	});
 
 	test('G2-CP5: baked G2 (CCW, CW, rotated) matches baked G1 (positions, faceRings, triangles, normals, materials), ids excluded', () => {
@@ -161,11 +167,13 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('T-B2 (single-hole & hole-free fixtures): baked G1, G2, G3, G6, G7, G8, G9 pass validateAuthoringDocument and BomcWriter', async () => {
+	test('T-B2: every baked G1–G9 document passes validateAuthoringDocument and BomcWriter', async () => {
 		for (const [name, mod] of [
 			['G1', g1()],
 			['G2', g2()],
 			['G3', g3()],
+			['G4', g4()],
+			['G5', g5()],
 			['G6', g6()],
 			['G7(14)', g7(14)],
 			['G7(15)', g7(15)],
@@ -185,15 +193,81 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('D-WP5-1 reproduction: G4 and G5 multi-hole Earcut triangulation triggers geometry.ts:2044 vs 2064 conflict', () => {
-		for (const [name, mod] of [['G4', g4()], ['G5', g5()]] as const) {
-			expect(() => bakeModule(newGraph(), mod, evaluate(mod), 1, 1)).toThrow(
-				/ADMISSION:Face .* has malformed ring or triangle topology\./
-			);
+	test('D-WP5-1 Option A regression: G4/G5 multi-hole Earcut triangulation, scene projection, and malformed-face fail-closed checks', () => {
+		// G4 (2 aligned room holes) & G5 (4 aligned room holes)
+		for (const [name, mod, expectedTris, expectedEdges] of [
+			['G4', g4(), 12, 36],
+			['G5', g5(), 22, 60]
+		] as const) {
+			const { nextGraph } = bakeInto(newGraph(), mod, 1, 1);
+			const mesh = nextGraph.meshes[0]!;
+			const holedFaces = mesh.faces.filter((f) => f.holes.length > 0);
+			expect(holedFaces).toHaveLength(2);
+			for (const f of holedFaces) {
+				expect(f.triangles.length / 3).toBe(expectedTris);
+				expect(f.triangles).toEqual(triangulateFaceRings(mesh, f.outer, f.holes, f.normal as [number, number, number]));
+			}
+			const doc = BomcDocument.fromGraph(nextGraph);
+			try {
+				const projection = projectAuthoringScene(doc.snapshot(), DEFAULT_DISPLAY_STATE);
+				const lineGroups: LineSegments[] = [];
+				projection.group.traverse((obj) => {
+					if (obj instanceof LineSegments && obj.name === 'editor-authoring-source-edges') lineGroups.push(obj);
+				});
+				expect(lineGroups).toHaveLength(1);
+				expect(lineGroups[0]!.geometry.getAttribute('position').count).toBe(expectedEdges * 2);
+			} finally {
+				doc.dispose();
+			}
+			expect(validateAuthoringDocument(nextGraph).editable).toBe(true);
+			expect(readManaged(nextGraph).get(mod.moduleId)!.state).toBe('ok');
 		}
-	});
 
-	test.todo('T-B2 / G10-CP5 for G4 and G5 (blocked by D-WP5-1: geometry.ts:2044 vs triangulateFaceRings on >=2 aligned holes)');
+		// Multi-hole slab (2 aligned holes)
+		const multiHoleSlab = moduleOf([
+			{
+				elementId: 'slab-2h',
+				kind: 'slab',
+				outline: [[0, 0], [6, 0], [6, 3], [0, 3]],
+				holes: [
+					[[0.5, 0.5], [2.5, 0.5], [2.5, 2.5], [0.5, 2.5]],
+					[[3.5, 0.5], [5.5, 0.5], [5.5, 2.5], [3.5, 2.5]]
+				],
+				thickness: 0.2,
+				topElevation: 0.2
+			}
+		]);
+		const { nextGraph: slabGraph } = bakeInto(newGraph(), multiHoleSlab, 1, 1);
+		expect(validateAuthoringDocument(slabGraph).editable).toBe(true);
+
+		// Malformed faces must fail closed under Option A
+		const { nextGraph: g4Base } = bakeInto(newGraph(), g4(), 1, 1);
+		const mutateFace = (mutate: (face: any, mesh: any) => void) => {
+			const cloned = structuredClone(g4Base);
+			const mesh = cloned.meshes[0]!;
+			const holedIdx = mesh.faces.findIndex((f) => f.holes.length > 0);
+			mutate(mesh.faces[holedIdx]!, mesh);
+			return validateAuthoringDocument(cloned);
+		};
+
+		// 1. Empty triangles on holed face -> rejected
+		expect(mutateFace((f) => { f.triangles = []; })).toMatchObject({ editable: false });
+		// 2. Non-multiple of 3 on holed face -> rejected
+		expect(mutateFace((f) => { f.triangles = f.triangles.slice(0, 5); })).toMatchObject({ editable: false });
+		// 3. Exceeds (V + 2H - 2) * 3 upper bound -> rejected
+		expect(mutateFace((f) => { f.triangles = [...f.triangles, f.outer[0], f.outer[1], f.outer[2], f.outer[0], f.outer[1], f.outer[2], f.outer[0], f.outer[1], f.outer[2]]; })).toMatchObject({ editable: false });
+		// 4. Same length (12 tris) but non-canonical vertex order -> rejected by sameTuple(face.triangles, triangulateFaceRings)
+		expect(mutateFace((f) => { const t = [...f.triangles]; [t[1], t[2]] = [t[2]!, t[1]!]; f.triangles = t; })).toMatchObject({ editable: false });
+		// 5. References vertex outside ringVertices -> rejected
+		expect(mutateFace((f, m) => { const outside = m.faces.find((x: any) => !f.outer.includes(x.outer[0]) && !f.holes.flat().includes(x.outer[0]))!.outer[0]; f.triangles[0] = outside; })).toMatchObject({ editable: false });
+
+		// 6. Backward compatibility: hole-free face still enforces exact (V - 2) * 3
+		const { nextGraph: g6Base } = bakeInto(newGraph(), g6(), 1, 1);
+		const g6Mut = structuredClone(g6Base);
+		const plainFace = g6Mut.meshes[0]!.faces.find((f) => f.holes.length === 0 && f.outer.length >= 4)!;
+		plainFace.triangles = plainFace.triangles.slice(0, 3);
+		expect(validateAuthoringDocument(g6Mut)).toMatchObject({ editable: false });
+	});
 
 	test('T-B3: owner push-pull inside managed container sets state to detached while keeping document editable; container move stays ok', () => {
 		const { baked, nextGraph } = bakeInto(newGraph(), g3(), 1, 1);
@@ -232,14 +306,14 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 				fromInstanceMatrix(reBakedGraph.instances.find((i) => i.id === baked.instanceId)!.matrix)
 			);
 
-			// Now owner edits a face inside the container -> state becomes 'detached'!
+			// Owner edits a face inside the container -> state becomes 'detached'
 			const mesh = moved.meshes[0]!;
 			const topFace = mesh.faces.find((f) => f.normal[2] > 0.99)!;
 			const pushed = run({ type: 'raw', command: { kind: 'PUSH_PULL_FACE', faceId: topFace.id, distance: 0.2 } }, [baked.instanceId]);
 			expect(validateAuthoringDocument(pushed).editable).toBe(true);
 			expect(readManaged(pushed).get('test/ground')!.state).toBe('detached');
 
-			// Owner undo restores attached 'ok' state!
+			// Owner undo restores attached 'ok' state
 			expect(history.undo(doc)).toBe(true);
 			expect(readManaged(doc.snapshot().graph).get('test/ground')!.state).toBe('ok');
 		} finally {
@@ -305,8 +379,8 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('T-B6 (store-only OPEN): baked G1, G2, G3, G6, G7, G8, G9 open as authoring with identical arch', async () => {
-		for (const mod of [g1(), g2(), g3(), g6(), g7(30), g8(), g9()]) {
+	test('T-B6 (store-only OPEN): every baked G1–G9 opens as authoring with identical arch', async () => {
+		for (const mod of [g1(), g2(), g3(), g4(), g5(), g6(), g7(30), g8(), g9()]) {
 			const { nextGraph } = bakeInto(newGraph(), mod, 1, 1);
 			const expectedArch = JSON.stringify(modelMetadata(nextGraph).arch);
 
@@ -317,8 +391,8 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('T-B6 (WRITE -> OPEN round-trip, requires DecompressionStream deflate / Bun >= 1.4.4)', async () => {
-		for (const mod of [g1(), g2(), g3(), g6(), g7(30), g8(), g9()]) {
+	test('T-B6 (WRITE -> OPEN round-trip across G1–G9, requires DecompressionStream deflate / Bun >= 1.4.4)', async () => {
+		for (const mod of [g1(), g2(), g3(), g4(), g5(), g6(), g7(30), g8(), g9()]) {
 			const { nextGraph } = bakeInto(newGraph(), mod, 1, 1);
 			const expectedArch = JSON.stringify(modelMetadata(nextGraph).arch);
 
@@ -334,10 +408,10 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('G10-CP5 (G1 and G8): baked SHA-256 identical across two fresh kernels', async () => {
+	test('G10-CP5 (G1, G4, G8): baked SHA-256 identical across two fresh kernels', async () => {
 		const k2 = createKernel();
 		await k2.init();
-		for (const mod of [g1(), g8()]) {
+		for (const mod of [g1(), g4(), g8()]) {
 			const a = bakeInto(newGraph(), mod, 1, 1, kernel).baked.bakedMeshSha256;
 			const b = bakeInto(newGraph(), mod, 1, 1, k2).baked.bakedMeshSha256;
 			expect(a).toBe(b);

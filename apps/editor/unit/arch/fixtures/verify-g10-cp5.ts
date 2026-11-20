@@ -1,17 +1,17 @@
 /**
  * Cross-runtime G10-CP5 baked SHA-256 check (Bun vs Node).
- * Verifies baked G1 and G8 deterministic mesh digests (G4 pending D-WP5-1 disposition).
+ * Verifies baked G1, G4, and G8 deterministic mesh digests.
  */
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { bakeModule } from '../../../src/lib/arch/bake.js';
 import { evaluateModule } from '../../../src/lib/arch/evaluate.js';
 import { createKernel } from '../../../src/lib/arch/kernel.js';
-import { g1, g8 } from './modules.js';
+import { g1, g4, g8 } from './modules.js';
 
 const kernel = createKernel();
 await kernel.init();
 const hashes: Record<string, string> = {};
-for (const [name, make] of [['G1', g1], ['G8', g8]] as const) {
+for (const [name, make] of [['G1', g1], ['G4', g4], ['G8', g8]] as const) {
 	const doc = BomcDocument.create({ documentId: '4a2e1c9b-7d3f-4a8e-9b2c-1d4e5f6a7b8c', name });
 	const g0 = structuredClone(doc.snapshot().graph);
 	doc.dispose();

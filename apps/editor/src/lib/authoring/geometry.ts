@@ -2042,9 +2042,12 @@ function validateTopologyEditableSubset(graph: BomcGraph): EditableSubsetResult 
 				const rings = [face.outer, ...face.holes];
 				const ringVertices = rings.flatMap((ring) => [...ring]);
 				const expectedTriangleCount = ringVertices.length + 2 * face.holes.length - 2;
+				const validTriangleLength = face.holes.length === 0
+					? face.triangles.length === expectedTriangleCount * 3
+					: face.triangles.length >= 3 && face.triangles.length % 3 === 0 && face.triangles.length <= expectedTriangleCount * 3;
 				if (rings.some((ring) => ring.length < 3 || ring.length > 256 || new Set(ring).size !== ring.length)
 					|| new Set(ringVertices).size !== ringVertices.length
-					|| face.triangles.length !== expectedTriangleCount * 3
+					|| !validTriangleLength
 					|| face.triangles.some((vertex) => !ringVertices.includes(vertex))) {
 					return { editable: false, reason: `Face ${face.id} has malformed ring or triangle topology.` };
 				}
