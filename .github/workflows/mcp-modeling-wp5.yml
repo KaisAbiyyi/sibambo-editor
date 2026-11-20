@@ -59,9 +59,11 @@ jobs:
         run: bun run build
       - name: G10 CP4 & CP5 digests under this Bun
         working-directory: apps/editor
+        shell: bash
         run: |
           bun unit/arch/fixtures/verify-g10.ts
-          bun unit/arch/fixtures/verify-g10-cp5.ts
+          bun unit/arch/fixtures/verify-g10-cp5.ts > "${RUNNER_TEMP:-/tmp}/g10-cp5-bun.json"
+          cat "${RUNNER_TEMP:-/tmp}/g10-cp5-bun.json"
       - name: G10 CP4 & CP5 digests under Node
         if: matrix.bun == '1.4.4'
         working-directory: apps/editor
@@ -71,4 +73,4 @@ jobs:
           bun build unit/arch/fixtures/verify-g10.ts --target=node --outfile=verify-g10.mjs --external manifold-3d
           node verify-g10.mjs
           bun build unit/arch/fixtures/verify-g10-cp5.ts --target=node --outfile=verify-g10-cp5.mjs --external manifold-3d
-          node verify-g10-cp5.mjs
+          node verify-g10-cp5.mjs --compare "${RUNNER_TEMP:-/tmp}/g10-cp5-bun.json"

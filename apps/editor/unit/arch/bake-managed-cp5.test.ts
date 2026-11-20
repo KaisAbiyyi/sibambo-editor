@@ -5,6 +5,11 @@
  * container transforms (B1), owner undo/redo/save preservation, and budget/ring guards.
  */
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { LineSegments } from 'three';
 import { DEFAULT_DISPLAY_STATE } from '@sibambo/viewport';
 import type { BomcGraph } from '@sibambo/bomc-document';
@@ -408,14 +413,115 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		}
 	});
 
-	test('G10-CP5 (G1, G4, G8): baked SHA-256 identical across two fresh kernels', async () => {
+	test('G10-CP5 (G1, G4, G8): baked SHA-256 identical across two fresh kernels and equal to pinned digests', async () => {
+		const pinned = JSON.parse(readFileSync(new URL('./golden/g10-cp5-bake-hashes.json', import.meta.url), 'utf8')).hashes as Record<string, string>;
 		const k2 = createKernel();
 		await k2.init();
-		for (const mod of [g1(), g4(), g8()]) {
+		for (const [name, mod] of [['G1', g1()], ['G4', g4()], ['G8', g8()]] as const) {
 			const a = bakeInto(newGraph(), mod, 1, 1, kernel).baked.bakedMeshSha256;
 			const b = bakeInto(newGraph(), mod, 1, 1, k2).baked.bakedMeshSha256;
 			expect(a).toBe(b);
+			expect(a).toBe(pinned[name]!);
 			expect(a).toMatch(/^[0-9a-f]{64}$/);
+		}
+	});
+
+	test('G10-CP5 CLI verifier: enforces pinned & cross-runtime equality (Bun vs Node) and fails closed on mismatch', () => {
+		const pinnedPath = fileURLToPath(new URL('./golden/g10-cp5-bake-hashes.json', import.meta.url));
+		const pinned = JSON.parse(readFileSync(pinnedPath, 'utf8')).hashes as Record<string, string>;
+		const verifierPath = fileURLToPath(new URL('./fixtures/verify-g10-cp5.ts', import.meta.url));
+		const editorRoot = fileURLToPath(new URL('../..', import.meta.url));
+		const workDir = mkdtempSync(join(tmpdir(), 'g10-cp5-'));
+		const flipHex = (hex: string) => `${hex.startsWith('0') ? '1' : '0'}${hex.slice(1)}`;
+		const runJson = (cmd: string, args: string[], env: Record<string, string> = {}) => {
+			const res = spawnSync(cmd, args, { cwd: editorRoot, encoding: 'utf8', env: { ...process.env, ...env } });
+			expect(res.error).toBeUndefined();
+			const parsed = JSON.parse(res.stdout.trim()) as {
+				runtime: string;
+				ok: boolean;
+				peerOk?: boolean;
+				hashes?: Record<string, string>;
+				mismatches?: Array<{ kind: string; fixture: string; expected: string | null; actual: string | null }>;
+			};
+			return { status: res.status, parsed };
+		};
+
+		try {
+			// 1. Positive: Bun verifier matches pinned G1/G4/G8 digests and exits 0
+			const bunRun = runJson(process.execPath, [verifierPath, '--pins', pinnedPath]);
+			expect(bunRun.status).toBe(0);
+			expect(bunRun.parsed.ok).toBe(true);
+			expect(bunRun.parsed.hashes).toEqual(pinned);
+
+			const bunOutPath = join(workDir, 'bun-g10-cp5.json');
+			writeFileSync(bunOutPath, JSON.stringify(bunRun.parsed));
+
+			// 2. Positive: Node bundled verifier matches both pins and Bun output via --compare
+			// Note: ESM resolves `--external manifold-3d` from the bundled `.mjs` file's parent `node_modules`.
+			const nodeMjsPath = join(editorRoot, `.tmp-verify-g10-cp5-${process.pid}.mjs`);
+			const buildRes = spawnSync(
+				process.execPath,
+				['build', verifierPath, '--target=node', `--outfile=${nodeMjsPath}`, '--external', 'manifold-3d'],
+				{ cwd: editorRoot, encoding: 'utf8' }
+			);
+			expect(buildRes.status).toBe(0);
+
+			try {
+				const nodeCheck = runJson('node', [nodeMjsPath, '--pins', pinnedPath, '--compare', bunOutPath]);
+				expect(nodeCheck.status).toBe(0);
+				expect(nodeCheck.parsed.ok).toBe(true);
+				expect(nodeCheck.parsed.peerOk).toBe(true);
+				expect(nodeCheck.parsed.hashes).toEqual(pinned);
+
+				// 3. Negative (pin mismatch): flipping a pinned digest (G1/G4/G8) must fail closed with exit 1
+				for (const fixture of ['G1', 'G4', 'G8'] as const) {
+					const badPinsPath = join(workDir, `bad-pins-${fixture}.json`);
+					writeFileSync(badPinsPath, JSON.stringify({ hashes: { ...pinned, [fixture]: flipHex(pinned[fixture]!) } }));
+					const pinFail = runJson(process.execPath, [verifierPath], { G10_CP5_PINS: badPinsPath });
+					expect(pinFail.status).toBe(1);
+					expect(pinFail.parsed.ok).toBe(false);
+					expect(pinFail.parsed.mismatches).toEqual(
+						expect.arrayContaining([expect.objectContaining({ kind: 'pin', fixture })])
+					);
+				}
+
+				// 4. Negative (cross-runtime --compare mismatch): G8 drift in peer JSON must fail on both Bun and Node
+				const driftedPeerPath = join(workDir, 'drifted-peer-g8.json');
+				writeFileSync(
+					driftedPeerPath,
+					JSON.stringify({ runtime: 'fake-peer', ok: true, hashes: { ...pinned, G8: flipHex(pinned.G8!) } })
+				);
+				const bunPeerFail = runJson(process.execPath, [verifierPath, '--pins', pinnedPath, '--compare', driftedPeerPath]);
+				expect(bunPeerFail.status).toBe(1);
+				expect(bunPeerFail.parsed.ok).toBe(false);
+				expect(bunPeerFail.parsed.peerOk).toBe(false);
+				expect(bunPeerFail.parsed.mismatches).toEqual(
+					expect.arrayContaining([expect.objectContaining({ kind: 'peer', fixture: 'G8' })])
+				);
+
+				const nodePeerFail = runJson('node', [nodeMjsPath, '--pins', pinnedPath, '--compare', driftedPeerPath]);
+				expect(nodePeerFail.status).toBe(1);
+				expect(nodePeerFail.parsed.ok).toBe(false);
+				expect(nodePeerFail.parsed.peerOk).toBe(false);
+				expect(nodePeerFail.parsed.mismatches).toEqual(
+					expect.arrayContaining([expect.objectContaining({ kind: 'peer', fixture: 'G8' })])
+				);
+
+				// 5. Negative (missing key in peer JSON): omitting G1 must fail closed with exit 1
+				const missingKeyPath = join(workDir, 'missing-key-g1.json');
+				writeFileSync(missingKeyPath, JSON.stringify({ runtime: 'fake-peer', hashes: { G4: pinned.G4, G8: pinned.G8 } }));
+				const missingFail = runJson(process.execPath, [verifierPath, '--pins', pinnedPath, '--compare', missingKeyPath]);
+				expect(missingFail.status).toBe(1);
+				expect(missingFail.parsed.ok).toBe(false);
+				expect(missingFail.parsed.peerOk).toBe(false);
+				expect(missingFail.parsed.mismatches).toEqual(
+					expect.arrayContaining([expect.objectContaining({ kind: 'peer', fixture: 'G1', expected: null })])
+				);
+			} finally {
+				rmSync(nodeMjsPath, { force: true });
+			}
+		} finally {
+			rmSync(workDir, { recursive: true, force: true });
 		}
 	});
 
