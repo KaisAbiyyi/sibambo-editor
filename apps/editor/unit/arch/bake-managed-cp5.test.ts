@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LineSegments } from 'three';
 import { DEFAULT_DISPLAY_STATE } from '@sibambo/viewport';
-import type { BomcGraph } from '@sibambo/bomc-document';
+import type { BomcGraph, DocumentEdit } from '@sibambo/bomc-document';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import { bakeModule } from '../../src/lib/arch/bake.js';
@@ -25,7 +25,7 @@ import type { ArchModule } from '../../src/lib/arch/schema.js';
 import { AuthoringWorkerDispatcher } from '../../src/lib/authoring/bomc-authoring.worker.js';
 import { faceFromRing, journalEntry, triangulateFaceRings, v2FaceLabel } from '../../src/lib/authoring/geometry.js';
 import { AuthoringHistory, graphsEqual } from '../../src/lib/authoring/history.js';
-import { buildModelEdit, modelMetadata, nextModelSequence, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
+import { buildModelEdit, modelMetadata, modelOccurrences, nextModelSequence, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
 import { AUTHORING_PROTOCOL_VERSION, type AuthoringWorkerMessage, type ModelAction } from '../../src/lib/authoring/protocol.js';
 import { projectAuthoringScene } from '../../src/lib/authoring/scene.js';
 import { g1, g2, g2Clockwise, g2Rotated, g3, g4, g5, g6, g7, g8, g9, moduleOf, wall } from './fixtures/modules.js';
@@ -720,6 +720,233 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			// Single-module update (red -> green) succeeds and undoes cleanly back to red
 			const modAGreen = { ...makeMod('test/mod-a', 0, GREEN, 1), revision: 2 };
 			const b2 = bakeModule(doc.snapshot().graph, modAGreen, evaluate(modAGreen), 3, 1);
+			expect(history.execute(doc, journalEntry(b2))).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(GREEN);
+			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');
+
+			expect(history.undo(doc)).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');
+
+			expect(history.redo(doc)).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(GREEN);
+		} finally {
+			doc.dispose();
+		}
+	});
+
+	test('P1 instance-level materialId overrides and shared definitions/meshes fail closed on conflicting material updates (A7)', () => {
+		const RED: [number, number, number, number] = [220, 40, 40, 255];
+		const BLUE: [number, number, number, number] = [40, 80, 220, 255];
+		const GREEN: [number, number, number, number] = [30, 180, 60, 255];
+		const FINISH_ID = `${DOC}:material:op:arch-finish`;
+
+		const makeMod = (moduleId: string, xOffset: number, rgba: [number, number, number, number], revision = 1): ArchModule => {
+			const m = moduleOf([wall('w1', [[xOffset, 0], [xOffset + 2, 0]], { materialId: 'finish' })], moduleId);
+			return { ...m, revision, materials: [{ materialId: 'finish', rgba: [...rgba], opacity: 1 }] };
+		};
+
+		const expectCollision = (fn: () => unknown, moduleId: string) => {
+			let caught: unknown;
+			try {
+				fn();
+			} catch (err) {
+				caught = err;
+			}
+			expect(caught).toBeInstanceOf(ArchError);
+			expect((caught as ArchError).code).toBe('INVALID_GEOMETRY');
+			expect((caught as ArchError).detail).toMatchObject({
+				reason: 'MATERIAL_COLLISION',
+				moduleId,
+				elementId: 'finish'
+			});
+		};
+
+		const doc = BomcDocument.fromGraph(newGraph());
+		const history = new AuthoringHistory(null);
+		try {
+			// 1. Bake mod-a with custom finish RED
+			const modARed = makeMod('test/mod-a', 0, RED, 1);
+			const b1 = bakeModule(doc.snapshot().graph, modARed, evaluate(modARed), 1, 1);
+			expect(history.execute(doc, journalEntry(b1))).toBe(true);
+
+			// 2. Build an ordinary owner-authored rectangle -> push-pull -> group (mesh faces use neutral material)
+			const rectEdit = buildModelEdit(
+				doc.snapshot().graph,
+				[],
+				{
+					type: 'raw',
+					command: {
+						kind: 'CREATE_RECTANGLE',
+						points: [
+							[10, 0, 0],
+							[12, 0, 0],
+							[12, 0, 2],
+							[10, 0, 2]
+						],
+						normal: [0, 1, 0]
+					}
+				},
+				nextModelSequence(doc.snapshot().graph)
+			);
+			expect(history.execute(doc, journalEntry(rectEdit))).toBe(true);
+			const extrudeEdit = buildModelEdit(
+				doc.snapshot().graph,
+				[],
+				{ type: 'raw', command: { kind: 'PUSH_PULL_FACE', faceId: rectEdit.entityId!, distance: 1.5 } },
+				nextModelSequence(doc.snapshot().graph)
+			);
+			expect(history.execute(doc, journalEntry(extrudeEdit))).toBe(true);
+			const rootFaces = doc.snapshot().graph.meshes
+				.find((m) => m.definitionId === doc.snapshot().graph.rootDefinitionId)!
+				.faces.map((f) => ({ type: 'face' as const, id: f.id }));
+			const groupEdit = buildModelEdit(
+				doc.snapshot().graph,
+				[],
+				{ type: 'group', name: 'Owner Shed', containerKind: 'group', selection: rootFaces },
+				nextModelSequence(doc.snapshot().graph)
+			);
+			expect(history.execute(doc, journalEntry(groupEdit))).toBe(true);
+			const ownerGroupId = groupEdit.entityId!;
+			const ownerInstBefore = doc.snapshot().graph.instances.find((i) => i.id === ownerGroupId)!;
+			const ownerMesh = doc.snapshot().graph.meshes.find(
+				(m) => m.definitionId === ownerInstBefore.definitionId
+			)!;
+			expect(
+				ownerMesh.faces.every((f) => f.frontMaterialId !== FINISH_ID && f.backMaterialId !== FINISH_ID)
+			).toBe(true);
+
+			// Paint the owner group instance at instance level with arch-finish (RED)
+			const rootInst = doc.snapshot().graph.instances.find((i) => i.id === doc.snapshot().graph.rootInstanceId)!;
+			const paintOwnerInst: DocumentEdit = {
+				type: 'put-instance',
+				value: { ...ownerInstBefore, materialId: FINISH_ID }
+			};
+			const clearOwnerInst: DocumentEdit = { type: 'put-instance', value: ownerInstBefore };
+			const paintEntry = journalEntry({
+				forward: [paintOwnerInst, { type: 'put-instance', value: rootInst }],
+				inverse: [clearOwnerInst, { type: 'put-instance', value: rootInst }]
+			});
+			expect(history.execute(doc, paintEntry)).toBe(true);
+
+			expect(validateAuthoringDocument(doc.snapshot().graph).editable).toBe(true);
+			const occ = modelOccurrences(doc.snapshot().graph);
+			const ownerOccIdx = occ.findIndex((o) => o.path[o.path.length - 1] === ownerGroupId);
+			expect(occ[ownerOccIdx]?.materialId).toBe(FINISH_ID);
+
+			// Helper reading the projected Three.js front color of the owner group occurrence
+			const projectedOwnerRgb = (graph = doc.snapshot().graph) => {
+				const proj = projectAuthoringScene({ ...doc.snapshot(), graph }, DEFAULT_DISPLAY_STATE);
+				const g = proj.group.children[ownerOccIdx]!;
+				const colors: Array<[number, number, number]> = [];
+				g.traverse((obj: any) => {
+					if (obj.isMesh && obj.material?.color) {
+						colors.push([obj.material.color.r, obj.material.color.g, obj.material.color.b]);
+					}
+				});
+				return colors;
+			};
+			const redBefore = projectedOwnerRgb();
+			expect(redBefore.length).toBeGreaterThan(0);
+			// Owner group currently renders with finish RED (r >> g, r >> b)
+			expect(redBefore.every(([r, g, b]) => r > 0.5 && g < 0.1 && b < 0.1)).toBe(true);
+
+			// 3. Matching material reuse (mod-b with identical finish RED) stays valid while owner group uses arch-finish
+			const modBRed = makeMod('test/mod-b', 5, RED, 1);
+			const reuseB = bakeModule(doc.snapshot().graph, modBRed, evaluate(modBRed), nextModelSequence(doc.snapshot().graph), 1);
+			expect(reuseB.forward.some((e) => e.type === 'put-material' && e.value.id === FINISH_ID)).toBe(false);
+			const withB = applyEdits(doc.snapshot().graph, reuseB.forward);
+			expect(validateAuthoringDocument(withB).editable).toBe(true);
+
+			// Remove mod-b so test/mod-a is once again the ONLY managed module in arch.modules
+			// Note: owner group instance still holds `materialId: FINISH_ID`.
+			const snapBeforeConflict = structuredClone(doc.snapshot().graph);
+			const revBeforeConflict = doc.snapshot().revision;
+
+			// 4. Updating the ONLY managed module mod-a (RED -> BLUE) MUST fail atomically!
+			const modABlue = makeMod('test/mod-a', 0, BLUE, 2);
+			const modAGreen = makeMod('test/mod-a', 0, GREEN, 2);
+			expectCollision(
+				() => bakeModule(doc.snapshot().graph, modABlue, evaluate(modABlue), nextModelSequence(doc.snapshot().graph), 1),
+				'test/mod-a'
+			);
+			expect(doc.snapshot().revision).toBe(revBeforeConflict);
+			expect(graphsEqual(doc.snapshot().graph, snapBeforeConflict)).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+			expect(projectedOwnerRgb()).toEqual(redBefore);
+			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');
+
+			// 5. Nested child instance inside an owner group overriding/carrying FINISH_ID also fails closed
+			const nestedChildGraph = structuredClone(doc.snapshot().graph);
+			const childInstId = `${DOC}:instance:op:900:1`;
+			const clearParent = nestedChildGraph.instances.find((i) => i.id === ownerGroupId)!;
+			clearParent.materialId = null;
+			nestedChildGraph.instances.push({
+				...clearParent,
+				id: childInstId,
+				name: 'Nested Child',
+				ownerDefinitionId: ownerInstBefore.definitionId,
+				materialId: FINISH_ID
+			});
+			// Replace cyclic self-ref with distinct child definition owning no child instances
+			const childDefId = `${DOC}:definition:op:900:1`;
+			nestedChildGraph.definitions.push({ id: childDefId, name: 'Nested Child', kind: 'group', meshId: null });
+			nestedChildGraph.instances[nestedChildGraph.instances.length - 1]!.definitionId = childDefId;
+			expect(validateAuthoringDocument(nestedChildGraph).editable).toBe(true);
+			expectCollision(
+				() => bakeModule(nestedChildGraph, modAGreen, evaluate(modAGreen), nextModelSequence(nestedChildGraph), 1),
+				'test/mod-a'
+			);
+
+			// 6. Shared definition and shared mesh paths must also protect non-target references
+			const baseOnlyModA = applyEdits(doc.snapshot().graph, [
+				{ type: 'put-instance', value: { ...ownerInstBefore, materialId: null } }
+			]);
+			const modAInst = baseOnlyModA.instances.find((i) => i.id === b1.instanceId)!;
+			const modADef = baseOnlyModA.definitions.find((d) => d.id === modAInst.definitionId)!;
+
+			// 6a. Second instance sharing mod-a's definitionId
+			const sharedDefGraph = structuredClone(baseOnlyModA);
+			sharedDefGraph.instances.push({
+				...modAInst,
+				id: `${DOC}:instance:op:901:1`,
+				name: 'Copied Wall Group',
+				materialId: null
+			});
+			expect(validateAuthoringDocument(sharedDefGraph).editable).toBe(true);
+			expectCollision(
+				() => bakeModule(sharedDefGraph, modAGreen, evaluate(modAGreen), nextModelSequence(sharedDefGraph), 1),
+				'test/mod-a'
+			);
+
+			// 6b. Second definition sharing mod-a's meshId
+			const sharedMeshGraph = structuredClone(baseOnlyModA);
+			const sharedDefId2 = `${DOC}:definition:op:902:1`;
+			sharedMeshGraph.definitions.push({ id: sharedDefId2, name: 'Shared Mesh Def', kind: 'group', meshId: modADef.meshId });
+			sharedMeshGraph.instances.push({
+				...modAInst,
+				id: `${DOC}:instance:op:902:1`,
+				name: 'Shared Mesh Holder',
+				definitionId: sharedDefId2,
+				materialId: null
+			});
+			expect(validateAuthoringDocument(sharedMeshGraph).editable).toBe(true);
+			expectCollision(
+				() => bakeModule(sharedMeshGraph, modAGreen, evaluate(modAGreen), nextModelSequence(sharedMeshGraph), 1),
+				'test/mod-a'
+			);
+
+			// 7. Clearing the owner instance's override restores legitimate single-module update + AuthoringHistory undo/redo
+			expect(
+				history.execute(
+					doc,
+					journalEntry({
+						forward: [clearOwnerInst, { type: 'put-instance', value: rootInst }],
+						inverse: [paintOwnerInst, { type: 'put-instance', value: rootInst }]
+					})
+				)
+			).toBe(true);
+			const b2 = bakeModule(doc.snapshot().graph, modAGreen, evaluate(modAGreen), nextModelSequence(doc.snapshot().graph), 1);
 			expect(history.execute(doc, journalEntry(b2))).toBe(true);
 			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(GREEN);
 			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');

@@ -108,12 +108,15 @@ function buildBakedMaterial(documentId: string, materialId: string, module: Arch
 
 /**
  * Fail closed when `matId` with `bakedMat` would collide with another managed module or
- * silently recolor non-target geometry still referencing `${documentId}:material:op:arch-${matId}` (A7).
+ * silently recolor non-target geometry (mesh faces, instance overrides, or shared definitions/meshes)
+ * still referencing `${documentId}:material:op:arch-${matId}` (A7).
  */
 function assertNoMaterialCollision(
 	graph: BomcGraph,
 	module: ArchModule,
 	currentArch: ArchMetadata,
+	existingInstId: string | null,
+	existingDefId: string | null,
 	existingMeshId: string | null,
 	matId: string,
 	bakedMat: SolidMaterial,
@@ -134,11 +137,18 @@ function assertNoMaterialCollision(
 	}
 
 	if (prevMat && !sameMaterial(prevMat, bakedMat)) {
-		const referencedElsewhere = graph.meshes.some(
-			(mesh) =>
-				mesh.id !== existingMeshId &&
-				mesh.faces.some((face) => face.frontMaterialId === bakedMat.id || face.backMaterialId === bakedMat.id)
-		);
+		const existingMeshShared =
+			existingMeshId !== null &&
+			((existingDefId !== null &&
+				graph.instances.some((inst) => inst.id !== existingInstId && inst.definitionId === existingDefId)) ||
+				graph.definitions.some((def) => def.id !== existingDefId && def.meshId === existingMeshId));
+		const referencedElsewhere =
+			graph.instances.some((inst) => inst.id !== existingInstId && inst.materialId === bakedMat.id) ||
+			graph.meshes.some(
+				(mesh) =>
+					(existingMeshShared || mesh.id !== existingMeshId) &&
+					mesh.faces.some((face) => face.frontMaterialId === bakedMat.id || face.backMaterialId === bakedMat.id)
+			);
 		if (referencedElsewhere) {
 			throw new ArchError(
 				'INVALID_GEOMETRY',
@@ -288,7 +298,17 @@ export function bakeModule(
 	for (const matId of [...checkedMaterialIds].sort(cmp)) {
 		const bakedMat = buildBakedMaterial(graph.documentId, matId, module);
 		const prevMat = existingMaterialById.get(bakedMat.id);
-		assertNoMaterialCollision(graph, module, currentArch, existingMesh?.id ?? null, matId, bakedMat, prevMat);
+		assertNoMaterialCollision(
+			graph,
+			module,
+			currentArch,
+			existingInst?.id ?? null,
+			existingDef?.id ?? null,
+			existingMesh?.id ?? null,
+			matId,
+			bakedMat,
+			prevMat
+		);
 		if (!usedMaterialIds.has(matId)) continue;
 		if (!prevMat) {
 			newMaterialCount += 1;
