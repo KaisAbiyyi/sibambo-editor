@@ -17,6 +17,7 @@ import { BomcDocument } from '@sibambo/bomc-document/document';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import { bakeModule } from '../../src/lib/arch/bake.js';
 import { fromInstanceMatrix } from '../../src/lib/arch/convention.js';
+import { ArchError } from '../../src/lib/arch/errors.js';
 import { evaluateModule } from '../../src/lib/arch/evaluate.js';
 import { createKernel, type Kernel } from '../../src/lib/arch/kernel.js';
 import { effectiveModuleTransform, readManaged } from '../../src/lib/arch/managed.js';
@@ -27,7 +28,7 @@ import { AuthoringHistory, graphsEqual } from '../../src/lib/authoring/history.j
 import { buildModelEdit, modelMetadata, nextModelSequence, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
 import { AUTHORING_PROTOCOL_VERSION, type AuthoringWorkerMessage, type ModelAction } from '../../src/lib/authoring/protocol.js';
 import { projectAuthoringScene } from '../../src/lib/authoring/scene.js';
-import { g1, g2, g2Clockwise, g2Rotated, g3, g4, g5, g6, g7, g8, g9, moduleOf } from './fixtures/modules.js';
+import { g1, g2, g2Clockwise, g2Rotated, g3, g4, g5, g6, g7, g8, g9, moduleOf, wall } from './fixtures/modules.js';
 
 const DOC = '4a2e1c9b-7d3f-4a8e-9b2c-1d4e5f6a7b8c';
 let kernel: Kernel;
@@ -596,6 +597,139 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			expect(history.undo(doc)).toBe(true);
 			expect(graphsEqual(doc.snapshot().graph, nextGraph)).toBe(true);
 			expect(readManaged(doc.snapshot().graph).get('test/ground')!.state).toBe('ok');
+		} finally {
+			doc.dispose();
+		}
+	});
+
+	test('P1 cross-module material collision fails closed while matching reuse, single-module updates, and undo work cleanly (A7)', () => {
+		const RED: [number, number, number, number] = [220, 40, 40, 255];
+		const BLUE: [number, number, number, number] = [40, 80, 220, 255];
+		const GREEN: [number, number, number, number] = [30, 180, 60, 255];
+		const FINISH_ID = `${DOC}:material:op:arch-finish`;
+
+		const makeMod = (
+			moduleId: string,
+			xOffset: number,
+			rgba: [number, number, number, number],
+			opacity = 1
+		): ArchModule => {
+			const m = moduleOf([wall('w1', [[xOffset, 0], [xOffset + 2, 0]], { materialId: 'finish' })], moduleId);
+			return { ...m, materials: [{ materialId: 'finish', rgba: [...rgba], opacity }] };
+		};
+
+		const expectCollision = (fn: () => unknown, moduleId: string) => {
+			let caught: unknown;
+			try {
+				fn();
+			} catch (err) {
+				caught = err;
+			}
+			expect(caught).toBeInstanceOf(ArchError);
+			expect((caught as ArchError).code).toBe('INVALID_GEOMETRY');
+			expect((caught as ArchError).detail).toMatchObject({
+				reason: 'MATERIAL_COLLISION',
+				moduleId,
+				elementId: 'finish'
+			});
+		};
+
+		// 1. Forward order: A (finish red) then B (finish blue) rejects atomically
+		const modARed = makeMod('test/mod-a', 0, RED, 1);
+		const modBBlue = makeMod('test/mod-b', 5, BLUE, 1);
+		const afterA = bakeInto(newGraph(), modARed, 1, 1);
+		expect(afterA.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+
+		expectCollision(() => bakeInto(afterA.nextGraph, modBBlue, 2, 1), 'test/mod-b');
+		expect(afterA.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+		expect(readManaged(afterA.nextGraph).get('test/mod-a')?.state).toBe('ok');
+		expect(readManaged(afterA.nextGraph).has('test/mod-b')).toBe(false);
+
+		// Opacity-only mismatch also fails closed
+		const modARedHalf = makeMod('test/mod-b', 5, RED, 0.5);
+		expectCollision(() => bakeInto(afterA.nextGraph, modARedHalf, 2, 1), 'test/mod-b');
+
+		// 2. Reversed order: B (finish blue) then A (finish red) fails closed on A, preserves B
+		const afterB = bakeInto(newGraph(), modBBlue, 1, 1);
+		expect(afterB.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(BLUE);
+		expectCollision(() => bakeInto(afterB.nextGraph, modARed, 2, 1), 'test/mod-a');
+		expect(afterB.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(BLUE);
+		expect(readManaged(afterB.nextGraph).get('test/mod-b')?.state).toBe('ok');
+		expect(readManaged(afterB.nextGraph).has('test/mod-a')).toBe(false);
+
+		// 3. Matching material reuse: A (finish red) + B (finish red) reuses A7 global material without put-material
+		const modBRed = makeMod('test/mod-b', 5, RED, 1);
+		const afterBReuse = bakeInto(afterA.nextGraph, modBRed, 2, 1);
+		expect(validateAuthoringDocument(afterBReuse.nextGraph).editable).toBe(true);
+		expect(afterBReuse.nextGraph.materials.filter((m) => m.id === FINISH_ID)).toHaveLength(1);
+		expect(afterBReuse.baked.forward.some((e) => e.type === 'put-material' && e.value.id === FINISH_ID)).toBe(false);
+		expect(readManaged(afterBReuse.nextGraph).get('test/mod-a')?.state).toBe('ok');
+		expect(readManaged(afterBReuse.nextGraph).get('test/mod-b')?.state).toBe('ok');
+
+		// 4. Re-bake/update B while A remains managed must still fail closed
+		const modBRebakedBlue = { ...modBBlue, revision: 2 };
+		expectCollision(() => bakeInto(afterBReuse.nextGraph, modBRebakedBlue, 3, 1), 'test/mod-b');
+		expect(afterBReuse.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+		expect(readManaged(afterBReuse.nextGraph).get('test/mod-a')?.state).toBe('ok');
+		expect(readManaged(afterBReuse.nextGraph).get('test/mod-b')?.state).toBe('ok');
+
+		// 5. Removing A lets B update finish from red -> blue cleanly, with reversible inverse
+		const remA = bakeModule(afterBReuse.nextGraph, modARed, null, 4, 1);
+		const onlyB = applyEdits(afterBReuse.nextGraph, remA.forward);
+		const bUpdated = bakeInto(onlyB, modBRebakedBlue, 5, 1);
+		expect(validateAuthoringDocument(bUpdated.nextGraph).editable).toBe(true);
+		expect(bUpdated.nextGraph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(BLUE);
+		expect(readManaged(bUpdated.nextGraph).get('test/mod-b')?.state).toBe('ok');
+		expect(graphsEqual(applyEdits(bUpdated.nextGraph, bUpdated.baked.inverse), onlyB)).toBe(true);
+
+		// 6. Orphaned A (erased container still in arch) still blocks conflicting B
+		const eraseAEdit = buildModelEdit(
+			afterA.nextGraph,
+			[],
+			{ type: 'erase', selection: [{ type: 'instance', id: afterA.baked.instanceId }] },
+			nextModelSequence(afterA.nextGraph)
+		);
+		const erasedA = applyEdits(afterA.nextGraph, eraseAEdit.forward);
+		expect(readManaged(erasedA).get('test/mod-a')?.state).toBe('orphaned');
+		expectCollision(() => bakeInto(erasedA, modBBlue, 3, 1), 'test/mod-b');
+
+		// 7. Standalone non-target mesh referencing arch-finish still blocks overwriting its RGBA
+		const copiedMeshGraph = structuredClone(onlyB);
+		copiedMeshGraph.meshes.push({
+			...copiedMeshGraph.meshes[0]!,
+			id: `${DOC}:mesh:op:99:1`,
+			definitionId: `${DOC}:definition:op:99:1`,
+			faces: copiedMeshGraph.meshes[0]!.faces.map((f, idx) =>
+				idx === 0 ? { ...f, id: `${DOC}:op:99:face:00000`, frontMaterialId: FINISH_ID } : f
+			)
+		});
+		expectCollision(() => bakeInto(copiedMeshGraph, modBBlue, 5, 1), 'test/mod-b');
+
+		// 8. Single-module material update + AuthoringHistory undo/redo rollback
+		const doc = BomcDocument.fromGraph(newGraph());
+		const history = new AuthoringHistory(null);
+		try {
+			const b1 = bakeModule(doc.snapshot().graph, modARed, evaluate(modARed), 1, 1);
+			expect(history.execute(doc, journalEntry(b1))).toBe(true);
+			const revAfterCreate = doc.snapshot().revision;
+
+			// Atomic rejection leaves document, revision, and stacks intact
+			expectCollision(() => bakeModule(doc.snapshot().graph, modBBlue, evaluate(modBBlue), 2, 1), 'test/mod-b');
+			expect(doc.snapshot().revision).toBe(revAfterCreate);
+
+			// Single-module update (red -> green) succeeds and undoes cleanly back to red
+			const modAGreen = { ...makeMod('test/mod-a', 0, GREEN, 1), revision: 2 };
+			const b2 = bakeModule(doc.snapshot().graph, modAGreen, evaluate(modAGreen), 3, 1);
+			expect(history.execute(doc, journalEntry(b2))).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(GREEN);
+			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');
+
+			expect(history.undo(doc)).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(RED);
+			expect(readManaged(doc.snapshot().graph).get('test/mod-a')?.state).toBe('ok');
+
+			expect(history.redo(doc)).toBe(true);
+			expect(doc.snapshot().graph.materials.find((m) => m.id === FINISH_ID)?.rgba).toEqual(GREEN);
 		} finally {
 			doc.dispose();
 		}

@@ -8,7 +8,7 @@ import { BomcDocument } from '@sibambo/bomc-document/document';
 import { faceFromRing, v2FaceLabel } from '../authoring/geometry.js';
 import { modelMetadata, validateAuthoringDocument } from '../authoring/model.js';
 import { fromInstanceMatrix, toInstanceMatrix } from './convention.js';
-import { budgetExceeded, invalidGeometry } from './errors.js';
+import { ArchError, budgetExceeded, invalidGeometry } from './errors.js';
 import type { EvaluatedModule } from './evaluate.js';
 import {
 	ARCH_SCHEMA,
@@ -104,6 +104,49 @@ function buildBakedMaterial(documentId: string, materialId: string, module: Arch
 		rgba: [declared.rgba[0]!, declared.rgba[1]!, declared.rgba[2]!, declared.rgba[3]!],
 		opacityU16: Math.round(declared.opacity * 65535)
 	};
+}
+
+/**
+ * Fail closed when `matId` with `bakedMat` would collide with another managed module or
+ * silently recolor non-target geometry still referencing `${documentId}:material:op:arch-${matId}` (A7).
+ */
+function assertNoMaterialCollision(
+	graph: BomcGraph,
+	module: ArchModule,
+	currentArch: ArchMetadata,
+	existingMeshId: string | null,
+	matId: string,
+	bakedMat: SolidMaterial,
+	prevMat: SolidMaterial | undefined
+): void {
+	for (const other of currentArch.modules) {
+		if (other.module.moduleId === module.moduleId) continue;
+		const otherDeclared = other.module.materials.find((m) => m.materialId === matId);
+		if (!otherDeclared) continue;
+		const otherBaked = buildBakedMaterial(graph.documentId, matId, other.module);
+		if (!sameMaterial(otherBaked, bakedMat)) {
+			throw new ArchError(
+				'INVALID_GEOMETRY',
+				{ reason: 'MATERIAL_COLLISION', moduleId: module.moduleId, elementId: matId },
+				`INVALID_GEOMETRY MATERIAL_COLLISION (${matId}): conflicts with module ${other.module.moduleId}`
+			);
+		}
+	}
+
+	if (prevMat && !sameMaterial(prevMat, bakedMat)) {
+		const referencedElsewhere = graph.meshes.some(
+			(mesh) =>
+				mesh.id !== existingMeshId &&
+				mesh.faces.some((face) => face.frontMaterialId === bakedMat.id || face.backMaterialId === bakedMat.id)
+		);
+		if (referencedElsewhere) {
+			throw new ArchError(
+				'INVALID_GEOMETRY',
+				{ reason: 'MATERIAL_COLLISION', moduleId: module.moduleId, elementId: matId },
+				`INVALID_GEOMETRY MATERIAL_COLLISION (${matId}): material is still referenced in document`
+			);
+		}
+	}
 }
 
 function assertAdmittedNext(graph: BomcGraph, edits: readonly DocumentEdit[], moduleId: string): BomcGraph {
@@ -235,14 +278,18 @@ export function bakeModule(
 		}
 	}
 
-	// Step 2–3: Material puts (A7) + canonical Face objects sorted by code-unit id.
+	// Step 2–3: Material collision check + puts (A7) + canonical Face objects sorted by code-unit id.
 	const existingMaterialById = new Map(graph.materials.map((m) => [m.id, m]));
 	const putMaterials: SolidMaterial[] = [];
 	const inverseMaterialEdits: DocumentEdit[] = [];
 	let newMaterialCount = 0;
-	for (const matId of [...usedMaterialIds].sort(cmp)) {
+	const checkedMaterialIds = new Set<string>(usedMaterialIds);
+	for (const declared of module.materials) checkedMaterialIds.add(declared.materialId);
+	for (const matId of [...checkedMaterialIds].sort(cmp)) {
 		const bakedMat = buildBakedMaterial(graph.documentId, matId, module);
 		const prevMat = existingMaterialById.get(bakedMat.id);
+		assertNoMaterialCollision(graph, module, currentArch, existingMesh?.id ?? null, matId, bakedMat, prevMat);
+		if (!usedMaterialIds.has(matId)) continue;
 		if (!prevMat) {
 			newMaterialCount += 1;
 			putMaterials.push(bakedMat);
