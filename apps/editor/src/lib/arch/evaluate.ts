@@ -1,9 +1,9 @@
 /**
- * SIB-MCP-MODELING-001 v2.3 C9 (WP4 subset) — `arch/evaluate.ts`.
+ * SIB-MCP-MODELING-001 v2.3 C9 (WP5) — `arch/evaluate.ts`.
  *
- * `evaluateModule(module)` turns one validated ArchModule into parts, spaces and junction data. It is pure
- * apart from the kernel's lifetime accounting. In WP4 the topology stage is a STUB: parts carry the raw
- * exported triangles (positions, triangles, per-triangle tag). WP5 replaces that with faces, loops and edges.
+ * `evaluateModule(module)` turns one validated ArchModule into parts (with maximal coplanar topology:
+ * faces, loops, hard/soft edges, semantic roles), spaces and junction data. It is pure apart from
+ * the kernel's lifetime accounting.
  *
  * Parts are sorted by partId: `walls`, `<slabId>`, `<openingId>/frame|glazing|leaf` (code-unit order).
  * Results are cached (LRU 32 per kernel) by the SHA-256 of the canonical module JSON and must be treated as
@@ -12,24 +12,26 @@
 import { buildSlab, buildSpaces, openingCutter, openingInserts, placeOpenings, type OpeningElement, type SlabElement, type SpaceElement, type SpaceResult } from './elements.js';
 import { centerlineEnclosure } from './connectivity.js';
 import { ArchError } from './errors.js';
-import { meshVolume, sharedKernel, type Kernel, type MeshExport, type Solid, type SolidStats, type Vec2 } from './kernel.js';
+import { meshVolume, sharedKernel, type Kernel, type MeshExport, type Region, type Solid, type SolidStats, type Vec2 } from './kernel.js';
 import { canonicalJson, validateArchModule, type ArchModule } from './schema.js';
 import { sha256Hex } from './sha256.js';
+import { extractPartTopology, type PartKind, type PartTopology, type TagInfo } from './topology.js';
 import { buildWallNetwork, type Junction, type StaggeredContinuation, type WallElement, type WallNetworkOptions, type WallSegment } from './walls.js';
 
 export const DEFAULT_MATERIAL = 'sib-default';
 const CACHE_SIZE = 32;
 
-export type TagInfo = { elementId: string; role: string; materialId: string };
-export type PartKind = 'walls' | 'slab' | 'frame' | 'glazing' | 'leaf';
+export type { PartKind, PartTopology, TagInfo };
 
 export type EvaluatedPart = {
 	partId: string;
 	kind: PartKind;
 	/** Owning element for slabs and inserts (the opening); `null` for the joined wall part. */
 	elementId: string | null;
-	/** Raw triangles (topology stub). `triTag` indexes `EvaluatedModule.tags`. */
+	/** Raw exported triangles. `triTag` indexes `EvaluatedModule.tags`. */
 	mesh: MeshExport;
+	/** Extracted maximal coplanar faces, loops, hard/soft edges, and semantic roles (WP5 C9). */
+	topology: PartTopology;
 	stats: SolidStats;
 };
 
@@ -139,10 +141,10 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel, options: Eva
 		const newTag = (info: TagInfo) => tags.push(info) - 1;
 
 		const placements = placeOpenings(network, wallById, openings);
-		const parts: EvaluatedPart[] = [];
+		const rawParts: { partId: string; kind: PartKind; elementId: string | null; mesh: MeshExport; stats: SolidStats }[] = [];
 		const pushPart = (partId: string, kind: PartKind, elementId: string | null, solid: Solid) => {
 			const mesh = kernel.exportMesh(solid);
-			parts.push({ partId, kind, elementId, mesh, stats: kernel.stats(solid) });
+			rawParts.push({ partId, kind, elementId, mesh, stats: kernel.stats(solid) });
 		};
 
 		// Walls: cutters are subtracted in ONE difference; cutter-tagged triangles become reveals of the host.
@@ -180,11 +182,29 @@ function evaluate(module: ArchModule, hash: string, kernel: Kernel, options: Eva
 				pushPart(`${placement.opening.elementId}/${insert.kind}`, insert.kind, placement.opening.elementId, insert.solid);
 			}
 		}
-		parts.sort((p, q) => cmp(p.partId, q.partId));
+		rawParts.sort((p, q) => cmp(p.partId, q.partId));
 
 		const solidSpaces = buildSpaces(kernel, network.footprintRings, spaces);
 		const authored = new Map(centerlineEnclosure(kernel, network.segments, spaces).map((r) => [r.elementId, r.centerlineEnclosed]));
 		const spaceResults: EvaluatedSpace[] = solidSpaces.map((space) => ({ ...space, authoredEnclosed: authored.get(space.elementId) ?? null }));
+
+		let footprintRegions: Region[] = [];
+		if (network.footprintRings.length > 0) {
+			const xs = network.footprintRings.flatMap((r) => r.map((p) => p[0]));
+			const ys = network.footprintRings.flatMap((r) => r.map((p) => p[1]));
+			const regionBounds = {
+				minX: Math.min(...xs) - 1,
+				minY: Math.min(...ys) - 1,
+				maxX: Math.max(...xs) + 1,
+				maxY: Math.max(...ys) + 1
+			};
+			footprintRegions = kernel.regionsOutside(network.footprintRings, regionBounds);
+		}
+		const roleContext = { regions: footprintRegions, spaces: solidSpaces };
+		const parts: EvaluatedPart[] = rawParts.map((raw) => ({
+			...raw,
+			topology: extractPartTopology(raw, tags, raw.kind === 'walls' ? roleContext : undefined)
+		}));
 
 		let min: [number, number, number] | null = null;
 		let max: [number, number, number] | null = null;
