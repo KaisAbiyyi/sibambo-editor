@@ -746,7 +746,7 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			return { ...m, revision, materials: [{ materialId: 'finish', rgba: [...rgba], opacity: 1 }] };
 		};
 
-		const expectCollision = (fn: () => unknown, moduleId: string) => {
+		const expectCollision = (fn: () => unknown, moduleId: string, reason = 'MATERIAL_COLLISION') => {
 			let caught: unknown;
 			try {
 				fn();
@@ -755,11 +755,9 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			}
 			expect(caught).toBeInstanceOf(ArchError);
 			expect((caught as ArchError).code).toBe('INVALID_GEOMETRY');
-			expect((caught as ArchError).detail).toMatchObject({
-				reason: 'MATERIAL_COLLISION',
-				moduleId,
-				elementId: 'finish'
-			});
+			expect((caught as ArchError).detail).toMatchObject(
+				reason === 'MATERIAL_COLLISION' ? { reason, moduleId, elementId: 'finish' } : { reason, moduleId }
+			);
 		};
 
 		const doc = BomcDocument.fromGraph(newGraph());
@@ -916,7 +914,7 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			expect(validateAuthoringDocument(sharedDefGraph).editable).toBe(true);
 			expectCollision(
 				() => bakeModule(sharedDefGraph, modAGreen, evaluate(modAGreen), nextModelSequence(sharedDefGraph), 1),
-				'test/mod-a'
+				'test/mod-a', 'SHARED_MANAGED_GEOMETRY'
 			);
 
 			// 6b. Second definition sharing mod-a's meshId
@@ -933,7 +931,7 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			expect(validateAuthoringDocument(sharedMeshGraph).editable).toBe(true);
 			expectCollision(
 				() => bakeModule(sharedMeshGraph, modAGreen, evaluate(modAGreen), nextModelSequence(sharedMeshGraph), 1),
-				'test/mod-a'
+				'test/mod-a', 'SHARED_MANAGED_GEOMETRY'
 			);
 
 			// 7. Clearing the owner instance's override restores legitimate single-module update + AuthoringHistory undo/redo
@@ -985,29 +983,44 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 		expect(changed.moduleId).toBe(g1().moduleId);
 		expect(changed.materials).toEqual(g1().materials);
 
-		for (const graph of [sharedDefinition, sharedMesh]) {
+		for (const [kind, graph] of [
+			['shared-definition', sharedDefinition],
+			['shared-mesh', sharedMesh]
+		] as const) {
 			expect(validateAuthoringDocument(graph).editable).toBe(true);
 			const before = structuredClone(graph);
+			let error: unknown;
+			try {
+				bakeModule(graph, changed, evaluate(changed), 2, 1);
+			} catch (caught) { error = caught; }
+			expect(error).toBeInstanceOf(ArchError);
+			expect((error as ArchError).code).toBe('INVALID_GEOMETRY');
+			expect((error as ArchError).detail).toMatchObject({
+				reason: 'SHARED_MANAGED_GEOMETRY', moduleId: changed.moduleId
+			});
+			expect(graphsEqual(graph, before)).toBe(true);
+			expect(readManaged(graph).get(g1().moduleId)?.state).toBe('ok');
+
+			if (kind === 'shared-mesh') {
+				// A second definition referencing the same mesh is rejected by the
+				// BOMC document's stricter reference validator. Guarding it is
+				// defense-in-depth; it cannot be opened as a valid editable document.
+				expect(() => BomcDocument.fromGraph(graph)).toThrow(/invalid mesh reference/);
+				continue;
+			}
+
 			const doc = BomcDocument.fromGraph(graph);
 			try {
 				const revision = doc.snapshot().revision;
-				let error: unknown;
-				try {
-					bakeModule(doc.snapshot().graph, changed, evaluate(changed), 2, 1);
-				} catch (caught) { error = caught; }
-				expect(error).toBeInstanceOf(ArchError);
-				expect((error as ArchError).code).toBe('INVALID_GEOMETRY');
-				expect((error as ArchError).detail).toMatchObject({
-					reason: 'SHARED_MANAGED_GEOMETRY', moduleId: changed.moduleId
-				});
+				expect(() => bakeModule(doc.snapshot().graph, changed, evaluate(changed), 2, 1))
+					.toThrow('SHARED_MANAGED_GEOMETRY');
 				expect(doc.snapshot().revision).toBe(revision);
 				expect(graphsEqual(doc.snapshot().graph, before)).toBe(true);
-				expect(readManaged(doc.snapshot().graph).get(g1().moduleId)?.state).toBe('ok');
 			} finally {
 				doc.dispose();
 			}
 
-			// Owner copies survive remove_module; inverse recreates the exact original.
+			// The valid owner alias survives removal, and the inverse restores it.
 			const remove = bakeModule(graph, g1(), null, 3, 1);
 			const removed = applyEdits(graph, remove.forward);
 			expect(validateAuthoringDocument(removed).editable).toBe(true);
