@@ -961,4 +961,64 @@ describe('Bake & Managed Modules (WP5 / CP5)', () => {
 			doc.dispose();
 		}
 	});
+
+	test('P1 shared managed geometry: same-material re-bake is fail-closed and removal preserves aliased owner geometry', () => {
+		const initial = bakeInto(newGraph(), g1(), 1, 1).nextGraph;
+		const owner = readManaged(initial).get(g1().moduleId)!.instance!;
+		const def = initial.definitions.find((d) => d.id === owner.definitionId)!;
+		const mesh = initial.meshes.find((m) => m.id === def.meshId)!;
+
+		const sharedDefinition = structuredClone(initial);
+		sharedDefinition.instances.push({
+			...owner, id: DOC + ':instance:op:910:1', name: 'Owner Copy / Shared Definition'
+		});
+
+		const sharedMesh = structuredClone(initial);
+		const aliasId = DOC + ':definition:op:911:1';
+		sharedMesh.definitions.push({ id: aliasId, name: 'Owner Mesh Alias', kind: 'group', meshId: mesh.id });
+		sharedMesh.instances.push({
+			...owner, id: DOC + ':instance:op:911:1',
+			name: 'Owner Copy / Shared Mesh', definitionId: aliasId
+		});
+
+		const changed = g4();
+		expect(changed.moduleId).toBe(g1().moduleId);
+		expect(changed.materials).toEqual(g1().materials);
+
+		for (const graph of [sharedDefinition, sharedMesh]) {
+			expect(validateAuthoringDocument(graph).editable).toBe(true);
+			const before = structuredClone(graph);
+			const doc = BomcDocument.fromGraph(graph);
+			try {
+				const revision = doc.snapshot().revision;
+				let error: unknown;
+				try {
+					bakeModule(doc.snapshot().graph, changed, evaluate(changed), 2, 1);
+				} catch (caught) { error = caught; }
+				expect(error).toBeInstanceOf(ArchError);
+				expect((error as ArchError).code).toBe('INVALID_GEOMETRY');
+				expect((error as ArchError).detail).toMatchObject({
+					reason: 'SHARED_MANAGED_GEOMETRY', moduleId: changed.moduleId
+				});
+				expect(doc.snapshot().revision).toBe(revision);
+				expect(graphsEqual(doc.snapshot().graph, before)).toBe(true);
+				expect(readManaged(doc.snapshot().graph).get(g1().moduleId)?.state).toBe('ok');
+			} finally {
+				doc.dispose();
+			}
+
+			// Owner copies survive remove_module; inverse recreates the exact original.
+			const remove = bakeModule(graph, g1(), null, 3, 1);
+			const removed = applyEdits(graph, remove.forward);
+			expect(validateAuthoringDocument(removed).editable).toBe(true);
+			expect(removed.meshes.find((m) => m.id === mesh.id)).toEqual(mesh);
+			expect(readManaged(removed).size).toBe(0);
+			expect(graphsEqual(applyEdits(removed, remove.inverse), graph)).toBe(true);
+		}
+
+		const unshared = bakeInto(initial, changed, 2, 1);
+		expect(unshared.nextGraph.meshes.find((m) => m.id === mesh.id)?.faces).toHaveLength(14);
+		expect(graphsEqual(applyEdits(unshared.nextGraph, unshared.baked.inverse), initial)).toBe(true);
+	});
+
 });

@@ -209,13 +209,14 @@ export function bakeModule(
 			const oldDef = graph.definitions.find((d) => d.id === oldInst.definitionId) ?? null;
 			const oldMesh = oldDef?.meshId ? (graph.meshes.find((m) => m.id === oldDef.meshId) ?? null) : null;
 			const defShared = oldDef ? graph.instances.some((i) => i.id !== oldInst.id && i.definitionId === oldDef.id) : false;
+			const meshShared = oldMesh ? graph.definitions.some((d) => d.id !== oldDef?.id && d.meshId === oldMesh.id) : false;
 
 			forward.push({ type: 'delete-instance', id: oldInst.id });
 			if (oldDef && !defShared) {
 				forward.push({ type: 'delete-definition', id: oldDef.id });
-				if (oldMesh) forward.push({ type: 'delete-mesh', id: oldMesh.id });
+				if (oldMesh && !meshShared) forward.push({ type: 'delete-mesh', id: oldMesh.id });
 			}
-			if (oldMesh && !defShared) inverse.push({ type: 'put-mesh', value: oldMesh });
+			if (oldMesh && !defShared && !meshShared) inverse.push({ type: 'put-mesh', value: oldMesh });
 			if (oldDef && !defShared) inverse.push({ type: 'put-definition', value: oldDef });
 			inverse.push({ type: 'put-instance', value: oldInst });
 		}
@@ -229,6 +230,23 @@ export function bakeModule(
 	const existingInst = existing ? (graph.instances.find((i) => i.id === existing.instanceId) ?? null) : null;
 	const existingDef = existingInst ? (graph.definitions.find((d) => d.id === existingInst.definitionId) ?? null) : null;
 	const existingMesh = existingDef?.meshId ? (graph.meshes.find((m) => m.id === existingDef.meshId) ?? null) : null;
+
+	// Re-bake preserves A4 IDs and replaces the mesh in place. If an owner
+	// instance/definition also references these IDs, any geometry update would
+	// silently modify that other occurrence even with identical materials.
+	// Fail closed rather than mutating aliased owner geometry.
+	const definitionShared = existingDef !== null &&
+		graph.instances.some((inst) => inst.id !== existingInst?.id && inst.definitionId === existingDef.id);
+	const meshShared = existingMesh !== null &&
+		graph.definitions.some((def) => def.id !== existingDef?.id && def.meshId === existingMesh.id);
+	if (existingInst && (definitionShared || meshShared)) {
+		throw new ArchError(
+			'INVALID_GEOMETRY',
+			{ reason: 'SHARED_MANAGED_GEOMETRY', moduleId: module.moduleId },
+			'INVALID_GEOMETRY SHARED_MANAGED_GEOMETRY: managed definition or mesh is shared'
+		);
+	}
+
 
 	const instanceId = existingInst ? existingInst.id : `${graph.documentId}:instance:op:${S}:${counterStart}`;
 	const definitionId = existingDef ? existingDef.id : `${graph.documentId}:definition:op:${S}:${counterStart}`;
