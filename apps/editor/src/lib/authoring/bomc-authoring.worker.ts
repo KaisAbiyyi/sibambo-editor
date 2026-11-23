@@ -3,7 +3,7 @@ import { readWebBomc } from '@sibambo/bomc-document/reader';
 import { BomcWriter } from '@sibambo/bomc-document/writer';
 import type { BomcGraph, DocumentEdit } from '@sibambo/bomc-document';
 import { BomcContainer } from '@sibambo/e4-import';
-import { AgentToolFailure, runTool, type AgentCommit, type AgentEditBuilder } from '../arch/tools.js';
+import { AgentToolFailure, runTool, type AgentCommit, type AgentEditBuilder, type ToolContext, type ToolOutcome } from '../arch/tools.js';
 import {
 	AuthoringGeometryError,
 	buildExtrusionEdit,
@@ -165,7 +165,7 @@ export class AuthoringWorkerDispatcher {
 	private sequence = 1;
 	private issuedWrite: IssuedWrite | null = null;
 	/** The C5 tool dispatcher (arch/tools.ts). Unit tests substitute it per instance. */
-	private readonly agentTools: typeof runTool = runTool;
+	private readonly agentTools: (tool: AgentRequest['data']['tool'], args: Record<string, unknown>, ctx: ToolContext) => ToolOutcome | Promise<ToolOutcome> = runTool;
 
 	constructor(post: PostMessage, uuid: () => string = makeUuid) {
 		this.post = post;
@@ -285,7 +285,7 @@ export class AuthoringWorkerDispatcher {
 		const snapshot = this.document!.snapshot();
 		const history = this.history!;
 		try {
-			const outcome = this.agentTools(tool, args, Object.freeze({
+			const outcome = await this.agentTools(tool, args, Object.freeze({
 				graph: snapshot.graph,
 				revision: snapshot.revision,
 				sequence: this.sequence,
