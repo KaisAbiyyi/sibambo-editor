@@ -8,7 +8,7 @@
  * - if accepting a committed result fails, return EDITOR_RENDER_FAILED with
  *   detail.committed === true, never retry and never roll back (invariant 3a).
  */
-import { agentError } from '../arch/tools.js';
+import { agentError } from '../arch/errors.js';
 import { AuthoringClientError } from '../authoring/bomc-authoring-client.js';
 import {
 	AGENT_SLOT_PATTERN,

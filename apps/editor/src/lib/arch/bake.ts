@@ -37,7 +37,7 @@ const BUILT_IN_MATERIAL_DEFS: Readonly<Record<string, { rgba: readonly [number, 
 export type BakeEntryInput =
 	| ArchModule
 	| ArchEntry
-	| { module: ArchModule; existing?: ArchEntry | null };
+	| { module: ArchModule; existing?: ArchEntry | null; applyTransform?: boolean };
 
 export type BakeResult = {
 	forward: DocumentEdit[];
@@ -53,21 +53,21 @@ const cleanZero = (v: number): number => (v === 0 ? 0 : v);
 function resolveEntry(
 	graph: BomcGraph,
 	input: BakeEntryInput
-): { module: ArchModule; existing: ArchEntry | null; currentArch: ArchMetadata } {
+): { module: ArchModule; existing: ArchEntry | null; currentArch: ArchMetadata; applyTransform: boolean } {
 	const meta = modelMetadata(graph);
 	const currentArch: ArchMetadata = meta.arch ?? { schema: ARCH_SCHEMA, modules: [] };
 	if ('schemaVersion' in input) {
 		const existing = currentArch.modules.find((m) => m.module.moduleId === input.moduleId) ?? null;
-		return { module: input, existing, currentArch };
+		return { module: input, existing, currentArch, applyTransform: false };
 	}
 	if ('instanceId' in input && 'bakedMeshSha256' in input) {
-		return { module: input.module, existing: input, currentArch };
+		return { module: input.module, existing: input, currentArch, applyTransform: false };
 	}
 	const existing =
 		input.existing !== undefined
 			? input.existing
 			: (currentArch.modules.find((m) => m.module.moduleId === input.module.moduleId) ?? null);
-	return { module: input.module, existing, currentArch };
+	return { module: input.module, existing, currentArch, applyTransform: input.applyTransform === true };
 }
 
 function sameMaterial(a: SolidMaterial, b: SolidMaterial): boolean {
@@ -187,7 +187,7 @@ export function bakeModule(
 	if (!Number.isSafeInteger(S) || S < 1) throw invalidGeometry('INVALID_SEQUENCE');
 	if (!Number.isSafeInteger(counterStart) || counterStart < 1) throw invalidGeometry('INVALID_COUNTER');
 
-	const { module, existing, currentArch } = resolveEntry(graph, entryInput);
+	const { module, existing, currentArch, applyTransform } = resolveEntry(graph, entryInput);
 	const rootInstance = graph.instances.find((i) => i.id === graph.rootInstanceId);
 	if (!rootInstance) throw invalidGeometry('MISSING_ROOT_INSTANCE').withModule(module.moduleId);
 	const metadata = modelMetadata(graph);
@@ -252,7 +252,8 @@ export function bakeModule(
 	const definitionId = existingDef ? existingDef.id : `${graph.documentId}:definition:op:${S}:${counterStart}`;
 	const meshId = existingMesh ? existingMesh.id : `${graph.documentId}:mesh:op:${S}:${counterStart}`;
 	const containerLabel = existingInst?.label ?? JSON.stringify(['sibambo-editor-container-v1', S]);
-	const instanceMatrix = existingInst ? [...existingInst.matrix] : toInstanceMatrix(module.transform).map(cleanZero);
+	const instanceMatrix =
+		existingInst && !applyTransform ? [...existingInst.matrix] : toInstanceMatrix(module.transform).map(cleanZero);
 	const effectiveTransform = fromInstanceMatrix(instanceMatrix).map(cleanZero);
 	const nextRevision = existingInst ? existing!.module.revision + 1 : module.revision;
 
