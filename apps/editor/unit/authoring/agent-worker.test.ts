@@ -191,7 +191,7 @@ describe('worker AGENT path (WP3 exposes no tool)', () => {
 		const stale = await harness.agent('edit_model', 0);
 		expect(stale).toMatchObject({ event: 'ERROR', error: { code: 'STALE_REVISION', currentRevision: 1 } });
 		const current = await harness.agent('model_ops', 1);
-		expect((current as any).result.toolResult.error.code).toBe('NOT_IMPLEMENTED');
+		expect((current as any).result.toolResult.error.code).toBe('INVALID_REQUEST');
 		await harness.ok('WRITE', { expectedRevision: 1 });
 		expect(await harness.agent('undo', 1)).toMatchObject({ event: 'ERROR', error: { code: 'BUSY' } });
 		expectUnchanged(harness, before);
