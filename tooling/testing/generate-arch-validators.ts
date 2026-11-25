@@ -27,6 +27,12 @@ const TARGETS: readonly TargetSpec[] = [
 		outRel: 'apps/editor/src/lib/arch/edit-model.validator.generated.js',
 		label: 'edit_model',
 		envVar: 'EDIT_MODEL_SCHEMA_SHA256'
+	},
+	{
+		schemaRel: 'apps/editor/src/lib/arch/schemas/model-ops.schema.json',
+		outRel: 'apps/editor/src/lib/arch/model-ops.validator.generated.js',
+		label: 'model_ops',
+		envVar: 'MODEL_OPS_SCHEMA_SHA256'
 	}
 ];
 

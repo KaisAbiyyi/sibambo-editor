@@ -20,6 +20,7 @@ import {
 } from '../authoring/protocol.js';
 import { agentError, AgentToolFailure, toAgentToolFailure } from './errors.js';
 import { sharedKernel, type Kernel } from './kernel.js';
+import { planModelOps } from './model-ops.js';
 import { planEditModel } from './patch.js';
 
 export { agentError, AgentToolFailure, toAgentToolFailure };
@@ -52,7 +53,7 @@ export function isAgentWriteTool(tool: AgentToolName): boolean {
 	return AGENT_WRITE_TOOLS.has(tool);
 }
 
-/** WP6: `edit_model` (C10) and `undo` (A12) are active; remaining tools return `NOT_IMPLEMENTED`. */
+/** WP7: `edit_model` (C10), `model_ops` (C11), and `undo` (A12) are active; remaining tools return `NOT_IMPLEMENTED`. */
 export function runTool(tool: AgentToolName, args: Record<string, unknown>, ctx: ToolContext): ToolOutcome | Promise<ToolOutcome> {
 	if (tool === 'undo') {
 		const extraKeys = Object.keys(args).filter((k) => k !== 'steps');
@@ -70,6 +71,21 @@ export function runTool(tool: AgentToolName, args: Record<string, unknown>, ctx:
 			};
 		}
 		return { kind: 'undo', steps: steps as number };
+	}
+
+	if (tool === 'model_ops') {
+		try {
+			const plan = planModelOps(ctx.graph, args, ctx.sequence);
+			return {
+				kind: 'write',
+				builders: plan.builders,
+				failure: 'ops',
+				receipt: plan.receipt
+			};
+		} catch (error) {
+			const failure = toAgentToolFailure(error);
+			return { kind: 'result', toolResult: { ok: false, error: failure.body } };
+		}
 	}
 
 	if (tool === 'edit_model') {
