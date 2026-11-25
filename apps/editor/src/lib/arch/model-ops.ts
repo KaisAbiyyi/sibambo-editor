@@ -10,7 +10,14 @@
 import type { BomcGraph, DocumentEdit, Face, Mesh } from '@sibambo/bomc-document';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { Vector3 } from 'three';
-import { buildModelEdit, contextTransform, definitionGraph, modelMetadata, modelOccurrences } from '../authoring/model.js';
+import {
+	buildModelEdit,
+	contextTransform,
+	definitionGraph,
+	modelMetadata,
+	modelOccurrences,
+	nextModelSequence
+} from '../authoring/model.js';
 import type { FlatAuthoringCommand, ModelAction, ModelSelection } from '../authoring/protocol.js';
 import { AgentToolFailure } from './errors.js';
 import validateModelOpsSchema from './model-ops.validator.generated.js';
@@ -82,6 +89,8 @@ type ManagedTargets = {
 	defToModule: Map<string, string>;
 	meshToModule: Map<string, string>;
 	faceToModule: Map<string, string>;
+	tagToModule: Map<string, string>;
+	assetToModule: Map<string, string>;
 };
 
 function collectManagedTargets(graph: BomcGraph): ManagedTargets {
@@ -91,9 +100,21 @@ function collectManagedTargets(graph: BomcGraph): ManagedTargets {
 	const defToModule = new Map<string, string>();
 	const meshToModule = new Map<string, string>();
 	const faceToModule = new Map<string, string>();
-	const arch = modelMetadata(graph).arch;
+	const tagToModule = new Map<string, string>();
+	const assetToModule = new Map<string, string>();
+	const meta = modelMetadata(graph);
+	const arch = meta.arch;
 	if (!arch || arch.modules.length === 0) {
-		return { instToModule, ancestorToModule, aliasInstToModule, defToModule, meshToModule, faceToModule };
+		return {
+			instToModule,
+			ancestorToModule,
+			aliasInstToModule,
+			defToModule,
+			meshToModule,
+			faceToModule,
+			tagToModule,
+			assetToModule
+		};
 	}
 
 	const instById = new Map(graph.instances.map((i) => [i.id, i]));
@@ -180,7 +201,58 @@ function collectManagedTargets(graph: BomcGraph): ManagedTargets {
 		}
 	}
 
-	return { instToModule, ancestorToModule, aliasInstToModule, defToModule, meshToModule, faceToModule };
+	// Pass 3: protect tags assigned to any managed/ancestor/alias instance and library assets
+	// whose definition subtree reaches any managed instance, ancestor, or protected definition/mesh.
+	const org = meta.organization;
+	if (org) {
+		for (const assignment of org.assignments) {
+			const modId =
+				instToModule.get(assignment.instanceId) ??
+				ancestorToModule.get(assignment.instanceId) ??
+				aliasInstToModule.get(assignment.instanceId);
+			if (modId && !tagToModule.has(assignment.tagId)) {
+				tagToModule.set(assignment.tagId, modId);
+			}
+		}
+		for (const asset of org.assets) {
+			const defStack = [asset.definitionId];
+			const visitedDefs = new Set<string>();
+			let hitMod: string | undefined;
+			while (defStack.length > 0 && !hitMod) {
+				const defId = defStack.pop()!;
+				if (visitedDefs.has(defId)) continue;
+				visitedDefs.add(defId);
+				const def = defById.get(defId);
+				hitMod =
+					defToModule.get(defId) ??
+					(def?.meshId ? meshToModule.get(def.meshId) : undefined);
+				if (hitMod) break;
+				for (const childId of childrenByDef.get(defId) ?? []) {
+					hitMod =
+						instToModule.get(childId) ??
+						ancestorToModule.get(childId) ??
+						aliasInstToModule.get(childId);
+					if (hitMod) break;
+					const childInst = instById.get(childId);
+					if (childInst) defStack.push(childInst.definitionId);
+				}
+			}
+			if (hitMod) {
+				assetToModule.set(asset.id, hitMod);
+			}
+		}
+	}
+
+	return {
+		instToModule,
+		ancestorToModule,
+		aliasInstToModule,
+		defToModule,
+		meshToModule,
+		faceToModule,
+		tagToModule,
+		assetToModule
+	};
 }
 
 function failManaged(moduleId: string, opIndex: number, target: Record<string, string>): never {
@@ -196,7 +268,9 @@ function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedT
 		managed.instToModule.size === 0 &&
 		managed.ancestorToModule.size === 0 &&
 		managed.aliasInstToModule.size === 0 &&
-		managed.faceToModule.size === 0
+		managed.faceToModule.size === 0 &&
+		managed.tagToModule.size === 0 &&
+		managed.assetToModule.size === 0
 	) {
 		return;
 	}
@@ -278,6 +352,17 @@ function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedT
 		case 'tag-assign':
 			for (const id of action.instanceIds) checkInstanceId(id);
 			break;
+		case 'tag-visibility': {
+			const modId = managed.tagToModule.get(action.tagId);
+			if (modId) failManaged(modId, opIndex, { tagId: action.tagId });
+			break;
+		}
+		case 'asset-insert':
+		case 'asset-delete': {
+			const modId = managed.assetToModule.get(action.assetId);
+			if (modId) failManaged(modId, opIndex, { assetId: action.assetId });
+			break;
+		}
 		case 'offset':
 		case 'follow-me': {
 			const modId = managed.faceToModule.get(action.faceId);
@@ -310,8 +395,10 @@ function activeMesh(graph: BomcGraph, definitionId: string): Mesh | undefined {
 }
 
 /**
- * Derive every created or affected entity ID from the real staged transition (`beforeGraph -> afterGraph`).
- * Deterministically deduplicated and sorted within each entity category; never leaks `rootInstanceId`.
+ * Derive operation-level public entity IDs from the real staged transition (`beforeGraph -> afterGraph`).
+ * Deliberately scopes instances/faces/looseEdges/guides to the active editing context and reports the
+ * newly created container ID for `group` (suppressing internal re-parented geometry moved inside it)
+ * and active-context cloned/affected IDs for array/unique/explode/metadata ops, never leaking `rootInstanceId`.
  */
 function diffAffectedIds(
 	action: ModelAction,
@@ -508,13 +595,36 @@ function computeWorldBounds(graph: BomcGraph): ModelOpsBounds | null {
 
 /**
  * Plan a C11 `model_ops` call without mutating `graph`.
- * Builders run sequentially on a scratch graph inside `stageAndCommit(..., slot, 'ops')`.
+ * When `graph` contains `arch.modules`, runs a scratch preflight across `ops[0..k]` so
+ * entities/containers/tags/assets exposed mid-composite cannot bypass `MANAGED_MODULE`.
+ * Builders then run sequentially inside `stageAndCommit(..., slot, 'ops')`.
  */
-export function planModelOps(graph: BomcGraph, rawArgs: Record<string, unknown>): ModelOpsPlan {
+export function planModelOps(
+	graph: BomcGraph,
+	rawArgs: Record<string, unknown>,
+	startSequence = nextModelSequence(graph)
+): ModelOpsPlan {
 	const args = validateArgs(rawArgs);
-	const managed = collectManagedTargets(graph);
-	for (let index = 0; index < args.ops.length; index += 1) {
-		assertOpNotManaged(args.ops[index]!, index, managed, graph);
+	const initialArch = modelMetadata(graph).arch;
+	if (initialArch && initialArch.modules.length > 0) {
+		const scratch = BomcDocument.fromGraph(graph);
+		try {
+			for (let index = 0; index < args.ops.length; index += 1) {
+				const op = args.ops[index]!;
+				const stagedGraph = scratch.snapshot().graph;
+				const managed = collectManagedTargets(stagedGraph);
+				assertOpNotManaged(op, index, managed, stagedGraph);
+				try {
+					const edit = buildModelEdit(stagedGraph, op.path ?? [], lowerOpToAction(op), startSequence + index);
+					scratch.transact(edit.forward);
+				} catch {
+					// Non-MANAGED_MODULE command failures at step `index` are surfaced cleanly by stageAndCommit as INVALID_COMMAND { opIndex: index }.
+					break;
+				}
+			}
+		} finally {
+			scratch.dispose();
+		}
 	}
 
 	let latestBounds = computeWorldBounds(graph);

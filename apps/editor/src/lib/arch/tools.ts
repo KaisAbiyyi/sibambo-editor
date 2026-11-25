@@ -75,7 +75,7 @@ export function runTool(tool: AgentToolName, args: Record<string, unknown>, ctx:
 
 	if (tool === 'model_ops') {
 		try {
-			const plan = planModelOps(ctx.graph, args);
+			const plan = planModelOps(ctx.graph, args, ctx.sequence);
 			return {
 				kind: 'write',
 				builders: plan.builders,

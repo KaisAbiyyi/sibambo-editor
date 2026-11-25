@@ -846,6 +846,280 @@ describe('WP7 / CP7 — Complete deterministic entityIds receipts & indirect man
 		}
 		expect(readManaged(aliasHarness.graph()).get('house/ground')!.state).toBe('ok');
 	});
+
+	test('indirect MANAGED_MODULE protection blocks tag-visibility on owner-tagged module/wrapper/alias and preserves safe freeform tags + atomic composite rollback', async () => {
+		const harness = await created();
+		await harness.agentCall('edit_model', {
+			changes: [
+				{ op: 'create_module', moduleId: 'house/ground' },
+				{ op: 'add', moduleId: 'house/ground', element: wall('w1', [[0, 0], [4, 0]]) }
+			]
+		});
+		const managedInstId = readManaged(harness.graph()).get('house/ground')!.instance!.id;
+
+		// Owner wraps managedInst inside a wrapper group, adds a freeform group, and creates three tags
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: {
+				kind: 'MODEL_EDIT',
+				path: [],
+				action: { type: 'group', selection: [{ type: 'instance', id: managedInstId }], containerKind: 'group', name: 'WrappedArch' }
+			}
+		});
+		const wrapperId = harness.graph().instances.find((i) => i.name === 'WrappedArch')!.id;
+
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'raw', command: { kind: 'CREATE_RECTANGLE', first: [8, 0, 0], opposite: [10, 0, 2] } } }
+		});
+		const freeFaceId = harness.graph().meshes.find((m) => m.definitionId === harness.graph().rootDefinitionId)!.faces[0]!.id;
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'group', selection: [{ type: 'face', id: freeFaceId }], containerKind: 'group', name: 'FreeBox' } }
+		});
+		const freeId = harness.graph().instances.find((i) => i.name === 'FreeBox')!.id;
+
+		for (const tagName of ['ArchTag', 'WrapperTag', 'FreeTag']) {
+			await harness.ok('COMMAND', {
+				expectedRevision: harness.revision(),
+				data: { kind: 'MODEL_EDIT', path: [], action: { type: 'tag-create', name: tagName } }
+			});
+		}
+		const tags = modelMetadata(harness.graph()).organization!.tags;
+		const archTagId = tags.find((t) => t.name === 'ArchTag')!.id;
+		const wrapperTagId = tags.find((t) => t.name === 'WrapperTag')!.id;
+		const freeTagId = tags.find((t) => t.name === 'FreeTag')!.id;
+
+		// Owner assigns ArchTag directly inside [wrapperId] -> managedInstId, WrapperTag -> wrapperId, FreeTag -> freeId
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [wrapperId], action: { type: 'tag-assign', instanceIds: [managedInstId], tagId: archTagId } }
+		});
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'tag-assign', instanceIds: [wrapperId], tagId: wrapperTagId } }
+		});
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'tag-assign', instanceIds: [freeId], tagId: freeTagId } }
+		});
+
+		// Create owner undo/redo stack entry to prove atomic composite rejection leaves owner redo untouched
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'raw', command: { kind: 'CREATE_RECTANGLE', first: [12, 0, 0], opposite: [13, 0, 1] } } }
+		});
+		const withOwnerRedoRect = harness.graph();
+		await harness.ok('UNDO', { expectedRevision: harness.revision() });
+		const before = harness.state();
+		expect(before.redo).toHaveLength(1);
+
+		for (const protectedTagId of [archTagId, wrapperTagId]) {
+			// Single-op tag-visibility false & true both rejected
+			for (const visible of [false, true]) {
+				const r = await harness.agentCall('model_ops', {
+					ops: [{ action: { type: 'tag-visibility', tagId: protectedTagId, visible } }]
+				});
+				expect(r.toolResult.ok).toBe(false);
+				expect(r.toolResult.error).toMatchObject({
+					code: 'MANAGED_MODULE',
+					retryable: false,
+					detail: { moduleId: 'house/ground', opIndex: 0, tagId: protectedTagId }
+				});
+				expect(r.authoring).toBeNull();
+				expectUnchanged(harness, before);
+			}
+
+			// Multi-op composite [valid freeform op (0), protected tag-visibility (1)] rejects atomically with opIndex: 1
+			const composite = await harness.agentCall('model_ops', {
+				ops: [
+					{ command: { kind: 'CREATE_RECTANGLE', first: [20, 0, 0], opposite: [21, 0, 1] } },
+					{ action: { type: 'tag-visibility', tagId: protectedTagId, visible: false } }
+				]
+			});
+			expect(composite.toolResult.ok).toBe(false);
+			expect(composite.toolResult.error).toMatchObject({
+				code: 'MANAGED_MODULE',
+				retryable: false,
+				detail: { moduleId: 'house/ground', opIndex: 1, tagId: protectedTagId }
+			});
+			expect(composite.authoring).toBeNull();
+			expectUnchanged(harness, before);
+		}
+
+		// Preceding failing invalid command at op 0 still surfaces INVALID_COMMAND { opIndex: 0 } rather than masking with op 1
+		const invalidFirst = await harness.agentCall('model_ops', {
+			ops: [
+				{ command: { kind: 'PUSH_PULL_FACE', faceId: `${DOC}:rectangle:9999`, distance: 1 } },
+				{ action: { type: 'tag-visibility', tagId: archTagId, visible: false } }
+			]
+		});
+		expect(invalidFirst.toolResult.ok).toBe(false);
+		expect(invalidFirst.toolResult.error).toMatchObject({ code: 'INVALID_COMMAND', detail: { opIndex: 0 } });
+		expectUnchanged(harness, before);
+
+		// Owner redo stack still works cleanly
+		await harness.ok('REDO', { expectedRevision: harness.revision() });
+		expect(graphsEqual(harness.graph(), withOwnerRedoRect)).toBe(true);
+
+		// Safe freeform-only tag remains toggleable cleanly and preserves managed module
+		const safeToggle = await harness.agentCall('model_ops', {
+			ops: [{ action: { type: 'tag-visibility', tagId: freeTagId, visible: false } }]
+		});
+		expect(safeToggle.toolResult.ok).toBe(true);
+		expect(safeToggle.toolResult.result.entityIds).toEqual([freeTagId]);
+		expect(modelOccurrences(harness.graph()).some((o) => o.path.includes(freeId))).toBe(false);
+		expect(modelOccurrences(harness.graph()).some((o) => o.path.includes(managedInstId))).toBe(true);
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+	});
+
+	test('indirect MANAGED_MODULE protection blocks asset-insert & asset-delete on owner-created component assets wrapping managed modules while allowing safe freeform assets', async () => {
+		const harness = await created();
+		await harness.agentCall('edit_model', {
+			changes: [
+				{ op: 'create_module', moduleId: 'house/ground' },
+				{ op: 'add', moduleId: 'house/ground', element: wall('w1', [[0, 0], [4, 0]]) }
+			]
+		});
+		const managedInstId = readManaged(harness.graph()).get('house/ground')!.instance!.id;
+
+		// Owner wraps managedInst inside a component container and registers it as a library asset
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: {
+				kind: 'MODEL_EDIT',
+				path: [],
+				action: { type: 'group', selection: [{ type: 'instance', id: managedInstId }], containerKind: 'component', name: 'ArchComponent' }
+			}
+		});
+		const compInstId = harness.graph().instances.find((i) => i.name === 'ArchComponent')!.id;
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'asset-create', instanceId: compInstId, name: 'ArchAsset' } }
+		});
+		const archAssetId = modelMetadata(harness.graph()).organization!.assets.find((a) => a.name === 'ArchAsset')!.id;
+
+		// Safe freeform asset created on owner freeform box
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'raw', command: { kind: 'CREATE_RECTANGLE', first: [8, 0, 0], opposite: [9, 0, 1] } } }
+		});
+		const freeFaceId = harness.graph().meshes.find((m) => m.definitionId === harness.graph().rootDefinitionId)!.faces[0]!.id;
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'group', selection: [{ type: 'face', id: freeFaceId }], containerKind: 'component', name: 'FreeComp' } }
+		});
+		const freeCompId = harness.graph().instances.find((i) => i.name === 'FreeComp')!.id;
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'asset-create', instanceId: freeCompId, name: 'FreeAsset' } }
+		});
+		const freeAssetId = modelMetadata(harness.graph()).organization!.assets.find((a) => a.name === 'FreeAsset')!.id;
+
+		// Owner redo entry check
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'raw', command: { kind: 'CREATE_RECTANGLE', first: [12, 0, 0], opposite: [13, 0, 1] } } }
+		});
+		await harness.ok('UNDO', { expectedRevision: harness.revision() });
+		const before = harness.state();
+		expect(before.redo).toHaveLength(1);
+
+		// Refuses single-op & composite asset-insert and asset-delete against ArchAsset
+		for (const badAssetOp of [
+			{ action: { type: 'asset-insert', assetId: archAssetId, point: [5, 0, 0] } },
+			{ action: { type: 'asset-delete', assetId: archAssetId } }
+		]) {
+			const single = await harness.agentCall('model_ops', { ops: [badAssetOp] });
+			expect(single.toolResult.ok).toBe(false);
+			expect(single.toolResult.error).toMatchObject({
+				code: 'MANAGED_MODULE',
+				retryable: false,
+				detail: { moduleId: 'house/ground', opIndex: 0, assetId: archAssetId }
+			});
+			expectUnchanged(harness, before);
+
+			const composite = await harness.agentCall('model_ops', {
+				ops: [
+					{ command: { kind: 'CREATE_RECTANGLE', first: [15, 0, 0], opposite: [16, 0, 1] } },
+					badAssetOp
+				]
+			});
+			expect(composite.toolResult.ok).toBe(false);
+			expect(composite.toolResult.error).toMatchObject({
+				code: 'MANAGED_MODULE',
+				retryable: false,
+				detail: { moduleId: 'house/ground', opIndex: 1, assetId: archAssetId }
+			});
+			expectUnchanged(harness, before);
+		}
+
+		// Even if owner erases the scene ArchComponent instance (leaving managedInst kept alive via ArchAsset alone),
+		// asset-delete via model_ops is still blocked so it cannot GC & orphan the managed module!
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: { kind: 'MODEL_EDIT', path: [], action: { type: 'erase', selection: [{ type: 'instance', id: compInstId }] } }
+		});
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+		const beforeErasedComp = harness.state();
+		const delOrphaningAsset = await harness.agentCall('model_ops', {
+			ops: [{ action: { type: 'asset-delete', assetId: archAssetId } }]
+		});
+		expect(delOrphaningAsset.toolResult.ok).toBe(false);
+		expect(delOrphaningAsset.toolResult.error).toMatchObject({
+			code: 'MANAGED_MODULE',
+			detail: { moduleId: 'house/ground', assetId: archAssetId }
+		});
+		expectUnchanged(harness, beforeErasedComp);
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+
+		// Safe freeform asset insert & delete continue to succeed cleanly
+		const safeAssetOps = await harness.agentCall('model_ops', {
+			ops: [
+				{ action: { type: 'asset-insert', assetId: freeAssetId, point: [4, 0, 0] } },
+				{ action: { type: 'asset-delete', assetId: freeAssetId } }
+			]
+		});
+		expect(safeAssetOps.toolResult.ok).toBe(true);
+		expect(safeAssetOps.toolResult.result.entityIds).toHaveLength(2);
+		expect(safeAssetOps.toolResult.result.entityIds).toContain(freeAssetId);
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+	});
+
+	test('operation-level public receipt semantics across group, unique, explode, and multi-face container copies', async () => {
+		const harness = await created();
+		const box = await harness.agentCall('model_ops', {
+			ops: [
+				{ command: { kind: 'CREATE_RECTANGLE', first: [0, 0, 0], opposite: [1, 0, 1] } },
+				{ command: { kind: 'PUSH_PULL_FACE', faceId: `${DOC}:rectangle:1`, distance: 1.0 } }
+			]
+		});
+		const boxFaces = box.toolResult.result.entityIds as string[];
+		expect(boxFaces).toHaveLength(6);
+
+		// group reports only the newly created container instance ID (suppresses moved faces inside it)
+		const grouped = await harness.agentCall('model_ops', {
+			ops: [{ action: { type: 'group', selection: boxFaces.map((id) => ({ type: 'face' as const, id })), containerKind: 'group', name: 'Block' } }]
+		});
+		const blockId = grouped.toolResult.result.entityIds[0] as string;
+		expect(grouped.toolResult.result.entityIds).toEqual([blockId]);
+
+		// unique on blockId reports [blockId] without internal cloned mesh face IDs
+		const uniqued = await harness.agentCall('model_ops', {
+			ops: [{ action: { type: 'unique', instanceId: blockId } }]
+		});
+		expect(uniqued.toolResult.result.entityIds).toEqual([blockId]);
+
+		// explode on blockId reports all 6 promoted faces + blockId without rootId
+		const exploded = await harness.agentCall('model_ops', {
+			ops: [{ action: { type: 'explode', instanceId: blockId } }]
+		});
+		const explodedIds = exploded.toolResult.result.entityIds as string[];
+		expect(explodedIds).not.toContain(harness.graph().rootInstanceId);
+		expect(explodedIds).toContain(blockId);
+		expect(explodedIds.filter((id) => id.includes(':explode:'))).toHaveLength(6);
+		expect(explodedIds).toHaveLength(7);
+	});
 });
 
 describe('WP7 / CP7 — Mandatory T-RB9 & T-RB10 through real model_ops and v2.4 A7 isolation', () => {

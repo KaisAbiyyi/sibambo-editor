@@ -1,6 +1,6 @@
 # PLAN DISPOSITION (PROPOSED) — SIB-MCP-MODELING-001 WP7: `v2.4 A7` vs Freeform `C11 model_ops`
 
-ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-25 (Asia/Jakarta)** · Status **PROPOSED — Awaiting Owner Disposition (`D-WP7-1`). Independent review [#6033558148](https://github.com/KaisAbiyyi/sibambo-editor/pull/29#pullrequestreview-6033558148) item 3 requested explicit `REVIEW/PLAN` resolution without adding blanket evaluation of unrelated modules and without silently waiving `v2.4 A7`.**
+ID **SIB-MCP-MODELING-001** · Disposition **v0.1** · Date **2026-11-25 (Asia/Jakarta)** · Status **RESOLVED (2026-11-25): Owner Disposition D-WP7-1 APPROVED — Option A. Incorporated in [master v2.5](MASTER_IMPLEMENTATION_PLAN_2026-11-15_SIB-MCP-MODELING-001_v2.5.md); `v2.3` and `v2.4` remain byte-for-byte unmodified as history. Original proposal preserved below as history.**
 
 - **Trigger:** Independent review [#6033558148](https://github.com/KaisAbiyyi/sibambo-editor/pull/29#pullrequestreview-6033558148) on WP7 (`work/mcp-modeling-001/wp7-model-ops`, Draft PR [#29](https://github.com/KaisAbiyyi/sibambo-editor/pull/29)).
 - **Author / Implementer:** Nazar (`NazarMuhammadFF`) via Antigravity agent session `9416ba1f-01ff-45a6-9a3a-ae1a6882457d`.
