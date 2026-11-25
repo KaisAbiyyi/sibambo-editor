@@ -172,10 +172,10 @@ describe('AGENT request envelope (C5)', () => {
 });
 
 describe('worker AGENT path (WP3 exposes no tool)', () => {
-	test('read tools return NOT_IMPLEMENTED with authoring null and change nothing, even while a download awaits ACK', async () => {
+	test('a placeholder read tool returns NOT_IMPLEMENTED with authoring null and reads change nothing, even while a download awaits ACK', async () => {
 		const harness = await created();
 		const before = harness.state();
-		const reply = await harness.agent('describe_scene', null);
+		const reply = await harness.agent('get_floor_plan', null);
 		expect(reply.event).toBe('RESULT');
 		const result = (reply as any).result as AgentResult;
 		expect(result).toEqual({ kind: 'agent', authoring: null, toolResult: { ok: false, error: expect.objectContaining({ code: 'NOT_IMPLEMENTED', retryable: false }) } });
@@ -539,7 +539,7 @@ describe('AuthoringClient.agent end-to-end (C5 plumbing)', () => {
 		try {
 			await client.create();
 			const initial = client.checkpoint!;
-			const read = await client.agent({ tool: 'describe_scene', args: {}, slot: 'codex', context: CONTEXT as any }, null);
+			const read = await client.agent({ tool: 'get_floor_plan', args: {}, slot: 'codex', context: CONTEXT as any }, null);
 			expect(read.toolResult.ok).toBe(false);
 			expect(read.authoring).toBeNull();
 			expect(client.checkpoint).toBe(initial);

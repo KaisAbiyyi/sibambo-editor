@@ -1,0 +1,10 @@
+describe_element · revision 1 · edges
+frame module test/ground
+  test/ground:walls:e0  (-0.150,-0.150,0.000)-(-0.150,3.150,0.000)  len 3.300  hard  faces test/ground:shell:f0|test/ground:shell:f1  angle 90.0
+  test/ground:walls:e1  (-0.150,-0.150,0.000)-(1.000,-0.150,0.000)  len 1.150  hard  faces test/ground:shell:f0|test/ground:shell:f2  angle 90.0
+  test/ground:walls:e2  (-0.150,-0.150,0.000)-(-0.150,-0.150,2.700)  len 2.700  hard  faces test/ground:shell:f1|test/ground:shell:f2  angle 90.0
+  test/ground:walls:e3  (-0.150,3.150,0.000)-(4.150,3.150,0.000)  len 4.300  hard  faces test/ground:shell:f0|test/ground:shell:f3  angle 90.0
+  test/ground:walls:e4  (-0.150,3.150,0.000)-(-0.150,3.150,2.700)  len 2.700  hard  faces test/ground:shell:f1|test/ground:shell:f3  angle 90.0
+  test/ground:walls:e5  (4.150,3.150,0.000)-(4.150,-0.150,0.000)  len 3.300  hard  faces test/ground:shell:f0|test/ground:shell:f4  angle 90.0
+  test/ground:walls:e6  (4.150,3.150,0.000)-(4.150,3.150,2.700)  len 2.700  hard  faces test/ground:shell:f3|test/ground:shell:f4  angle 90.0
+page 1/12 (84 edges; page=0)

@@ -9,6 +9,7 @@
  *   detail.committed === true, never retry and never roll back (invariant 3a).
  */
 import { agentError } from '../arch/errors.js';
+import { withAgentStatus } from '../arch/textfmt.js';
 import { AuthoringClientError } from '../authoring/bomc-authoring-client.js';
 import {
 	AGENT_SLOT_PATTERN,
@@ -209,7 +210,13 @@ export class AgentHost<TClient extends AgentClientPort = AgentClientPort> {
 				return finish(mapClientError(error));
 			}
 			if (!result.toolResult.ok) return finish({ ok: false, error: result.toolResult.error });
-			if (result.authoring === null) return finish({ ok: true, result: result.toolResult.result });
+			if (result.authoring === null) {
+				// C12 header: the writer slot and pause state live here (A13/A15); the worker envelope stays exactly {mode, path, selection}.
+				const value = name === 'describe_scene'
+					? withAgentStatus(result.toolResult.result, { writer: this.currentWriter(), paused: this.pausedValue })
+					: result.toolResult.result;
+				return finish({ ok: true, result: value });
+			}
 			// The worker has committed. From here on the reply must say so, whatever happens on
 			// the page; the committed checkpoint is never reverted and the call never retried.
 			const receipt = result.toolResult.result;

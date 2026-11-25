@@ -1,0 +1,10 @@
+describe_element · revision 1 · faces
+frame module test/ground
+  test/ground:shell:f0  bottom  normal -z  area 2.06  centroid (2.036,1.603,0.000)  material "sib-default"  loops:[outer (-0.150,-0.150,0.000) (-0.150,3.150,0.000) (4.150,3.150,0.000) (4.150,-0.150,0.000) (1.900,-0.150,0.000) (1.900,0.000,0.000) (4.000,0.000,0.000) (4.000,3.000,0.000) (0.000,3.000,0.000) (0.000,0.000,0.000) (1.000,0.000,0.000) (1.000,-0.150,0.000)]
+  test/ground:shell:f1  exterior  normal -x  area 8.91  centroid (-0.150,1.500,1.350)  material "sib-default"  loops:[outer (-0.150,-0.150,0.000) (-0.150,-0.150,2.700) (-0.150,3.150,2.700) (-0.150,3.150,0.000)]
+  test/ground:shell:f2  exterior  normal -y  area 8.52  centroid (1.981,-0.150,1.395)  material "sib-default"  loops:[outer (-0.150,-0.150,0.000) (1.000,-0.150,0.000) (1.000,-0.150,2.100) (1.900,-0.150,2.100) (1.900,-0.150,0.000) (4.150,-0.150,0.000) (4.150,-0.150,2.700) (-0.150,-0.150,2.700) | hole (2.500,-0.150,0.900) (2.500,-0.150,2.100) (3.500,-0.150,2.100) (3.500,-0.150,0.900)]
+  test/ground:shell:f3  exterior  normal +y  area 11.61  centroid (2.000,3.150,1.350)  material "sib-default"  loops:[outer (-0.150,3.150,0.000) (-0.150,3.150,2.700) (4.150,3.150,2.700) (4.150,3.150,0.000)]
+  test/ground:shell:f4  exterior  normal +x  area 8.91  centroid (4.150,1.500,1.350)  material "sib-default"  loops:[outer (4.150,-0.150,0.000) (4.150,3.150,0.000) (4.150,3.150,2.700) (4.150,-0.150,2.700)]
+  test/ground:shell:f5  interior:sp  normal -x  area 8.10  centroid (4.000,1.500,1.350)  material "sib-default"  loops:[outer (4.000,0.000,0.000) (4.000,0.000,2.700) (4.000,3.000,2.700) (4.000,3.000,0.000)]
+  test/ground:shell:f6  interior:sp  normal -y  area 10.80  centroid (2.000,3.000,1.350)  material "sib-default"  loops:[outer (0.000,3.000,0.000) (4.000,3.000,0.000) (4.000,3.000,2.700) (0.000,3.000,2.700)]
+page 1/5 (33 faces; page=0)

@@ -1,8 +1,8 @@
 /**
  * SIB-MCP-MODELING-001 v2.3 C5 & WP6 (C10/A12) — agent tool dispatcher used by the authoring worker.
  *
- * WP6 activates `edit_model` and `undo`. Later packages replace the remaining placeholders:
- * `model_ops` (WP7), perception/checks (WP8), `get_floor_plan` (WP9).
+ * Active: `edit_model` and `undo` (WP6), `model_ops` (WP7), perception and checks (WP8). `get_floor_plan` (WP9) is still
+ * a placeholder; `read_guide` is answered by the relay.
  *
  * Contract enforced by the worker:
  * - a tool never mutates the document, history or sequence; it receives a frozen snapshot;
@@ -22,6 +22,12 @@ import { agentError, AgentToolFailure, toAgentToolFailure } from './errors.js';
 import { sharedKernel, type Kernel } from './kernel.js';
 import { planModelOps } from './model-ops.js';
 import { planEditModel } from './patch.js';
+import { checkModel, parseCheckArgs } from './checks.js';
+import {
+	describeElement, describeScene, measure, parseElementArgs, parseMeasureArgs, parseRegionArgs, parseSceneArgs, queryRegion
+} from './perception.js';
+import { assertResultSize } from './read-args.js';
+import { needsKernel, readScene, type ReadScene } from './read-model.js';
 
 export { agentError, AgentToolFailure, toAgentToolFailure };
 
@@ -53,7 +59,48 @@ export function isAgentWriteTool(tool: AgentToolName): boolean {
 	return AGENT_WRITE_TOOLS.has(tool);
 }
 
-/** WP7: `edit_model` (C10), `model_ops` (C11), and `undo` (A12) are active; remaining tools return `NOT_IMPLEMENTED`. */
+/** Parses the arguments of a read tool and returns what to compute once the scene is indexed; `null` for any other tool. */
+function readTool(tool: AgentToolName, raw: Record<string, unknown>, ctx: ToolContext): ((scene: ReadScene) => Record<string, unknown>) | null {
+	switch (tool) {
+		case 'describe_scene': {
+			const args = parseSceneArgs(raw);
+			return (scene) => describeScene(scene, ctx.revision, ctx.context, args);
+		}
+		case 'describe_element': {
+			const args = parseElementArgs(raw);
+			return (scene) => describeElement(scene, ctx.revision, args);
+		}
+		case 'query_region': {
+			const args = parseRegionArgs(raw);
+			return (scene) => queryRegion(scene, ctx.revision, args);
+		}
+		case 'measure': {
+			const args = parseMeasureArgs(raw);
+			return (scene) => measure(scene, ctx.revision, args);
+		}
+		case 'check_model': {
+			const args = parseCheckArgs(raw);
+			return (scene) => checkModel(scene, ctx.revision, args);
+		}
+		default:
+			return null;
+	}
+}
+
+/** Read tools (WP8): arguments are checked before any work; the frozen snapshot is only read (invariant 9). */
+async function runReadTool(compute: (scene: ReadScene) => Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+	try {
+		const kernel = ctx.kernel ?? sharedKernel;
+		if (needsKernel(ctx.graph)) await kernel.init();
+		const result = compute(readScene(ctx.graph, kernel));
+		assertResultSize(result);
+		return { kind: 'result', toolResult: { ok: true, result } };
+	} catch (error) {
+		return { kind: 'result', toolResult: { ok: false, error: toAgentToolFailure(error).body } };
+	}
+}
+
+/** Active tools per package (header); the rest return `NOT_IMPLEMENTED`. */
 export function runTool(tool: AgentToolName, args: Record<string, unknown>, ctx: ToolContext): ToolOutcome | Promise<ToolOutcome> {
 	if (tool === 'undo') {
 		const extraKeys = Object.keys(args).filter((k) => k !== 'steps');
@@ -106,6 +153,14 @@ export function runTool(tool: AgentToolName, args: Record<string, unknown>, ctx:
 			}
 		})();
 	}
+
+	let compute: ReturnType<typeof readTool>;
+	try {
+		compute = readTool(tool, args, ctx);
+	} catch (error) {
+		return { kind: 'result', toolResult: { ok: false, error: toAgentToolFailure(error).body } };
+	}
+	if (compute) return runReadTool(compute, ctx);
 
 	return {
 		kind: 'result',

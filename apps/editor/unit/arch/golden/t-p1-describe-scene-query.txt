@@ -1,0 +1,10 @@
+Sibambo · document "Untitled" · revision 7 · mode viewer · agents: writer unknown · paused unknown
+Query: "KAMAR"
+Selection: instance 7c2e4a10-3b5d-4f60-9a1c-5d6e7f8091a2:instance:op:4:2 "Meja \"kayu\""
+Arch modules 1:
+Spaces:
+  house/ground:bed-1  "Kamar 1"  15.70 m²  enclosed:true authoredEnclosed:true  clear 3.925×4.000 (bbox)
+  house/ground:bed-2  "Kamar 2"  11.70 m²  enclosed:true authoredEnclosed:true  clear 4.000×2.925 (bbox)
+Freeform: groups 1 components 0 loose-faces 1
+Issues: ERROR 0 · WARNING 0 · INFO 0 → check_model()
+Next: describe_element(ids) · query_region(box) · measure(a, b) · check_model()
