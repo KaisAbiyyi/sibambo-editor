@@ -7,16 +7,20 @@
  * budgets/schema, Save->reopen, and AgentHost end-to-end execution.
  */
 import { describe, expect, test } from 'bun:test';
-import type { BomcGraph } from '@sibambo/bomc-document';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { BomcGraph, DocumentEdit } from '@sibambo/bomc-document';
+import { BomcDocument } from '@sibambo/bomc-document/document';
 import { DEFAULT_DISPLAY_STATE } from '@sibambo/viewport';
 import { LineSegments } from 'three';
 import { AgentHost } from '../../src/lib/agent/agent-host.js';
+import { IDENTITY_ROW_MAJOR } from '../../src/lib/arch/convention.js';
 import { readManaged } from '../../src/lib/arch/managed.js';
 import { AuthoringClient } from '../../src/lib/authoring/bomc-authoring-client.js';
-import { AuthoringWorkerDispatcher } from '../../src/lib/authoring/bomc-authoring.worker.js';
+import { AuthoringWorkerDispatcher, compactAgentEdits } from '../../src/lib/authoring/bomc-authoring.worker.js';
 import { AuthoringHistory, graphsEqual, validateAuthoringCheckpoint } from '../../src/lib/authoring/history.js';
-import { modelMetadata, modelOccurrences, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
-import { AUTHORING_PROTOCOL_VERSION, type AuthoringCheckpoint, type AuthoringWorkerMessage } from '../../src/lib/authoring/protocol.js';
+import { buildModelEdit, modelMetadata, modelOccurrences, nextModelSequence, validateAuthoringDocument } from '../../src/lib/authoring/model.js';
+import { AUTHORING_PROTOCOL_VERSION, type AuthoringCheckpoint, type AuthoringWorkerMessage, type ModelAction } from '../../src/lib/authoring/protocol.js';
 import { projectAuthoringScene } from '../../src/lib/authoring/scene.js';
 import { wall } from './fixtures/modules.js';
 
@@ -106,14 +110,15 @@ describe('WP7 / CP7 — model_ops action families (T-E6)', () => {
 		expect(r1.toolResult.ok).toBe(true);
 		expect(r1.toolResult.result.revision).toBe(1);
 		expect(r1.toolResult.result.changed).toBe(true);
-		expect(r1.toolResult.result.entityIds).toEqual([`${DOC}:rectangle:1`]);
+		const rootMesh = harness.graph().meshes.find((m) => m.definitionId === harness.graph().rootDefinitionId)!;
+		expect(rootMesh.faces).toHaveLength(6);
+		expect(r1.toolResult.result.entityIds).not.toContain(harness.graph().rootInstanceId);
+		expect(new Set(r1.toolResult.result.entityIds).size).toBe(6);
+		expect([...r1.toolResult.result.entityIds].sort()).toEqual(rootMesh.faces.map((f) => f.id).sort());
 		expect(r1.toolResult.result.bounds).toEqual({ min: [0, 0, 0], max: [2, 1.5, 2] });
 		expect(harness.state().undo).toHaveLength(1);
 		expect(harness.state().undo[0]!.origin).toBe('agent:claude-code');
 		expect(validateAuthoringDocument(harness.graph()).editable).toBe(true);
-
-		const rootMesh = harness.graph().meshes.find((m) => m.definitionId === harness.graph().rootDefinitionId)!;
-		expect(rootMesh.faces).toHaveLength(6);
 		const faceSelection = rootMesh.faces.map((f) => ({ type: 'face' as const, id: f.id }));
 
 		// 2. Group the 6 root faces into a container, then create a nested rectangle inside via `path: [pillarId]`
@@ -280,7 +285,7 @@ describe('WP7 / CP7 — model_ops action families (T-E6)', () => {
 			]
 		});
 		expect(rFollow.toolResult.ok).toBe(true);
-		expect(rFollow.toolResult.result.entityIds[0]).toContain(':sweep:');
+		expect((rFollow.toolResult.result.entityIds as string[]).some((id) => id.includes(':sweep:'))).toBe(true);
 		expect(validateAuthoringDocument(sweepHarness.graph()).editable).toBe(true);
 
 		// 3. Organization actions: CREATE_RECTANGLE(first/opposite) -> EXTRUDE_RECTANGLE -> group -> asset-create -> asset-insert -> unique -> entity-info -> tag-create/assign/visibility -> explode -> asset-delete
@@ -530,7 +535,9 @@ describe('WP7 / CP7 — Atomic rollback, budgets, Save->reopen, and AgentHost (T
 			});
 			expect(reply.ok).toBe(true);
 			expect(reply.committed!.revision).toBe(1);
-			expect(reply.committed!.entityIds).toEqual([`${DOC}:rectangle:${seq}`]);
+			const hostFaces = client.checkpoint!.snapshot.graph.meshes.find((m) => m.definitionId === client.checkpoint!.snapshot.graph.rootDefinitionId)!.faces.map((f) => f.id).sort();
+			expect([...reply.committed!.entityIds].sort()).toEqual(hostFaces);
+			expect(reply.committed!.entityIds).not.toContain(client.checkpoint!.snapshot.graph.rootInstanceId);
 			expect((reply as any).result.bounds).toEqual({ min: [0, 0, 0], max: [3, 2, 2] });
 			expect(client.checkpoint!.history.undo.at(-1)!.origin).toBe('agent:codex');
 
@@ -541,5 +548,442 @@ describe('WP7 / CP7 — Atomic rollback, budgets, Save->reopen, and AgentHost (T
 		} finally {
 			await client.close();
 		}
+	});
+});
+
+describe('WP7 / CP7 — Complete deterministic entityIds receipts & indirect managed protection', () => {
+	test('reports exact deduplicated entityIds for radial/linear copy, multi-selection ops, and metadata without synthetic root leakage', async () => {
+		const runScenario = async () => {
+			const harness = await created();
+			const rootId = harness.graph().rootInstanceId;
+
+			// 1. Two independent rectangular faces + linear 3-copy on BOTH selected faces -> 6 exact copied faces
+			const prep = await harness.agentCall('model_ops', {
+				ops: [
+					{ command: { kind: 'CREATE_RECTANGLE', first: [0, 0, 0], opposite: [1, 0, 1] } },
+					{ command: { kind: 'CREATE_RECTANGLE', first: [0, 0, 2], opposite: [1, 0, 3] } }
+				]
+			});
+			expect(prep.toolResult.ok).toBe(true);
+			const [faceA, faceB] = prep.toolResult.result.entityIds as [string, string];
+			expect(prep.toolResult.result.entityIds).not.toContain(rootId);
+
+			const linearCopy = await harness.agentCall('model_ops', {
+				ops: [
+					{
+						action: {
+							type: 'transform',
+							selection: [
+								{ type: 'face', id: faceA },
+								{ type: 'face', id: faceB }
+							],
+							delta: [2, 0, 0],
+							copy: true,
+							count: 3,
+							spacing: 'multiply',
+							radial: null
+						}
+					}
+				]
+			});
+			expect(linearCopy.toolResult.ok).toBe(true);
+			const linearIds = linearCopy.toolResult.result.entityIds as string[];
+			expect(linearIds).toHaveLength(6);
+			expect(new Set(linearIds).size).toBe(6);
+			expect(linearIds).not.toContain(rootId);
+			expect(linearIds).not.toContain(faceA);
+			expect(linearIds).not.toContain(faceB);
+
+			// 2. Multi-selection paint + move + erase reports ALL selected faces, not only index 0 or last
+			const painted = await harness.agentCall('model_ops', {
+				ops: [
+					{
+						action: {
+							type: 'paint',
+							selection: [
+								{ type: 'face', id: faceA },
+								{ type: 'face', id: faceB }
+							],
+							name: 'Plaster',
+							rgba: [220, 220, 210, 255],
+							opacityU16: 65535,
+							side: 'both'
+						}
+					}
+				]
+			});
+			expect(painted.toolResult.result.entityIds).toEqual([faceA, faceB].sort());
+
+			const moved = await harness.agentCall('model_ops', {
+				ops: [
+					{
+						action: {
+							type: 'transform',
+							selection: [
+								{ type: 'face', id: faceA },
+								{ type: 'face', id: faceB }
+							],
+							delta: [0, 0.5, 0],
+							copy: false,
+							count: 1,
+							spacing: 'multiply',
+							radial: null
+						}
+					}
+				]
+			});
+			expect(moved.toolResult.result.entityIds).toEqual([faceA, faceB].sort());
+
+			// 3. Container + radial 3-copy returns ALL 3 cloned instance IDs (not just clone #3)
+			const grp = await harness.agentCall('model_ops', {
+				ops: [{ action: { type: 'group', selection: [{ type: 'face', id: faceA }], containerKind: 'group', name: 'Pillar' } }]
+			});
+			const pillarId = grp.toolResult.result.entityIds[0] as string;
+			expect(grp.toolResult.result.entityIds).toEqual([pillarId]);
+
+			const radialCopy = await harness.agentCall('model_ops', {
+				ops: [
+					{
+						action: {
+							type: 'transform',
+							selection: [{ type: 'instance', id: pillarId }],
+							delta: [0, 0, 0],
+							copy: true,
+							count: 3,
+							spacing: 'multiply',
+							radial: { axis: 'y', pivot: [5, 0, 5], angleDegrees: 90 }
+						}
+					}
+				]
+			});
+			expect(radialCopy.toolResult.ok).toBe(true);
+			const cloneIds = radialCopy.toolResult.result.entityIds as string[];
+			expect(cloneIds).toHaveLength(3);
+			expect(new Set(cloneIds).size).toBe(3);
+			expect(cloneIds).not.toContain(pillarId);
+			expect(cloneIds).not.toContain(rootId);
+			const expectedClones = harness.graph().instances.filter((i) => i.name === 'Pillar' && i.id !== pillarId).map((i) => i.id).sort();
+			expect(cloneIds).toEqual(expectedClones);
+
+			// 4. Multi-instance tag-assign + tag-create + tag-visibility + guide + clear-guides -> ZERO rootId leakage
+			const multiMeta = await harness.agentCall('model_ops', {
+				ops: [
+					{ action: { type: 'tag-create', name: 'Columns' } },
+					{ action: { type: 'guide', start: [0, 0, 0], end: [0, 3, 0], guideKind: 'line' } }
+				]
+			});
+			expect(multiMeta.toolResult.ok).toBe(true);
+			const [tagId, guideId] = multiMeta.toolResult.result.entityIds as [string, string];
+			expect(multiMeta.toolResult.result.entityIds).toHaveLength(2);
+			expect(tagId).toContain(':tag:');
+			expect(guideId).toContain(':guide:');
+			expect(multiMeta.toolResult.result.entityIds).not.toContain(rootId);
+
+			const assigned = await harness.agentCall('model_ops', {
+				ops: [
+					{ action: { type: 'tag-assign', instanceIds: [cloneIds[0]!, cloneIds[1]!], tagId } },
+					{ action: { type: 'tag-visibility', tagId, visible: false } },
+					{ action: { type: 'clear-guides' } }
+				]
+			});
+			expect(assigned.toolResult.ok).toBe(true);
+			expect(assigned.toolResult.result.entityIds).toEqual([...[cloneIds[0]!, cloneIds[1]!].sort(), tagId, guideId]);
+			expect(assigned.toolResult.result.entityIds).not.toContain(rootId);
+
+			// clear-guides on empty guides -> [] (no rootId)
+			const emptyClear = await harness.agentCall('model_ops', { ops: [{ action: { type: 'clear-guides' } }] });
+			expect(emptyClear.toolResult.ok).toBe(true);
+			expect(emptyClear.toolResult.result.entityIds).toEqual([]);
+			expect(emptyClear.toolResult.result.entityIds).not.toContain(rootId);
+
+			// multi-erase on two cloned instances returns both deleted IDs
+			const erasedInsts = await harness.agentCall('model_ops', {
+				ops: [
+					{
+						action: {
+							type: 'erase',
+							selection: [
+								{ type: 'instance', id: cloneIds[0]! },
+								{ type: 'instance', id: cloneIds[2]! }
+							]
+						}
+					}
+				]
+			});
+			expect(erasedInsts.toolResult.ok).toBe(true);
+			expect(erasedInsts.toolResult.result.entityIds).toEqual([cloneIds[0]!, cloneIds[2]!].sort());
+
+			return {
+				linearIds,
+				radialIds: cloneIds,
+				assignedIds: assigned.toolResult.result.entityIds as string[],
+				erasedIds: erasedInsts.toolResult.result.entityIds as string[]
+			};
+		};
+
+		const run1 = await runScenario();
+		const run2 = await runScenario();
+		expect(run1).toEqual(run2);
+	});
+
+	test('indirect MANAGED_MODULE protection blocks ancestor wrappers (multi-level) and shared definition/mesh aliases while allowing safe sibling freeform ops', async () => {
+		const harness = await created();
+		const mRes = await harness.agentCall('edit_model', {
+			changes: [
+				{ op: 'create_module', moduleId: 'house/ground' },
+				{ op: 'add', moduleId: 'house/ground', element: wall('w1', [[0, 0], [4, 0]]) }
+			]
+		});
+		expect(mRes.toolResult.ok).toBe(true);
+		const managedInstId = readManaged(harness.graph()).get('house/ground')!.instance!.id;
+
+		// Owner wraps managed instance inside Inner -> Outer ancestor containers via normal MODEL_EDIT group
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: {
+				kind: 'MODEL_EDIT',
+				path: [],
+				action: { type: 'group', selection: [{ type: 'instance', id: managedInstId }], containerKind: 'group', name: 'InnerWrapper' }
+			}
+		});
+		const innerId = harness.graph().instances.find((i) => i.name === 'InnerWrapper')!.id;
+
+		await harness.ok('COMMAND', {
+			expectedRevision: harness.revision(),
+			data: {
+				kind: 'MODEL_EDIT',
+				path: [],
+				action: { type: 'group', selection: [{ type: 'instance', id: innerId }], containerKind: 'group', name: 'OuterWrapper' }
+			}
+		});
+		const outerId = harness.graph().instances.find((i) => i.name === 'OuterWrapper')!.id;
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+		expect(validateAuthoringDocument(harness.graph()).editable).toBe(true);
+
+		const beforeAncestor = harness.state();
+		const ancestorBlockedOps: Record<string, unknown>[] = [
+			{ ops: [{ action: { type: 'erase', selection: [{ type: 'instance', id: outerId }] } }] },
+			{ ops: [{ action: { type: 'erase', selection: [{ type: 'instance', id: innerId }] } }] },
+			{ ops: [{ action: { type: 'explode', instanceId: outerId } }] },
+			{ ops: [{ action: { type: 'unique', instanceId: outerId } }] },
+			{ ops: [{ action: { type: 'paint', selection: [{ type: 'instance', id: outerId }], name: 'Red', rgba: [200, 0, 0, 255], opacityU16: 65535, side: 'both' } }] },
+			{ ops: [{ action: { type: 'transform', selection: [{ type: 'instance', id: outerId }], delta: [2, 0, 0], copy: false, count: 1, spacing: 'multiply', radial: null } }] },
+			{ ops: [{ action: { type: 'scale', selection: [{ type: 'instance', id: outerId }], factors: [2, 1, 1], pivot: [0, 0, 0], copy: false } }] },
+			{ ops: [{ action: { type: 'entity-info', instanceId: outerId, name: 'RenamedOuter', visible: false } }] },
+			{ ops: [{ action: { type: 'asset-create', instanceId: outerId, name: 'WrappedAsset' } }] },
+			{ ops: [{ action: { type: 'tag-assign', instanceIds: [outerId], tagId: null } }] },
+			{ ops: [{ action: { type: 'group', selection: [{ type: 'instance', id: outerId }], containerKind: 'group', name: 'ThirdLevel' } }] },
+			{ ops: [{ path: [outerId], action: { type: 'erase', selection: [{ type: 'instance', id: innerId }] } }] },
+			{ ops: [{ path: [outerId, innerId], action: { type: 'erase', selection: [{ type: 'instance', id: managedInstId }] } }] }
+		];
+
+		for (const args of ancestorBlockedOps) {
+			const reply = await harness.agentCall('model_ops', args);
+			expect(reply.toolResult.ok).toBe(false);
+			expect(reply.toolResult.error).toMatchObject({ code: 'MANAGED_MODULE', retryable: false, detail: { moduleId: 'house/ground' } });
+			expectUnchanged(harness, beforeAncestor);
+		}
+
+		// Sibling freeform geometry inside OuterWrapper works without mutating managedInstId
+		const siblingOk = await harness.agentCall('model_ops', {
+			ops: [{ path: [outerId], command: { kind: 'CREATE_RECTANGLE', first: [6, 0, 0], opposite: [8, 0, 2] } }]
+		});
+		expect(siblingOk.toolResult.ok).toBe(true);
+		expect(readManaged(harness.graph()).get('house/ground')!.state).toBe('ok');
+
+		// Shared definition alias & shared component wrapper containing managedInst (admitted by BomcDocument/validateAuthoringDocument)
+		const seq = nextModelSequence(harness.graph());
+		const aliasGraph = structuredClone(harness.graph()) as any;
+		const managedInst = aliasGraph.instances.find((i: any) => i.id === managedInstId)!;
+		const innerCompDef = aliasGraph.definitions.find((d: any) => d.id === managedInst.ownerDefinitionId)!;
+		innerCompDef.kind = 'component';
+		const innerInst = aliasGraph.instances.find((i: any) => i.id === innerId)!;
+		innerInst.kind = 'component';
+		const outerInst = aliasGraph.instances.find((i: any) => i.id === outerId)!;
+		const secondCompWrapperId = `${DOC}:instance:op:${seq}:1`;
+		const aliasDefInstId = `${DOC}:instance:op:${seq}:2`;
+		aliasGraph.instances.push(
+			{
+				...innerInst,
+				id: secondCompWrapperId,
+				name: 'SecondComponentWrapper',
+				ownerDefinitionId: aliasGraph.rootDefinitionId
+			},
+			{
+				...managedInst,
+				id: aliasDefInstId,
+				name: 'DefAlias',
+				ownerDefinitionId: aliasGraph.rootDefinitionId
+			}
+		);
+		// Recompute sorted instances list via BomcDocument
+		aliasGraph.instances.sort((a: any, b: any) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+		const aliasDoc = BomcDocument.fromGraph(aliasGraph);
+		const aliasSnapshot = structuredClone(aliasDoc.snapshot());
+		aliasDoc.dispose();
+		expect(validateAuthoringDocument(aliasSnapshot.graph).editable).toBe(true);
+
+		const aliasHarness = new Harness();
+		await aliasHarness.ok('RESTORE_CHECKPOINT', {
+			data: { checkpoint: { snapshot: aliasSnapshot, sequence: nextModelSequence(aliasSnapshot.graph), history: { undo: [], redo: [], savedGraph: null } } }
+		});
+		const aliasBefore = aliasHarness.state();
+
+		// Direct alias of managed definition blocks path entry & mutations
+		const enterDefAlias = await aliasHarness.agentCall('model_ops', {
+			ops: [{ path: [aliasDefInstId], command: { kind: 'CREATE_RECTANGLE', first: [10, 0, 0], opposite: [11, 0, 1] } }]
+		});
+		expect(enterDefAlias.toolResult.ok).toBe(false);
+		expect(enterDefAlias.toolResult.error).toMatchObject({ code: 'MANAGED_MODULE', detail: { moduleId: 'house/ground', instanceId: aliasDefInstId } });
+
+		for (const protectedAliasId of [aliasDefInstId, secondCompWrapperId, outerInst.id]) {
+			const targetAlias = await aliasHarness.agentCall('model_ops', {
+				ops: [{ action: { type: 'erase', selection: [{ type: 'instance', id: protectedAliasId }] } }]
+			});
+			expect(targetAlias.toolResult.ok).toBe(false);
+			expect(targetAlias.toolResult.error).toMatchObject({ code: 'MANAGED_MODULE', detail: { moduleId: 'house/ground', instanceId: protectedAliasId } });
+			expectUnchanged(aliasHarness, aliasBefore);
+		}
+		expect(readManaged(aliasHarness.graph()).get('house/ground')!.state).toBe('ok');
+	});
+});
+
+describe('WP7 / CP7 — Mandatory T-RB9 & T-RB10 through real model_ops and v2.4 A7 isolation', () => {
+	function archJson(graph: BomcGraph): string {
+		return JSON.stringify((JSON.parse(graph.instances.find((i) => i.id === graph.rootInstanceId)!.label!) as any).arch);
+	}
+
+	async function setupArchRootFixture() {
+		const base = BomcDocument.create({ documentId: DOC, name: 'Arch' });
+		const graph = structuredClone(base.snapshot().graph) as any;
+		base.dispose();
+		const slabMod = {
+			schemaVersion: '2.0.0',
+			moduleId: 'house/ground',
+			revision: 1,
+			transform: [...IDENTITY_ROW_MAJOR],
+			materials: [],
+			elements: [{ elementId: 'slab-1', kind: 'slab', outline: [[0, 0], [4, 0], [4, 3], [0, 3]], holes: [], thickness: 0.2, topElevation: 0.2 }]
+		};
+		const arch = { schema: 'sibambo-arch-v2', modules: [{ instanceId: `${DOC}:instance:op:1:1`, module: slabMod, bakedMeshSha256: 'a'.repeat(64) }] };
+		graph.instances[0].label = JSON.stringify({ schema: 'sibambo-editor-model-v1', guides: [], looseEdges: [], arch });
+		const doc = BomcDocument.fromGraph(graph);
+		const snapshot = structuredClone(doc.snapshot());
+		doc.dispose();
+		expect(validateAuthoringDocument(snapshot.graph).editable).toBe(true);
+		const harness = new Harness();
+		await harness.ok('RESTORE_CHECKPOINT', {
+			data: { checkpoint: { snapshot, sequence: nextModelSequence(snapshot.graph), history: { undo: [], redo: [], savedGraph: null } } }
+		});
+		return harness;
+	}
+
+	const mixedModelOps = (startSeq: number) => ({
+		ops: [
+			{
+				command: {
+					kind: 'CREATE_RECTANGLE',
+					points: [[0, 0, 0], [2, 0, 0], [2, 0, 1], [0, 0, 1]],
+					normal: [0, 1, 0]
+				}
+			},
+			{ command: { kind: 'PUSH_PULL_FACE', faceId: `${DOC}:rectangle:${startSeq}`, distance: 0.5 } },
+			{
+				command: {
+					kind: 'CREATE_RECTANGLE',
+					points: [[4, 0, 0], [6, 0, 0], [6, 0, 2], [4, 0, 2]],
+					normal: [0, 1, 0]
+				}
+			},
+			{ command: { kind: 'PUSH_PULL_FACE', faceId: `${DOC}:rectangle:${startSeq + 2}`, distance: 0.25 } }
+		]
+	});
+
+	for (const fixture of ['fresh document (root label null)', 'document with arch metadata'] as const) {
+		test(`T-RB9 4-op real model_ops passes shape, full replay, RESTORE_CHECKPOINT, origin, and undo/redo — ${fixture}`, async () => {
+			const harness = fixture.startsWith('fresh') ? await created() : await setupArchRootFixture();
+			const pre = harness.state();
+			if (fixture.startsWith('fresh')) expect(pre.graph.instances[0]!.label).toBeNull();
+
+			const res = await harness.agentCall('model_ops', mixedModelOps(pre.sequence), 'test');
+			expect(res.toolResult.ok).toBe(true);
+			expect(res.toolResult.result.changed).toBe(true);
+
+			const post = harness.state();
+			const entry = post.undo.at(-1)!;
+			expect(entry.origin).toBe('agent:test');
+			expect(entry.forward.length).toBe(entry.inverse.length);
+			if (!fixture.startsWith('fresh')) expect(archJson(post.graph)).toBe(archJson(pre.graph));
+
+			const checkpoint = structuredClone(harness.d.authoringResult().checkpoint) as AuthoringCheckpoint;
+			expect(() => validateAuthoringCheckpoint(checkpoint)).not.toThrow();
+
+			const restored = new Harness();
+			await restored.ok('RESTORE_CHECKPOINT', { data: { checkpoint } });
+			expect(restored.history().checkpoint().undo.at(-1)!.origin).toBe('agent:test');
+			await restored.ok('UNDO', { expectedRevision: restored.revision() });
+			expect(graphsEqual(restored.graph(), pre.graph)).toBe(true);
+			await restored.ok('REDO', { expectedRevision: restored.revision() });
+			expect(graphsEqual(restored.graph(), post.graph)).toBe(true);
+		});
+	}
+
+	test('T-RB10 compaction via real 4-op model_ops equals raw composite and preserves unique family:id keys and root pair', async () => {
+		const harness = await created();
+		const pre = harness.state();
+		const call = mixedModelOps(pre.sequence);
+
+		const scratch = BomcDocument.fromGraph(pre.graph, pre.revision);
+		const rawForward: DocumentEdit[] = [];
+		const inverses: (readonly DocumentEdit[])[] = [];
+		call.ops.forEach((op, index) => {
+			const action: ModelAction = { type: 'raw', command: op.command as any };
+			const edit = buildModelEdit(scratch.snapshot().graph, [], action, pre.sequence + index);
+			scratch.transact(edit.forward);
+			rawForward.push(...edit.forward);
+			inverses.push(edit.inverse);
+		});
+		scratch.dispose();
+		const rawInverse = [...inverses].reverse().flat();
+
+		const res = await harness.agentCall('model_ops', call, 'test');
+		expect(res.toolResult.ok).toBe(true);
+		const post = harness.state();
+		const entry = post.undo.at(-1)!;
+
+		expect(entry.forward).toEqual(compactAgentEdits(rawForward));
+		expect(entry.inverse).toEqual(compactAgentEdits(rawInverse));
+		expect(rawForward.length).toBeGreaterThan(entry.forward.length);
+
+		const apply = (graph: BomcGraph, edits: readonly DocumentEdit[]) => {
+			const doc = BomcDocument.fromGraph(graph);
+			doc.transact(edits);
+			const out = doc.snapshot().graph;
+			doc.dispose();
+			return out;
+		};
+		expect(graphsEqual(apply(pre.graph, rawForward), apply(pre.graph, entry.forward))).toBe(true);
+		expect(graphsEqual(apply(pre.graph, entry.forward), post.graph)).toBe(true);
+		expect(graphsEqual(apply(post.graph, rawInverse), apply(post.graph, entry.inverse))).toBe(true);
+		expect(graphsEqual(apply(post.graph, entry.inverse), pre.graph)).toBe(true);
+
+		const familyKey = (edit: DocumentEdit) => {
+			const id = edit.type.startsWith('put-') ? (edit as any).value.id : (edit as any).id;
+			return `${edit.type.slice(edit.type.indexOf('-') + 1)}:${id}`;
+		};
+		const hasRootPut = (edits: readonly DocumentEdit[], graph: BomcGraph) =>
+			edits.some((edit) => edit.type === 'put-instance' && edit.value.id === graph.rootInstanceId);
+
+		for (const list of [entry.forward, entry.inverse]) {
+			const keys = list.map(familyKey);
+			expect(new Set(keys).size).toBe(keys.length);
+			expect(hasRootPut(list, post.graph)).toBe(true);
+		}
+	});
+
+	test('v2.4 A7 freeform boundary guard: model-ops.ts does not import evaluateModule or perform blanket module evaluation', () => {
+		const src = readFileSync(join(import.meta.dir, '../../src/lib/arch/model-ops.ts'), 'utf8');
+		expect(src).not.toContain('evaluateModule');
+		expect(src).not.toContain('manifold-3d');
 	});
 });

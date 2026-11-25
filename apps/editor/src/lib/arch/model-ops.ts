@@ -7,10 +7,10 @@
  * `stageAndCommit` (atomic scratch staging + composite history entry), and computes
  * world-space receipt `entityIds` and `bounds`.
  */
-import type { BomcGraph, DocumentEdit } from '@sibambo/bomc-document';
+import type { BomcGraph, DocumentEdit, Face, Mesh } from '@sibambo/bomc-document';
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import { Vector3 } from 'three';
-import { buildModelEdit, definitionGraph, modelMetadata, modelOccurrences } from '../authoring/model.js';
+import { buildModelEdit, contextTransform, definitionGraph, modelMetadata, modelOccurrences } from '../authoring/model.js';
 import type { FlatAuthoringCommand, ModelAction, ModelSelection } from '../authoring/protocol.js';
 import { AgentToolFailure } from './errors.js';
 import validateModelOpsSchema from './model-ops.validator.generated.js';
@@ -73,16 +73,28 @@ function validateArgs(args: Record<string, unknown>): ModelOpsArgs {
 	return args as unknown as ModelOpsArgs;
 }
 
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 type ManagedTargets = {
 	instToModule: Map<string, string>;
+	ancestorToModule: Map<string, string>;
+	aliasInstToModule: Map<string, string>;
+	defToModule: Map<string, string>;
+	meshToModule: Map<string, string>;
 	faceToModule: Map<string, string>;
 };
 
 function collectManagedTargets(graph: BomcGraph): ManagedTargets {
 	const instToModule = new Map<string, string>();
+	const ancestorToModule = new Map<string, string>();
+	const aliasInstToModule = new Map<string, string>();
+	const defToModule = new Map<string, string>();
+	const meshToModule = new Map<string, string>();
 	const faceToModule = new Map<string, string>();
 	const arch = modelMetadata(graph).arch;
-	if (!arch || arch.modules.length === 0) return { instToModule, faceToModule };
+	if (!arch || arch.modules.length === 0) {
+		return { instToModule, ancestorToModule, aliasInstToModule, defToModule, meshToModule, faceToModule };
+	}
 
 	const instById = new Map(graph.instances.map((i) => [i.id, i]));
 	const defById = new Map(graph.definitions.map((d) => [d.id, d]));
@@ -95,21 +107,28 @@ function collectManagedTargets(graph: BomcGraph): ManagedTargets {
 		else childrenByDef.set(inst.ownerDefinitionId, [inst.id]);
 	}
 
+	// Pass 1: downward walk from every managed container instance.
 	for (const entry of arch.modules) {
 		const moduleId = entry.module.moduleId;
+		if (!instById.has(entry.instanceId)) continue;
 		instToModule.set(entry.instanceId, moduleId);
 		const stack = [entry.instanceId];
 		const visitedDefs = new Set<string>();
 		while (stack.length > 0) {
 			const instId = stack.pop()!;
-			instToModule.set(instId, moduleId);
+			if (!instToModule.has(instId)) instToModule.set(instId, moduleId);
 			const inst = instById.get(instId);
-			if (!inst || visitedDefs.has(inst.definitionId)) continue;
+			if (!inst) continue;
+			if (!defToModule.has(inst.definitionId)) defToModule.set(inst.definitionId, moduleId);
+			if (visitedDefs.has(inst.definitionId)) continue;
 			visitedDefs.add(inst.definitionId);
 			const def = defById.get(inst.definitionId);
 			const mesh = def?.meshId ? meshById.get(def.meshId) : undefined;
+			if (def?.meshId && !meshToModule.has(def.meshId)) meshToModule.set(def.meshId, moduleId);
 			if (mesh) {
-				for (const face of mesh.faces) faceToModule.set(face.id, moduleId);
+				for (const face of mesh.faces) {
+					if (!faceToModule.has(face.id)) faceToModule.set(face.id, moduleId);
+				}
 			}
 			const children = childrenByDef.get(inst.definitionId);
 			if (children) {
@@ -117,7 +136,51 @@ function collectManagedTargets(graph: BomcGraph): ManagedTargets {
 			}
 		}
 	}
-	return { instToModule, faceToModule };
+
+	// Ensure faces on any definition aliasing a managed mesh are also marked protected.
+	for (const mesh of graph.meshes) {
+		const modId = meshToModule.get(mesh.id);
+		if (!modId) continue;
+		for (const face of mesh.faces) {
+			if (!faceToModule.has(face.id)) faceToModule.set(face.id, modId);
+		}
+	}
+
+	// Pass 2: detect ancestor containers (whose subtree holds a managed instance)
+	// and non-managed instances aliasing a managed definition or managed mesh.
+	for (const inst of graph.instances) {
+		if (inst.id === graph.rootInstanceId || instToModule.has(inst.id)) continue;
+		const def = defById.get(inst.definitionId);
+		const directAlias =
+			defToModule.get(inst.definitionId) ??
+			(def?.meshId ? meshToModule.get(def.meshId) : undefined);
+		if (directAlias) {
+			aliasInstToModule.set(inst.id, directAlias);
+		}
+
+		const defStack = [inst.definitionId];
+		const visitedDefs = new Set<string>();
+		let ancestorMod: string | undefined;
+		while (defStack.length > 0 && !ancestorMod) {
+			const defId = defStack.pop()!;
+			if (visitedDefs.has(defId)) continue;
+			visitedDefs.add(defId);
+			for (const childId of childrenByDef.get(defId) ?? []) {
+				const hit = instToModule.get(childId);
+				if (hit) {
+					ancestorMod = hit;
+					break;
+				}
+				const childInst = instById.get(childId);
+				if (childInst) defStack.push(childInst.definitionId);
+			}
+		}
+		if (ancestorMod) {
+			ancestorToModule.set(inst.id, ancestorMod);
+		}
+	}
+
+	return { instToModule, ancestorToModule, aliasInstToModule, defToModule, meshToModule, faceToModule };
 }
 
 function failManaged(moduleId: string, opIndex: number, target: Record<string, string>): never {
@@ -128,19 +191,45 @@ function failManaged(moduleId: string, opIndex: number, target: Record<string, s
 	);
 }
 
-function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedTargets): void {
-	if (managed.instToModule.size === 0 && managed.faceToModule.size === 0) return;
+function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedTargets, graph: BomcGraph): void {
+	if (
+		managed.instToModule.size === 0 &&
+		managed.ancestorToModule.size === 0 &&
+		managed.aliasInstToModule.size === 0 &&
+		managed.faceToModule.size === 0
+	) {
+		return;
+	}
 
+	const instById = new Map(graph.instances.map((i) => [i.id, i]));
+	const defById = new Map(graph.definitions.map((d) => [d.id, d]));
+
+	// Entering a managed container OR an instance aliasing a managed definition/mesh
+	// would write directly into the managed mesh/subtree. Entering an ancestor container
+	// is allowed only for freeform sibling ops; mutating the ancestor container itself is blocked below.
 	for (const stepId of op.path ?? []) {
-		const modId = managed.instToModule.get(stepId);
+		const inst = instById.get(stepId);
+		const def = inst ? defById.get(inst.definitionId) : undefined;
+		const modId =
+			managed.instToModule.get(stepId) ??
+			managed.aliasInstToModule.get(stepId) ??
+			(inst ? managed.defToModule.get(inst.definitionId) : undefined) ??
+			(def?.meshId ? managed.meshToModule.get(def.meshId) : undefined);
 		if (modId) failManaged(modId, opIndex, { instanceId: stepId });
 	}
+
+	const checkInstanceId = (instanceId: string) => {
+		const modId =
+			managed.instToModule.get(instanceId) ??
+			managed.ancestorToModule.get(instanceId) ??
+			managed.aliasInstToModule.get(instanceId);
+		if (modId) failManaged(modId, opIndex, { instanceId });
+	};
 
 	const checkSelection = (selection: readonly ModelSelection[]) => {
 		for (const item of selection) {
 			if (item.type === 'instance') {
-				const modId = managed.instToModule.get(item.id);
-				if (modId) failManaged(modId, opIndex, { instanceId: item.id });
+				checkInstanceId(item.id);
 			} else if (item.type === 'face') {
 				const modId = managed.faceToModule.get(item.id);
 				if (modId) failManaged(modId, opIndex, { faceId: item.id });
@@ -153,8 +242,13 @@ function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedT
 			const modId = managed.faceToModule.get(command.faceId);
 			if (modId) failManaged(modId, opIndex, { faceId: command.faceId });
 		} else if (command.kind === 'EXTRUDE_RECTANGLE') {
-			const modId = managed.faceToModule.get(command.entityId);
-			if (modId) failManaged(modId, opIndex, { entityId: command.entityId });
+			const faceMod = managed.faceToModule.get(command.entityId);
+			if (faceMod) failManaged(faceMod, opIndex, { entityId: command.entityId });
+			const instMod =
+				managed.instToModule.get(command.entityId) ??
+				managed.ancestorToModule.get(command.entityId) ??
+				managed.aliasInstToModule.get(command.entityId);
+			if (instMod) failManaged(instMod, opIndex, { entityId: command.entityId });
 		}
 	};
 
@@ -178,16 +272,11 @@ function assertOpNotManaged(op: ModelOpInput, opIndex: number, managed: ManagedT
 		case 'unique':
 		case 'explode':
 		case 'entity-info':
-		case 'asset-create': {
-			const modId = managed.instToModule.get(action.instanceId);
-			if (modId) failManaged(modId, opIndex, { instanceId: action.instanceId });
+		case 'asset-create':
+			checkInstanceId(action.instanceId);
 			break;
-		}
 		case 'tag-assign':
-			for (const id of action.instanceIds) {
-				const modId = managed.instToModule.get(id);
-				if (modId) failManaged(modId, opIndex, { instanceId: id });
-			}
+			for (const id of action.instanceIds) checkInstanceId(id);
 			break;
 		case 'offset':
 		case 'follow-me': {
@@ -202,67 +291,167 @@ function lowerOpToAction(op: ModelOpInput): ModelAction {
 	return 'action' in op ? op.action : { type: 'raw', command: op.command };
 }
 
-function createdMetadataIds(
-	action: ModelAction,
-	beforeGraph: BomcGraph,
-	forward: readonly DocumentEdit[]
-): string[] {
-	if (action.type !== 'tag-create' && action.type !== 'asset-create') return [];
-	const rootEdit = forward.find(
-		(e): e is Extract<DocumentEdit, { type: 'put-instance' }> =>
-			e.type === 'put-instance' && e.value.id === beforeGraph.rootInstanceId
-	);
-	if (!rootEdit || !rootEdit.value.label) return [];
-	try {
-		const beforeOrg = modelMetadata(beforeGraph).organization;
-		const afterParsed = JSON.parse(rootEdit.value.label) as {
-			organization?: { tags?: Array<{ id: string }>; assets?: Array<{ id: string }> };
-		};
-		if (action.type === 'tag-create') {
-			const prev = new Set((beforeOrg?.tags ?? []).map((t) => t.id));
-			return (afterParsed.organization?.tags ?? []).filter((t) => !prev.has(t.id)).map((t) => t.id);
-		}
-		const prev = new Set((beforeOrg?.assets ?? []).map((a) => a.id));
-		return (afterParsed.organization?.assets ?? []).filter((a) => !prev.has(a.id)).map((a) => a.id);
-	} catch {
-		return [];
-	}
+function faceSignature(mesh: Mesh, face: Face): string {
+	const pt = (vi: number) =>
+		`${cleanZero(mesh.positions[vi * 3]!)},${cleanZero(mesh.positions[vi * 3 + 1]!)},${cleanZero(mesh.positions[vi * 3 + 2]!)}`;
+	const ringSig = (ring: readonly number[]) => ring.map(pt).join(';');
+	return [
+		face.frontMaterialId ?? '',
+		face.backMaterialId ?? '',
+		face.normal.map(cleanZero).join(','),
+		ringSig(face.outer),
+		face.holes.map(ringSig).join('|')
+	].join('#');
 }
 
-function affectedIdsForOp(
+function activeMesh(graph: BomcGraph, definitionId: string): Mesh | undefined {
+	const def = graph.definitions.find((d) => d.id === definitionId);
+	return def?.meshId ? graph.meshes.find((m) => m.id === def.meshId) : undefined;
+}
+
+/**
+ * Derive every created or affected entity ID from the real staged transition (`beforeGraph -> afterGraph`).
+ * Deterministically deduplicated and sorted within each entity category; never leaks `rootInstanceId`.
+ */
+function diffAffectedIds(
 	action: ModelAction,
-	editEntityId: string,
+	path: readonly string[],
 	beforeGraph: BomcGraph,
-	forward: readonly DocumentEdit[]
+	afterGraph: BomcGraph
 ): string[] {
-	if (action.type === 'tag-create' || action.type === 'asset-create') {
-		return createdMetadataIds(action, beforeGraph, forward);
+	const ownerDefId = contextTransform(beforeGraph, path).definitionId;
+	const rootIds = new Set([beforeGraph.rootInstanceId, afterGraph.rootInstanceId]);
+	const isGroupAction = action.type === 'group';
+
+	// 1. Context instances (created, modified, deleted)
+	const beforeInsts = new Map(
+		beforeGraph.instances
+			.filter((i) => !rootIds.has(i.id) && i.ownerDefinitionId === ownerDefId)
+			.map((i) => [i.id, i])
+	);
+	const afterInsts = new Map(
+		afterGraph.instances
+			.filter((i) => !rootIds.has(i.id) && i.ownerDefinitionId === ownerDefId)
+			.map((i) => [i.id, i])
+	);
+
+	const instIds: string[] = [];
+	for (const [id, inst] of afterInsts) {
+		const prev = beforeInsts.get(id);
+		if (!prev || JSON.stringify(prev) !== JSON.stringify(inst)) {
+			instIds.push(id);
+		}
 	}
-	if (editEntityId.length > 0 && editEntityId !== beforeGraph.rootInstanceId) {
-		return [editEntityId];
+	if (!isGroupAction) {
+		for (const id of beforeInsts.keys()) {
+			if (!afterInsts.has(id)) instIds.push(id);
+		}
+	}
+	instIds.sort(cmp);
+
+	// 2. Context mesh faces (added, modified geometry/material, deleted)
+	const faceIds: string[] = [];
+	if (!isGroupAction) {
+		const beforeMesh = activeMesh(beforeGraph, ownerDefId);
+		const afterMesh = activeMesh(afterGraph, ownerDefId);
+		const beforeFaces = new Map((beforeMesh?.faces ?? []).map((f) => [f.id, f]));
+		const afterFaces = new Map((afterMesh?.faces ?? []).map((f) => [f.id, f]));
+		if (afterMesh) {
+			for (const [id, face] of afterFaces) {
+				const prev = beforeFaces.get(id);
+				if (!prev || faceSignature(beforeMesh!, prev) !== faceSignature(afterMesh, face)) {
+					faceIds.push(id);
+				}
+			}
+		}
+		for (const id of beforeFaces.keys()) {
+			if (!afterFaces.has(id)) faceIds.push(id);
+		}
+		faceIds.sort(cmp);
 	}
 
-	switch (action.type) {
-		case 'unique':
-		case 'explode':
-		case 'entity-info':
-			return [action.instanceId];
-		case 'tag-assign':
-			return [...action.instanceIds];
-		case 'tag-visibility':
-			return [action.tagId];
-		case 'asset-delete':
-			return [action.assetId];
-		case 'erase':
-		case 'paint':
-		case 'transform':
-		case 'scale':
-			return action.selection
-				.filter((item): item is Extract<ModelSelection, { id: string }> => item.type !== 'edge')
-				.map((item) => item.id);
-		default:
-			return editEntityId.length > 0 ? [editEntityId] : [];
+	// 3. Context looseEdges & guides
+	const beforeMeta = modelMetadata(beforeGraph);
+	const afterMeta = modelMetadata(afterGraph);
+	const edgeIds: string[] = [];
+	if (!isGroupAction) {
+		const beforeEdges = new Map(
+			beforeMeta.looseEdges.filter((e) => e.ownerDefinitionId === ownerDefId).map((e) => [e.id, e])
+		);
+		const afterEdges = new Map(
+			afterMeta.looseEdges.filter((e) => e.ownerDefinitionId === ownerDefId).map((e) => [e.id, e])
+		);
+		for (const [id, edge] of afterEdges) {
+			const prev = beforeEdges.get(id);
+			if (!prev || JSON.stringify(prev) !== JSON.stringify(edge)) edgeIds.push(id);
+		}
+		for (const id of beforeEdges.keys()) {
+			if (!afterEdges.has(id)) edgeIds.push(id);
+		}
+		edgeIds.sort(cmp);
 	}
+
+	const beforeGuides = new Map(
+		beforeMeta.guides.filter((g) => g.ownerDefinitionId === ownerDefId).map((g) => [g.id, g])
+	);
+	const afterGuides = new Map(
+		afterMeta.guides.filter((g) => g.ownerDefinitionId === ownerDefId).map((g) => [g.id, g])
+	);
+	const guideIds: string[] = [];
+	for (const [id, guide] of afterGuides) {
+		const prev = beforeGuides.get(id);
+		if (!prev || JSON.stringify(prev) !== JSON.stringify(guide)) guideIds.push(id);
+	}
+	for (const id of beforeGuides.keys()) {
+		if (!afterGuides.has(id)) guideIds.push(id);
+	}
+	guideIds.sort(cmp);
+
+	// 4. Organization metadata (tags, tag assignments, assets)
+	const beforeOrg = beforeMeta.organization ?? { tags: [], assignments: [], assets: [] };
+	const afterOrg = afterMeta.organization ?? { tags: [], assignments: [], assets: [] };
+	const metaIds: string[] = [];
+
+	const beforeTags = new Map(beforeOrg.tags.map((t) => [t.id, t]));
+	const afterTags = new Map(afterOrg.tags.map((t) => [t.id, t]));
+	for (const [id, tag] of afterTags) {
+		const prev = beforeTags.get(id);
+		if (!prev || JSON.stringify(prev) !== JSON.stringify(tag)) metaIds.push(id);
+	}
+	for (const id of beforeTags.keys()) {
+		if (!afterTags.has(id)) metaIds.push(id);
+	}
+
+	const beforeAssigns = new Map(beforeOrg.assignments.map((a) => [a.instanceId, a.tagId]));
+	const afterAssigns = new Map(afterOrg.assignments.map((a) => [a.instanceId, a.tagId]));
+	for (const [instId, tagId] of afterAssigns) {
+		if (!rootIds.has(instId) && beforeAssigns.get(instId) !== tagId) metaIds.push(instId);
+	}
+	for (const instId of beforeAssigns.keys()) {
+		if (!rootIds.has(instId) && !afterAssigns.has(instId)) metaIds.push(instId);
+	}
+
+	const beforeAssets = new Map(beforeOrg.assets.map((a) => [a.id, a]));
+	const afterAssets = new Map(afterOrg.assets.map((a) => [a.id, a]));
+	for (const [id, asset] of afterAssets) {
+		const prev = beforeAssets.get(id);
+		if (!prev || JSON.stringify(prev) !== JSON.stringify(asset)) metaIds.push(id);
+	}
+	for (const id of beforeAssets.keys()) {
+		if (!afterAssets.has(id)) metaIds.push(id);
+	}
+	metaIds.sort(cmp);
+
+	const combined = [...faceIds, ...instIds, ...edgeIds, ...guideIds, ...metaIds];
+	const deduped: string[] = [];
+	const seen = new Set<string>(rootIds);
+	for (const id of combined) {
+		if (id.length > 0 && !seen.has(id)) {
+			seen.add(id);
+			deduped.push(id);
+		}
+	}
+	return deduped;
 }
 
 /** World-space bounding box matching `projectAuthoringScene` (meshes, loose edges, guides). */
@@ -325,12 +514,12 @@ export function planModelOps(graph: BomcGraph, rawArgs: Record<string, unknown>)
 	const args = validateArgs(rawArgs);
 	const managed = collectManagedTargets(graph);
 	for (let index = 0; index < args.ops.length; index += 1) {
-		assertOpNotManaged(args.ops[index]!, index, managed);
+		assertOpNotManaged(args.ops[index]!, index, managed, graph);
 	}
 
 	let latestBounds = computeWorldBounds(graph);
 	const collectedIds: string[] = [];
-	const seenIds = new Set<string>();
+	const seenIds = new Set<string>([graph.rootInstanceId]);
 	const recordId = (id: string) => {
 		if (id.length > 0 && !seenIds.has(id)) {
 			seenIds.add(id);
@@ -344,19 +533,23 @@ export function planModelOps(graph: BomcGraph, rawArgs: Record<string, unknown>)
 		const isLast = index === args.ops.length - 1;
 		return (stagedGraph, sequence) => {
 			const edit = buildModelEdit(stagedGraph, path, action, sequence);
-			const opIds = affectedIdsForOp(action, edit.entityId, stagedGraph, edit.forward);
-			for (const id of opIds) recordId(id);
-			if (isLast) {
-				const probe = BomcDocument.fromGraph(stagedGraph);
-				try {
-					probe.transact(edit.forward);
-					latestBounds = computeWorldBounds(probe.snapshot().graph);
-				} finally {
-					probe.dispose();
-				}
+			const probe = BomcDocument.fromGraph(stagedGraph);
+			let afterGraph: BomcGraph;
+			try {
+				probe.transact(edit.forward);
+				afterGraph = probe.snapshot().graph;
+				if (isLast) latestBounds = computeWorldBounds(afterGraph);
+			} finally {
+				probe.dispose();
 			}
+			const opIds = diffAffectedIds(action, path, stagedGraph, afterGraph);
+			for (const id of opIds) recordId(id);
+			const primaryEntityId =
+				edit.entityId && edit.entityId !== stagedGraph.rootInstanceId && edit.entityId !== afterGraph.rootInstanceId
+					? edit.entityId
+					: (opIds[0] ?? '');
 			return {
-				entityId: edit.entityId || (opIds[0] ?? ''),
+				entityId: primaryEntityId,
 				forward: edit.forward,
 				inverse: edit.inverse
 			};
@@ -365,14 +558,11 @@ export function planModelOps(graph: BomcGraph, rawArgs: Record<string, unknown>)
 
 	return {
 		builders,
-		receipt: (commit: AgentCommit) => {
-			for (const id of commit.entityIds) recordId(id);
-			return {
-				revision: commit.revision,
-				entityIds: [...collectedIds],
-				bounds: latestBounds,
-				changed: commit.changed
-			};
-		}
+		receipt: (commit: AgentCommit) => ({
+			revision: commit.revision,
+			entityIds: [...collectedIds],
+			bounds: latestBounds,
+			changed: commit.changed
+		})
 	};
 }
