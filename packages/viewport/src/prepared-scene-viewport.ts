@@ -143,6 +143,7 @@ export class PreparedSceneViewport {
 	private readonly selectionHelpers: Box3Helper[] = [];
 	private navigationAxes: LineSegments | null = null;
 	private readonly domainOverlays = new Map<string, Object3D>();
+	private readonly disposedOverlays = new WeakSet<Object3D>();
 	private readonly requestedTextures = new Set<string>();
 	private readonly settledTextures = new Set<string>();
 	private readonly raycaster = new Raycaster();
@@ -327,6 +328,47 @@ export class PreparedSceneViewport {
 		this.renderOnce();
 	}
 
+	/** Atomic draft swap; retired resources survive until the replacement frame completes. */
+	private externalDraftBounds: ViewportBounds | null = null;
+	async setExternalDraftProjection(changes: Array<{ moduleId: string; object: Object3D | null }>, bounds: ViewportBounds, isCurrent = () => true) {
+		if (this.disposed) throw Error('Viewport disposed');
+		if (!this.initialFitComplete) { cancelAnimationFrame(this.initialFitHandle); this.initialFitComplete = true; }
+		const previousBounds = this.fittedBounds, previousExternalBounds = this.externalDraftBounds, previous = new Map<string, Object3D | undefined>();
+		for (const change of changes) {
+			const key = 'builder/module/' + change.moduleId;
+			if (previous.has(key)) throw Error('Duplicate draft module');
+			previous.set(key, this.domainOverlays.get(key));
+		}
+		try {
+			for (const change of changes) {
+				const key = 'builder/module/' + change.moduleId, old = previous.get(key);
+				if (old) this.scene3d.remove(old);
+				if (change.object) { this.domainOverlays.set(key, change.object); this.scene3d.add(change.object); }
+				else this.domainOverlays.delete(key);
+			}
+			this.externalDraftBounds = bounds; this.fittedBounds = bounds; this.rendererHost.updateClipRange(bounds); this.renderOnce();
+			await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+			if (this.disposed || !isCurrent()) throw Error('Draft transaction superseded during render');
+		} catch (error) {
+			for (const change of changes) {
+				if (change.object) { this.scene3d.remove(change.object); this.disposeOverlay(change.object); }
+				const key = 'builder/module/' + change.moduleId, old = previous.get(key);
+				if (old && !this.disposed) { this.domainOverlays.set(key, old); this.scene3d.add(old); }
+				else this.domainOverlays.delete(key);
+			}
+			if (this.disposed) for (const old of previous.values()) { if (old) this.disposeOverlay(old); }
+			else { this.externalDraftBounds = previousExternalBounds; this.fittedBounds = previousBounds; this.rendererHost.updateClipRange(previousBounds); this.renderOnce(); }
+			throw error;
+		}
+		for (const old of previous.values()) if (old) this.disposeOverlay(old);
+	}
+	clearExternalDraftProjection() {
+		this.externalDraftBounds = null;
+		for (const [key, object] of [...this.domainOverlays]) if (key.startsWith('builder/module/')) {
+			this.scene3d.remove(object); this.disposeOverlay(object); this.domainOverlays.delete(key);
+		}
+		this.renderOnce();
+	}
 	setOnPick(handler?: (pick: ViewportPick) => void) { this.onPick = handler; }
 	setOnReady(handler?: (observation: RendererObservation) => void) { this.onReady = handler; if (this.readyAtMs !== null) handler?.(this.observe()); }
 	setOrbitControlsEnabled(enabled: boolean) {
@@ -560,7 +602,7 @@ export class PreparedSceneViewport {
 
 	fit() {
 		this.invalidateNavigationState();
-		const bounds = visibleSceneBounds(this.meshRecords);
+		const bounds = this.externalDraftBounds ?? visibleSceneBounds(this.meshRecords);
 		this.fittedBounds = bounds ?? { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
 		this.refreshNavigationAxes();
 		this.rendererHost.focusBounds(this.fittedBounds);
@@ -1056,6 +1098,8 @@ export class PreparedSceneViewport {
 		this.initialFitHandle = requestAnimationFrame(waitForLayout);
 	}
 	private disposeOverlay(object: Object3D) {
+		if (this.disposedOverlays.has(object)) return;
+		this.disposedOverlays.add(object);
 		object.traverse((child) => {
 			const renderable = child as Object3D & { geometry?: BufferGeometry; material?: Material | Material[] };
 			renderable.geometry?.dispose();

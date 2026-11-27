@@ -1,0 +1,74 @@
+
+name: WP5 Local Windows Qualification
+
+on:
+  push:
+    branches:
+      - work/mcp-modeling-001/wp5-topology-bake
+
+permissions:
+  contents: read
+
+jobs:
+  cp5-local:
+    name: CP5 Windows Local - Bun 1.4.4
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.4'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.20.0'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Svelte typecheck
+        run: bun run check
+
+      - name: Full Editor regression tests
+        run: >
+          bun test
+          ./apps/editor/unit/authoring
+          ./apps/editor/unit/arch
+          ./apps/editor/unit/mcp
+          ./apps/editor/unit/editor
+          ./apps/editor/unit/agent
+
+      - name: Production build
+        run: bun run build
+
+      - name: CP4 and CP5 determinism verification
+        shell: pwsh
+        working-directory: apps/editor
+        run: |
+          bun unit/arch/fixtures/verify-g10.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $output = Join-Path $env:RUNNER_TEMP "g10-cp5-bun.json"
+
+          bun unit/arch/fixtures/verify-g10-cp5.ts > $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          bun build unit/arch/fixtures/verify-g10.ts --target=node --outfile=verify-g10.mjs --external manifold-3d
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          node verify-g10.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          bun build unit/arch/fixtures/verify-g10-cp5.ts --target=node --outfile=verify-g10-cp5.mjs --external manifold-3d
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          node verify-g10-cp5.mjs --compare $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

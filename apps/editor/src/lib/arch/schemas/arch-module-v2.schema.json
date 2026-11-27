@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sibambo.local/schemas/arch-module-v2.schema.json",
+  "title": "Sibambo ArchModule v2 (SIB-MCP-MODELING-001 v2.1 A6/A20)",
+  "description": "Parametric architectural module stored in the Editor root metadata key `arch`. Metres, right-handed, +Z up, module-local coordinates; transform is row-major module->document.",
+  "$ref": "#/$defs/module",
+  "$defs": {
+    "coord": { "type": "number", "minimum": -10000, "maximum": 10000 },
+    "vec2": { "type": "array", "prefixItems": [{ "$ref": "#/$defs/coord" }, { "$ref": "#/$defs/coord" }], "minItems": 2, "maxItems": 2, "items": false },
+    "ring": { "type": "array", "minItems": 3, "maxItems": 1024, "items": { "$ref": "#/$defs/vec2" } },
+    "elementId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "materialRef": { "type": "string", "pattern": "^(sib-(default|frame|glass|door)|(?!sib-)[a-z][a-z0-9-]{0,63})$" },
+    "transform": { "type": "array", "minItems": 16, "maxItems": 16, "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 } },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialId", "rgba", "opacity"],
+      "properties": {
+        "materialId": { "type": "string", "pattern": "^(?!sib-)[a-z][a-z0-9-]{0,63}$" },
+        "rgba": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "wall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "path", "thickness", "height", "baseElevation"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "wall" },
+        "path": { "type": "array", "minItems": 2, "maxItems": 256, "items": { "$ref": "#/$defs/vec2" } },
+        "closed": { "type": "boolean" },
+        "thickness": { "type": "number", "minimum": 0.01, "maximum": 2 },
+        "height": { "type": "number", "minimum": 0.01, "maximum": 100 },
+        "baseElevation": { "$ref": "#/$defs/coord" },
+        "side": { "enum": ["center", "left", "right"] },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "slab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "outline", "thickness", "topElevation"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "slab" },
+        "outline": { "$ref": "#/$defs/ring" },
+        "holes": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/ring" } },
+        "thickness": { "type": "number", "minimum": 0.01, "maximum": 5 },
+        "topElevation": { "$ref": "#/$defs/coord" },
+        "role": { "enum": ["floor", "ceiling", "roof-flat"] },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "opening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "hostElementId", "along", "width", "height", "sillHeight", "openingType"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "opening" },
+        "hostElementId": { "$ref": "#/$defs/elementId" },
+        "along": { "type": "number", "minimum": 0, "maximum": 100000 },
+        "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "sillHeight": { "type": "number", "minimum": 0, "maximum": 100 },
+        "openingType": { "enum": ["door", "window", "void"] },
+        "swing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hinge", "side"],
+          "properties": { "hinge": { "enum": ["start", "end"] }, "side": { "enum": ["left", "right"] } }
+        },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "space": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "name", "seedPoint"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "space" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "seedPoint": { "$ref": "#/$defs/vec2" }
+      }
+    },
+    "element": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["wall", "slab", "opening", "space"] } },
+      "oneOf": [{ "$ref": "#/$defs/wall" }, { "$ref": "#/$defs/slab" }, { "$ref": "#/$defs/opening" }, { "$ref": "#/$defs/space" }]
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "moduleId", "revision", "transform", "materials", "elements"],
+      "properties": {
+        "schemaVersion": { "const": "2.0.0" },
+        "moduleId": { "type": "string", "maxLength": 180, "pattern": "^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)+$" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "name": { "type": "string", "maxLength": 80 },
+        "transform": { "$ref": "#/$defs/transform" },
+        "materials": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/material" } },
+        "elements": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/element" } }
+      }
+    }
+  }
+}

@@ -2,6 +2,12 @@
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import ModelingPanel from '$lib/authoring/ModelingPanel.svelte';
 	import McpPanel from '$lib/mcp/McpPanel.svelte';
+	import AgentPanel from '$lib/agent/AgentPanel.svelte';
+	import { AgentHost, type AgentHostState, type AgentAcceptOutcome as AuthoringApplyOutcome } from '$lib/agent/agent-host';
+	import { DraftClient } from '$lib/mcp/draft-client';
+	import { DraftScene } from '$lib/mcp/draft-scene';
+	import type { DraftState, DraftStatus } from '$lib/mcp/draft-protocol';
+	import type { McpSessionView } from '$lib/mcp/connection';
 	import { ModelingController, type ModelingMode, type ModelingState } from '$lib/authoring/model-tools';
 	import { contextGraph } from '$lib/authoring/model';
 	import '$lib/ui/sibambo.css';
@@ -33,8 +39,15 @@
 	let provenance = $state<ResearchProvenance | null>(null);
 	let artifactSha256 = $state('');
 	let modelTabTitle = $state('Sibambo Editor');
-	type EditorMode = 'empty' | 'imported' | 'authoring';
-	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null; previewOnly?: boolean } | { kind: 'close' };
+	type EditorMode = 'empty' | 'imported' | 'authoring' | 'builder-draft';
+	type PendingTransition = { kind: 'new' } | { kind: 'open'; file: File; sidecar: File | null; previewOnly?: boolean } | { kind: 'close' } | { kind: 'draft'; owner: McpSessionView };
+	let draftClient = $state.raw<DraftClient | null>(null);
+	let draftStatus = $state.raw<DraftStatus | null>(null);
+	let draftState = $state.raw<DraftState | null>(null);
+	let requestStatuses = $state<Array<{ id: string; status: string }>>([]);
+	let pendingDraftClient: DraftClient | null = null;
+	let cancelPendingDraft: (() => void) | null = null;
+	let draftClock = $state(Date.now());
 	let builderPreviewOnly = $state(false);
 	let mcpOpen = $state(false);
 	let mode = $state<EditorMode>('empty');
@@ -99,6 +112,22 @@
 	let provenanceInput: HTMLInputElement;
 	let provenanceUpgradeInput: HTMLInputElement;
 	let busy = $state(false);
+	// SIB-MCP-MODELING-001 C15: agent calls run against the open authoring document through the
+	// same client, history and acceptAuthoringResult path as owner commands.
+	let agentOpen = $state(false);
+	let agentAvailable = $state(false);
+	let agentHostState = $state.raw<AgentHostState | null>(null);
+	const agentHost = new AgentHost<AuthoringClient>({
+		getClient: () => authoringClient,
+		getCheckpoint: () => authoringCheckpoint,
+		accept: (client, acknowledged, token) => applyAuthoringResult(client, acknowledged, token as number),
+		isOwnerBusy: () => busy || saveBusy || authoringOperationBusy || authoringRecovery.phase !== 'ready' || !!pendingTransition,
+		getModeling: () => ({ path: modelingState.path, selection: modelingState.selection }),
+		getMode: () => mode,
+		captureGeneration: () => generation,
+		onBusy: (value) => { authoringOperationBusy = value; },
+		onChange: (state) => { agentHostState = state; }
+	});
 	let clientReady = $state(false);
 	let loadStatus = $state('Choose a BOMC 1.2 model file.');
 	let ready = $state(false);
@@ -129,6 +158,7 @@
 	let pointerGesture: any = null;
 	const activeTouchPoints = new Map<number, { x: number; y: number }>();
 	type LoadedEditorState = {
+		draftClient: DraftClient | null; draftStatus: DraftStatus | null; draftState: DraftState | null;
 		mode: EditorMode;
 		builderPreviewOnly: boolean;
 		provenance: ResearchProvenance | null;
@@ -165,6 +195,7 @@
 
 	function snapshotLoadedState(): LoadedEditorState {
 		return {
+			draftClient, draftStatus, draftState,
 			mode, builderPreviewOnly, provenance, artifactSha256, modelTabTitle, result, session, editorController, viewport,
 				authoringClient, authoringCheckpoint, authoringTools, authoringTool, authoringInference, measureTooltip, selectedEntityId, authoringBounds, activeSourceName,
 			ready, picked,
@@ -182,6 +213,9 @@
 	}
 
 	function restoreLoadedState(snapshot: LoadedEditorState) {
+		if (draftClient && draftClient !== snapshot.draftClient) draftClient.dispose();
+		draftClient = snapshot.draftClient; draftStatus = snapshot.draftStatus; draftState = snapshot.draftState;
+		draftClient?.resume();
 		if (viewport && viewport !== snapshot.viewport) viewport.dispose();
 		if (session && session !== snapshot.session) session.dispose();
 		if (authoringTools && authoringTools !== snapshot.authoringTools) authoringTools.dispose();
@@ -378,15 +412,19 @@
 		}
 	}
 
-	function acceptAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation) {
-		if (request !== generation || client !== authoringClient || mode !== 'authoring') return false;
+	/** Applies an acknowledged result and reports whether the viewport actually shows it. */
+	function applyAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation): AuthoringApplyOutcome {
+		if (request !== generation || client !== authoringClient || mode !== 'authoring') return 'stale';
 		authoringCheckpoint = acknowledged.checkpoint;
 		authoringTools?.setCheckpoint(toolCheckpoint(acknowledged.checkpoint));
 		if (acknowledged.commandResult?.entityId) selectedEntityId = acknowledged.commandResult.entityId;
 		else if (selectedEntityId && !hasEntityId(acknowledged.checkpoint.snapshot.graph, selectedEntityId)) selectedEntityId = '';
 		modelTabTitle = authoringTitle(acknowledged.checkpoint);
-		refreshAuthoringProjection(false);
-		return true;
+		return refreshAuthoringProjection(false) ? 'rendered' : 'render-failed';
+	}
+
+	function acceptAuthoringResult(client: AuthoringClient, acknowledged: AuthoringResult, request = generation) {
+		return applyAuthoringResult(client, acknowledged, request) !== 'stale';
 	}
 
 	async function runAuthoringHistory(direction: 'undo' | 'redo') {
@@ -440,7 +478,7 @@
 		transitionTrigger = trigger;
 		transitionError = '';
 		mcpOpen = false; // project state persists server-side; Editor local transitions never grant writes
-		if (mode === 'authoring' && isAuthoringDirty()) {
+		if (mode === 'authoring' && isAuthoringDirty() || mode === 'builder-draft' && draftStatus?.dirty) {
 			pendingTransition = Object.freeze({ ...action }) as PendingTransition;
 			void tick().then(() => document.querySelector<HTMLButtonElement>('[data-transition-dialog] button[data-cancel]')?.focus());
 			return;
@@ -451,7 +489,9 @@
 	async function executeTransition(action: PendingTransition) {
 		if (!canRunTransition(action)) return;
 		mcpOpen = false;
-		if (action.kind === 'new') await createNewAuthoringDocument();
+		draftClient?.suspend();
+		if (action.kind === 'draft') await connectDraft(action.owner);
+		else if (action.kind === 'new') await createNewAuthoringDocument();
 		else if (action.kind === 'open') await openModel(action.file, action.sidecar, { previewOnly: action.previewOnly === true });
 		else unload();
 	}
@@ -592,6 +632,8 @@
 	}
 
 	function disposePreviousOwners(previous: LoadedEditorState, nextViewport: PreparedSceneViewport) {
+		if (previous.draftClient && (previous.draftClient !== draftClient || mode !== 'builder-draft')) previous.draftClient.dispose();
+		if (mode !== 'builder-draft') { draftClient = null; draftStatus = null; draftState = null; }
 		unsubscribeOccurrenceTransforms?.();
 		unsubscribeOccurrenceTransforms = null;
 		previous.authoringTools?.dispose();
@@ -600,6 +642,41 @@
 		if (previous.authoringClient && previous.authoringClient !== authoringClient) void previous.authoringClient.close();
 	}
 
+	async function connectDraft(owner: McpSessionView) {
+		if (!owner.projectId || !owner.csrf || !owner.draftWebSocketUrl) { error = 'Koneksi draft belum dikonfigurasi.'; return; }
+		const previous = snapshotLoadedState(), request = ++generation;
+		activeLoadSnapshot = previous; busy = true; error = ''; loadStatus = 'Menghubungkan draft live…';
+		let target: PreparedSceneViewport | null = null, client: DraftClient | null = null, committed = false;
+		try {
+			await waitForViewportLayout(request);
+			const { PreparedSceneViewport } = await import('@sibambo/viewport');
+			target = await PreparedSceneViewport.mount(viewportHost!, { scene: EMPTY_AUTHORING_SCENE, scenes: [], activeSceneId: null, editorMode: true });
+			if (request !== generation) throw new DOMException('Cancelled', 'AbortError');
+			target.setOrbitControlsEnabled(false); const scene = new DraftScene(target);
+			await new Promise<void>((resolve, reject) => {
+				cancelPendingDraft = () => { client?.dispose(); reject(new DOMException('Cancelled', 'AbortError')); };
+				client = new DraftClient({ projectId: owner.projectId!, csrf: owner.csrf!, url: owner.draftWebSocketUrl!,
+					render: (proposal, current) => scene.render(proposal, () => current() && (request === generation || draftClient === client)),
+					requests: statuses => { if (draftClient === client) requestStatuses = statuses; },
+					changed: (status, state) => {
+						if (!client || request !== generation && draftClient !== client) return;
+						if (!committed && status.phase === 'error') { reject(Error(status.error)); return; }
+						if (!committed && state) {
+							committed = true; mode = 'builder-draft'; draftClient = client; viewport = target;
+							authoringClient = null; authoringCheckpoint = null; authoringTools = null; bindAuthoringRecovery(null);
+							result = null; session = null; editorController = null; builderPreviewOnly = true; ready = true;
+							modelTabTitle = owner.projectId! + ' · Draft live'; disposePreviousOwners(previous, target!);
+							activeLoadSnapshot = null; pendingDraftClient = null; cancelPendingDraft = null; resolve();
+						}
+						if (committed) { draftStatus = status; draftState = state; }
+					}
+				}); pendingDraftClient = client;
+			});
+		} catch (cause) {
+			if (!committed) { (client as DraftClient | null)?.dispose(); target?.dispose(); if (request === generation) restoreLoadedState(previous); }
+			if (request === generation && !(cause instanceof DOMException && cause.name === 'AbortError')) error = cause instanceof Error ? cause.message : 'Koneksi draft gagal.';
+		} finally { if (request === generation) { busy = false; activeLoadSnapshot = null; cancelPendingDraft = null; pendingDraftClient = null; } }
+	}
 	async function createNewAuthoringDocument() {
 		if (!clientReady || busy || saveBusy) return;
 		const previous = snapshotLoadedState();
@@ -1301,6 +1378,7 @@
 		link.click();
 	}
 	function cancelLoad() {
+		cancelPendingDraft?.(); cancelPendingDraft = null; pendingDraftClient?.dispose(); pendingDraftClient = null;
 		const cancelledOperation = activeOperation;
 		generation += 1;
 		evidenceGeneration += 1;
@@ -1322,6 +1400,8 @@
 		error = loadStatus;
 	}
 	function unload() {
+		cancelPendingDraft?.(); cancelPendingDraft = null; pendingDraftClient?.dispose(); pendingDraftClient = null;
+		draftClient?.dispose(); draftClient = null; draftStatus = null; draftState = null; requestStatuses = [];
 		mcpOpen = false; // close local panel; no implicit server grant or session revocation
 		cancelEditorCameraGesture();
 		generation += 1;
@@ -1407,12 +1487,13 @@
 	}
 
 	function handleBeforeUnload(event: BeforeUnloadEvent) {
-		if (mode !== 'authoring' || !isAuthoringDirty()) return;
+		if (!(mode === 'authoring' && isAuthoringDirty()) && !draftStatus?.dirty) return;
 		event.preventDefault();
 		event.returnValue = '';
 	}
 
 	onMount(() => {
+		const draftTimer = window.setInterval(() => { draftClock = Date.now(); }, 1000);
 		if (!sourceInput) throw new Error('Editor source input binding is unavailable.');
 		const saved = localStorage.getItem('sibambo-theme');
 		darkMode = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -1436,6 +1517,7 @@
 		window.addEventListener('beforeunload', beforeUnloadHandler);
 		clientReady = true;
 		return () => {
+			window.clearInterval(draftTimer);
 			clientReady = false;
 			document.removeEventListener('pointerdown', closeMenusOutside, true);
 			document.removeEventListener('keydown', closeMenusOnEscape);
@@ -1446,7 +1528,9 @@
 		};
 	});
 	onDestroy(() => {
+		cancelPendingDraft?.(); pendingDraftClient?.dispose(); draftClient?.dispose();
 		mcpOpen = false;
+		agentOpen = false; agentHost.dispose();
 		modeling.dispose();
 			generation += 1; evidenceGeneration += 1; controller?.abort(); saveController?.abort();
 			unsubscribeAuthoringRecovery?.(); unsubscribeAuthoringRecovery = null;
@@ -1552,21 +1636,38 @@
 			<summary>Extensions</summary>
 			<div class="menu-popover">
 				<button type="button" onclick={() => { mcpOpen = true; }} aria-haspopup="dialog" aria-expanded={mcpOpen}>MCP Extension…</button>
+				{#if agentAvailable}<button type="button" onclick={() => { agentOpen = true; }} aria-haspopup="dialog" aria-expanded={agentOpen}>Agent…</button>{/if}
 			<button type="button" onclick={(event) => openBuilderPreviewPicker(event.currentTarget)} disabled={busy || saveBusy || authoringOperationBusy || !clientReady || !!pendingTransition}>Preview Builder Artifact…</button>
 				<span class="menu-status">Local BOMC 1.2 handoff. Builder owns construction; Editor provides read-only preview and inspection.</span>
 			</div>
 		</details>
 		<button type="button" class="menu-label" aria-label="Help menu placeholder">Help</button>
 	</nav>
-	<McpPanel open={mcpOpen} onClose={() => { mcpOpen = false; }} />
+	<McpPanel open={mcpOpen} {requestStatuses} onConnect={(owner) => requestTransition({ kind: 'draft', owner })}
+		onLogout={() => { draftClient?.dispose(); draftClient = null; if (draftStatus) draftStatus = { ...draftStatus, phase: 'paused', error: 'Sesi owner ditutup. Model terakhir tetap ada di tab ini.' }; }}
+		onClose={() => { mcpOpen = false; }} />
+	<AgentPanel open={agentOpen} host={agentHost} hostState={agentHostState ?? agentHost.state}
+		revision={mode === 'authoring' ? authoringCheckpoint?.snapshot.revision ?? null : null}
+		onAvailable={(value) => { agentAvailable = value; }} onClose={() => { agentOpen = false; }} />
+	{#if mode === 'builder-draft' && draftStatus}
+		<section class="draft-live-status" aria-label="Draft live" data-project-id={draftState?.projectId} data-revision={draftStatus.revision} data-rendered-revision={draftStatus.renderedRevision} data-module-count={draftState?.modules.length ?? 0}>
+			<p role="status">Draft live · {draftStatus.phase} · {draftStatus.role === 'primary' ? 'Viewer utama' : 'Pengikut baca-saja'} · revisi {draftStatus.revision} / tergambar {draftStatus.renderedRevision} · {draftState?.modules.length ?? 0} modul</p>
+			<p>Draft belum disimpan. Dipertahankan hanya dalam sesi terbuka ini.</p>
+			{#if draftStatus.error}<p role="alert">{draftStatus.error}</p>{/if}
+			{#if draftStatus.phase !== 'live'}<p>TTL server: {Math.max(0, Math.ceil((draftStatus.idleExpiresAt - draftClock) / 1000))} detik</p>{/if}
+			<button type="button" onclick={() => viewport?.fit()}>Bingkai draft</button>
+			<button type="button" onclick={() => draftClient?.reconnectNow()}>Sambungkan ulang</button>
+			<button type="button" onclick={() => requestTransition({ kind: 'close' })}>Tutup draft</button>
+		</section>
+	{/if}
 	{#if pendingTransition}
 		<div class="transition-backdrop">
 				<dialog open class="transition-dialog" data-transition-dialog aria-modal="true" aria-labelledby="transition-title" aria-describedby="transition-description" onkeydown={trapTransitionFocus}>
 				<h2 id="transition-title">Save changes?</h2>
-				<p id="transition-description">This document has unsaved canonical BOMC edits. Save and wait for the download acknowledgment, discard the edits, or cancel this action.</p>
+				<p id="transition-description">{mode === 'builder-draft' ? 'Draft live belum disimpan. Tetap di tab ini untuk mempertahankannya, atau Discard untuk meninggalkan draft.' : 'This document has unsaved canonical BOMC edits. Save and wait for the download acknowledgment, discard the edits, or cancel this action.'}</p>
 				{#if transitionError}<p class="transition-error" role="alert">{transitionError}</p>{/if}
 				<div class="transition-actions">
-					<button type="button" class="transition-primary" onclick={() => void saveBomc()} disabled={saveBusy || !canAuthor()}>{saveBusy ? saveProgress || 'Saving…' : 'Save'}</button>
+					{#if mode !== 'builder-draft'}<button type="button" class="transition-primary" onclick={() => void saveBomc()} disabled={saveBusy || !canAuthor()}>{saveBusy ? saveProgress || 'Saving…' : 'Save'}</button>{/if}
 					<button type="button" onclick={discardTransition} disabled={saveBusy || busy}>Discard</button>
 					<button type="button" data-cancel onclick={cancelTransition} disabled={saveBusy}>Cancel</button>
 					{#if saveBusy}<button type="button" onclick={cancelSave}>Cancel Save</button>{/if}

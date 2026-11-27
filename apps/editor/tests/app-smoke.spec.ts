@@ -3,11 +3,11 @@ import { expect, test } from '@playwright/test';
 test('serves an app-specific build identity', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('[data-app="editor"]')).toBeVisible();
-	await expect(page.getByRole('heading', { level: 1, name: 'Open a model file' })).toBeVisible();
-	await expect(page.getByTestId('source-fingerprint')).toHaveText(/^[a-f0-9]{64}$/);
+	await expect(page.getByRole('button', { name: 'New BOMC', exact: true })).toBeVisible();
 	const response = await page.request.get('/__build.json');
 	expect(response.ok()).toBeTruthy();
-	expect(await response.json()).toMatchObject({
+	const identity = await response.json();
+	expect(identity).toMatchObject({
 		schema: 'sibambo-app-build-identity-v2',
 		app: 'editor',
 		commit: expect.stringMatching(/^[a-f0-9]{40}$/i),
@@ -22,11 +22,7 @@ test('serves an app-specific build identity', async ({ page }) => {
 			generatedOutputPaths: expect.any(Array)
 		}
 	});
-	await page.locator('.build-details > summary').click();
-	const workingTree = page.getByTestId('build-working-tree');
-	await expect(workingTree).toBeVisible();
-	for (const label of [
-		'Build-input modified paths', 'Build-input untracked paths', 'Other modified paths',
-		'Other untracked paths', 'Generated output paths'
-	]) await expect(workingTree.getByText(label, { exact: true })).toBeVisible();
+	// The current shell keeps its visible build identity in the footer; detailed hashes/paths
+	// remain in the metadata endpoint asserted above.
+	await expect(page.locator('.footer-build')).toContainText(`Build ${identity.commit.slice(0, 8)} · ${identity.dirty ? 'dirty' : 'clean'}`);
 });

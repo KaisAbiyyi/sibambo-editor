@@ -101,7 +101,7 @@ async function run(handler: (e: never) => Promise<Response> | Response, ev: neve
   }
 }
 const postTicket = (project: string = A, opts: Options = {}) => run(routes.ticket.POST as never, event('/api/mcp/ticket', { ...opts, body: opts.body ?? { projectId: project } }));
-const validTicketBody = (extra: Record<string, unknown> = {}) => envelope(A, { ticket: TICKET, ticketExpiresAt: iso(60_000), ...extra });
+const validTicketBody = (extra: Record<string, unknown> = {}) => envelope(A, { ticket: TICKET, ticketExpiresAt: iso(15_000), ...extra });
 
 describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticket', () => {
   test('valid upstream ticket is delivered once, minimal, no-store, with no bearer and no persistence', async () => {
@@ -158,7 +158,7 @@ describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticke
   }
   const badExpiry: Array<[string, unknown]> = [
     ['missing', undefined], ['null', null], ['epoch number', Math.floor(NOW() / 1000) + 60], ['free text', 'tomorrow'],
-    ['already expired', iso(-1000)], ['exactly now', iso(0)], ['beyond 5 minute budget', iso(301_000)], ['far future', '2999-01-01T00:00:00Z'],
+    ['already expired', iso(-1000)], ['exactly now', iso(0)], ['beyond 30 second budget', iso(31_000)], ['far future', '2999-01-01T00:00:00Z'],
     ['impossible calendar date', '2999-13-45T25:61:61Z'], ['non UTC offset form', '2999-01-01T00:00:00+07:00']
   ];
   for (const [name, ticketExpiresAt] of badExpiry) {
@@ -176,14 +176,14 @@ describe('P1-A: /api/mcp/ticket returns the validated single-use WebSocket ticke
     expect(() => bff.ticketResponse(at(1), owner, A, now + 1)).toThrow();
   });
   test('ticket scoped to a different project (A requested, B returned) never reaches the browser', async () => {
-    responder = () => json(envelope(B, { ticket: TICKET, ticketExpiresAt: iso(60_000) }));
+    responder = () => json(envelope(B, { ticket: TICKET, ticketExpiresAt: iso(15_000) }));
     const result = await postTicket(A);
     expect(result.status).toBe(502);
     expect(result.text).toBe('');
   });
   for (const [name, projectId] of [['missing', undefined], ['null', null], ['number', 1], ['array', [A]], ['object', { id: A }], ['different case', 'PROJECT-A'], ['trailing space', A + ' '], ['empty', '']] as const) {
     test(`malformed upstream projectId fails closed: ${name}`, async () => {
-      const body: Record<string, unknown> = { contract: 'se04-owner-mcp-v1', ticket: TICKET, ticketExpiresAt: iso(60_000) };
+      const body: Record<string, unknown> = { contract: 'se04-owner-mcp-v1', ticket: TICKET, ticketExpiresAt: iso(15_000) };
       if (projectId !== undefined) body.projectId = projectId;
       responder = () => json(body);
       expect((await postTicket(A)).status).toBe(502);
@@ -236,7 +236,7 @@ describe('P1-B: project isolation of every service response', () => {
     seenRevision: 3, renderedRevision: 3, paused: false, requests: [], ...extra
   });
   test('matching project is exposed through the allowlist only (ticket and credentials are stripped)', async () => {
-    responder = () => json(view(A, { ticket: TICKET, ticketExpiresAt: iso(60_000), accessToken: 'leak', cookies: ['x'], secret: 's' }));
+    responder = () => json(view(A, { ticket: TICKET, ticketExpiresAt: iso(15_000), accessToken: 'leak', cookies: ['x'], secret: 's' }));
     const result = await run(routes.session.GET as never, event('/api/mcp/session', { method: 'GET', query: '?project=' + A }));
     expect(result.status).toBe(200);
     expect(result.body).toMatchObject({ projectId: A, projectName: 'Name of ' + A, subject: 'auth0|owner', csrf: CSRF, serviceReady: true });
@@ -265,11 +265,29 @@ describe('P1-B: project isolation of every service response', () => {
     expect(result.body.projectId).toBeUndefined();
     expect(upstream).toHaveLength(0);
   });
+  test('canonical slash-separated module IDs in a typed owner request reach the service unchanged', async () => {
+    responder = () => json(envelope(A, { requests: [] }));
+    const body = { projectId: A, action: 'create', body: 'Revise this room', moduleIds: ['house/room'], kind: 'typed-parameters', parameters: { width: 3.5 } };
+    const result = await run(routes.requests.POST as never, event('/api/mcp/requests', { body }));
+    expect(result.status).toBe(200);
+    expect(JSON.parse(upstream[0]!.body)).toEqual(body);
+  });
   test('GET requests: wrong-project inbox is rejected', async () => {
     responder = () => json(envelope(B, { requests: [{ id: 'r1', body: 'secret of B', moduleIds: [], status: 'open' }] }));
     const result = await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }));
     expect(result.status).toBe(502);
     expect(result.text).toBe('');
+  });
+  test('a full bounded inbox including typed metadata fits; oversized owner responses still fail closed', async () => {
+    const requests = Array.from({ length: 50 }, (_, i) => ({ id: String(i + 1), body: 'é'.repeat(1900), status: 'open',
+      moduleIds: Array.from({ length: 8 }, (_, n) => 'house/a' + 'b'.repeat(168) + n),
+      kind: 'typed-parameters', parameters: Object.fromEntries(Array.from({ length: 16 }, (_, n) => ['width' + 'a'.repeat(48) + n, 123.5])) }));
+    responder = () => json(envelope(A, { requests }));
+    expect(Buffer.byteLength(JSON.stringify(envelope(A, { requests })))).toBeGreaterThan(256 * 1024);
+    const accepted = await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }));
+    expect(accepted.status).toBe(200); expect(accepted.body.requests).toHaveLength(50);
+    responder = () => json(envelope(A, { unexpected: 'x'.repeat(512 * 1024) }));
+    expect((await run(routes.requests.GET as never, event('/api/mcp/requests', { method: 'GET', query: '?project=' + A }))).status).toBe(502);
   });
   const grantBody = { projectId: A, action: 'approve', grantId: 'g1', agentSubject: 'agent-1', clientId: 'client-1', scopes: ['read'], confirmationCode: 'ABCDEFGH' };
   const mutations: Array<[string, (b?: Record<string, unknown>) => Promise<Result>]> = [

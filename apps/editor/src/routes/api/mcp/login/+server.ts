@@ -1,9 +1,10 @@
 import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { callbackUrl, discovery, oidcConfig, setFlow, token } from '$lib/server/mcp-bff';
+import { callbackUrl, discovery, localDemo, oidcConfig, setFlow, startLocalSession, token } from '$lib/server/mcp-bff';
 import { pkceChallenge } from '$lib/server/mcp-oidc';
 
 export const GET: RequestHandler = async (event) => {
+  if (localDemo()) { startLocalSession(event); throw redirect(303, '/?mcp=connected'); }
   const { issuer, clientId, audience } = oidcConfig();
   const metadata = await discovery(issuer);
   const flow = { state: token(), nonce: token(), verifier: token(48), created: Date.now(), redirectUri: callbackUrl(event) };

@@ -388,3 +388,7 @@ main[data-app="editor"].is-loaded {
 @media (max-width: 480px) {
   .mcp-panel { inset: 30px 0 26px 0; width: 100vw; padding: 12px; }
 }
+/* Live draft controls stay outside the canonical scene and fit narrow viewports. */
+.draft-live-status { position: fixed; z-index: 35; top: 100px; left: 12px; width: min(480px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--border, #d8dce2); border-radius: 8px; background: var(--background, #fff); color: var(--foreground, #20242a); box-shadow: 0 2px 12px #0002; font-size: 12px; }
+.draft-live-status p { margin: 4px 0; }
+.draft-live-status button { margin: 4px 6px 0 0; padding: 5px 8px; }

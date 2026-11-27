@@ -32,8 +32,39 @@ export function oidcConfig() {
   key();
   return { issuer, clientId, clientSecret, audience };
 }
+/**
+ * v1.6 LOCAL DEMO mode (loopback only, no IdP). Explicit opt-in: SE04_LOCAL_DEMO=1. Never inferred, never on
+ * Vercel. If it is requested but misconfigured this FAILS CLOSED (503); it never falls back to OIDC silently.
+ */
+export const LOCAL_ISSUER = 'http://127.0.0.1/sibambo-local-demo';
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+export type LocalDemo = { token: string; project: string; issuer: string };
+export function localDemo(): LocalDemo | null {
+  if (process.env.SE04_LOCAL_DEMO !== '1') return null;
+  const token = process.env.SE04_LOCAL_OWNER_TOKEN ?? '';
+  const project = process.env.SE04_LOCAL_PROJECT || 'local-demo';
+  let ok = !process.env.VERCEL && token.length >= 32 && token.length <= 512 && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(project);
+  try {
+    const base = new URL(process.env.SE04_SERVICE_BASE_URL ?? '');
+    ok = ok && base.protocol === 'http:' && LOOPBACK_HOSTS.has(base.hostname) && base.pathname === '/' && !base.search && !base.hash && !base.username && !base.password;
+    key();
+  } catch { ok = false; }
+  if (!ok) throw error(503, 'Local demo mode is misconfigured');
+  return { token, project, issuer: LOCAL_ISSUER };
+}
 export function configured(): boolean {
+  try { if (localDemo()) return true; } catch { return false; }
   try { oidcConfig(); return true; } catch { return false; }
+}
+/** One-click owner session for local demo: same sealed cookie + CSRF as OIDC, minted without an IdP. */
+export function startLocalSession(event: RequestEvent) {
+  const local = localDemo();
+  if (!local) throw error(404, 'Not found');
+  const fetchSite = event.request.headers.get('sec-fetch-site');
+  if (!LOOPBACK_HOSTS.has(event.url.hostname) || (fetchSite && !['same-origin', 'none'].includes(fetchSite)))
+    throw error(403, 'Local demo sign-in is loopback only');
+  setSession(event, { sub: 'local-owner', issuer: local.issuer, accessToken: local.token,
+    exp: Math.floor(Date.now() / 1000) + 14400, csrf: token() });
 }
 export function callbackUrl(event: RequestEvent): string {
   const origin = process.env.SE04_PUBLIC_ORIGIN ?? event.url.origin;
@@ -66,14 +97,14 @@ export function clearFlow(event: RequestEvent) { event.cookies.delete(FLOW, { pa
 export function setSession(event: RequestEvent, session: OwnerSession) {
   const sealed = seal(session, key());
   if (sealed.length > 3900) throw error(503, 'OIDC token exceeds cookie transport budget');
-  event.cookies.set(SESSION, sealed, { ...browserCookie, maxAge: Math.min(3600, Math.max(1, session.exp - Math.floor(Date.now() / 1000))) });
+  event.cookies.set(SESSION, sealed, { ...browserCookie, maxAge: Math.min(localDemo() ? 14400 : 3600, Math.max(1, session.exp - Math.floor(Date.now() / 1000))) });
 }
 export function clearSession(event: RequestEvent) { event.cookies.delete(SESSION, { path: '/' }); }
 export function getSession(event: RequestEvent): OwnerSession | null {
   if (!configured()) return null;
   const v = unseal<OwnerSession>(event.cookies.get(SESSION), key());
   if (!v || !v.sub || !v.csrf || typeof v.accessToken !== 'string' || v.accessToken.length > 12000 ||
-      v.issuer !== oidcConfig().issuer || v.exp <= Date.now() / 1000) return null;
+      v.issuer !== (localDemo()?.issuer ?? oidcConfig().issuer) || v.exp <= Date.now() / 1000) return null;
   return v;
 }
 export function requireSession(event: RequestEvent): OwnerSession {
@@ -105,7 +136,7 @@ function serviceBase(): string {
   try {
     const value = new URL(raw);
     const isLoopback = value.hostname === '127.0.0.1' || value.hostname === 'localhost';
-    if ((value.protocol !== 'https:' && !(dev && isLoopback && value.protocol === 'http:')) ||
+    if ((value.protocol !== 'https:' && !((dev || localDemo()) && isLoopback && value.protocol === 'http:')) ||
         value.username || value.password || value.search || value.hash || value.pathname !== '/') throw Error();
     return value.origin;
   } catch { throw error(503, 'SE-03 service contract is not deployed'); }
@@ -120,8 +151,17 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
   }).catch(() => { throw error(503, 'MCP service unavailable'); });
   if (r.status === 401 || r.status === 403) throw error(r.status, 'Owner or project authorization denied');
   if (!r.ok) throw error(502, 'MCP service rejected request');
-  const raw = await r.text();
-  if (raw.length > 32768) throw error(502, 'MCP service response too large');
+  const limit = endpoint === '/ticket' ? 32768 : 512 * 1024; // 50 × 4 KiB text plus bounded module IDs/typed metadata
+  const reader = r.body?.getReader(), chunks: Uint8Array[] = []; let length = 0;
+  if (reader) while (true) {
+    const next = await reader.read(); if (next.done) break;
+    length += next.value.byteLength;
+    if (length > limit) { await reader.cancel(); throw error(502, 'MCP service response too large'); }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const raw = new TextDecoder().decode(bytes);
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw error(502, 'Invalid service response'); }
   if (!data || typeof data !== 'object' || Array.isArray(data) || (data as Record<string, unknown>).contract !== 'se04-owner-mcp-v1')
@@ -136,7 +176,7 @@ export async function service(event: RequestEvent, session: OwnerSession, projec
 }
 /** Short-lived WebSocket tickets: generous token alphabet, bounded size, never URL-shaped. */
 export const TICKET_PATTERN = /^[A-Za-z0-9._~-]{32,512}$/;
-export const TICKET_MAX_TTL_MS = 300_000;
+export const TICKET_MAX_TTL_MS = 30_000;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 /**
  * P1-A: dedicated serializer for POST /api/mcp/ticket. Returns only the contract marker,
@@ -161,7 +201,23 @@ export function ticketResponse(data: Record<string, unknown>, owner: OwnerSessio
 }
 export function expose(data: Record<string, unknown>) {
   // Explicit allowlist; a compromised service must not leak bearer/cookies via JSON.
-  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'error'];
+  const fields = ['contract', 'phase', 'projectId', 'projectName', 'capabilities', 'grants', 'pending', 'writer', 'seenRevision', 'renderedRevision', 'paused', 'requests', 'error', 'epoch'];
   return Object.fromEntries(fields.filter(f => Object.prototype.hasOwnProperty.call(data, f)).map(f => [f, data[f]]));
 }
 export { token };
+export async function disconnectOwner(session: OwnerSession) {
+  if (!process.env.SE04_SERVICE_BASE_URL) return;
+  const response = await fetch(serviceBase() + '/owner/v1/logout', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+    headers: { authorization: 'Bearer ' + session.accessToken, 'content-type': 'application/json' }, body: '{}' });
+  if (!response.ok) throw error(503, 'Owner channel disconnect unavailable');
+}
+export function draftWebSocketUrl(): string | undefined {
+  const raw = process.env.SE05_DRAFT_WS_ORIGIN;
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const loopbackWs = !!localDemo() && url.protocol === 'ws:' && LOOPBACK_HOSTS.has(url.hostname);
+    if ((url.protocol !== 'wss:' && !loopbackWs) || url.username || url.password || url.pathname !== '/' || url.search || url.hash || url.hostname.includes('*')) throw Error();
+    return url.origin + '/draft';
+  } catch { throw error(503, 'Draft WebSocket origin is invalid'); }
+}

@@ -1,6 +1,6 @@
 import { BomcDocument } from '@sibambo/bomc-document/document';
 import type { BomcGraph, BomcSnapshot, DocumentEdit } from '@sibambo/bomc-document';
-import { isAuthoringCheckpointShape, isRecord, type AuthoringCheckpoint, type AuthoringHistoryCheckpoint, type AuthoringJournalEntry } from './protocol.js';
+import { AGENT_ORIGIN_PATTERN, isAuthoringCheckpointShape, isRecord, type AuthoringCheckpoint, type AuthoringHistoryCheckpoint, type AuthoringJournalEntry } from './protocol.js';
 import { validateAuthoringDocument as validateEditableSubset, nextModelSequence } from './model.js';
 
 export class AuthoringHistoryError extends Error {
@@ -50,15 +50,26 @@ function freezeValue<T>(value: T): T {
 }
 
 function cloneEntry(entry: AuthoringJournalEntry): AuthoringJournalEntry {
-	return { forward: cloneValue(entry.forward), inverse: cloneValue(entry.inverse) };
+	const cloned: AuthoringJournalEntry = { forward: cloneValue(entry.forward), inverse: cloneValue(entry.inverse) };
+	if (entry.origin !== undefined) cloned.origin = entry.origin;
+	return cloned;
 }
 
 function cloneAndFreezeEntry(entry: AuthoringJournalEntry): AuthoringJournalEntry {
 	return freezeValue(cloneEntry(entry));
 }
 
+function hasJournalEntryKeys(value: Record<string, unknown>): boolean {
+	const keys = Object.keys(value);
+	if (!Object.hasOwn(value, 'forward') || !Object.hasOwn(value, 'inverse')) return false;
+	if (keys.length === 2) return true;
+	// v2.3 A12: agent write entries carry exactly one extra key, origin `agent:<slot>`.
+	return keys.length === 3 && Object.hasOwn(value, 'origin')
+		&& typeof value.origin === 'string' && AGENT_ORIGIN_PATTERN.test(value.origin);
+}
+
 function assertJournalEntryShape(value: unknown): asserts value is AuthoringJournalEntry {
-	if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'forward') || !Object.hasOwn(value, 'inverse')
+	if (!isRecord(value) || !hasJournalEntryKeys(value)
 		|| !Array.isArray(value.forward) || !Array.isArray(value.inverse)
 		|| (value.forward.length === 0) !== (value.inverse.length === 0)) {
 		throw new AuthoringHistoryError('History entry must contain paired forward and inverse edit arrays.');
@@ -327,6 +338,38 @@ export class AuthoringHistory {
 		if (graphsEqual(before.graph, after.graph)) return false;
 		this.undoEntries.pop();
 		this.redoEntries.push(entry);
+		return true;
+	}
+
+	/** Origins of the top `count` undo entries, top first (`null` for owner entries). */
+	topOrigins(count: number): (string | null)[] {
+		if (!Number.isSafeInteger(count) || count < 0) throw new AuthoringHistoryError('History origin count must be a non-negative integer.');
+		const origins: (string | null)[] = [];
+		for (let index = this.undoEntries.length - 1; index >= 0 && origins.length < count; index -= 1) {
+			origins.push(this.undoEntries[index]!.origin ?? null);
+		}
+		return origins;
+	}
+
+	/**
+	 * v2.3 C5(d): revert the top `count` entries in ONE atomic transact. The resulting stacks
+	 * equal `count` sequential undo calls, but the revision rises by exactly 1. A throw from
+	 * transact propagates with nothing changed; a graph no-op returns false with stacks unchanged.
+	 */
+	undoMany(document: BomcDocument, count: number): boolean {
+		if (!Number.isSafeInteger(count) || count < 1 || count > this.undoEntries.length) {
+			throw new AuthoringHistoryError('undoMany requires 1 <= count <= the undo stack length.');
+		}
+		const entries = this.undoEntries.slice(-count).reverse();
+		const edits = entries.flatMap((entry) => entry.inverse);
+		const before = document.snapshot();
+		document.transact(edits);
+		const after = document.snapshot();
+		if (graphsEqual(before.graph, after.graph)) return false;
+		for (const entry of entries) {
+			this.undoEntries.pop();
+			this.redoEntries.push(entry);
+		}
 		return true;
 	}
 

@@ -28,7 +28,7 @@
     sending = true; errorText = '';
     try {
       const moduleIds = ids.split(',').map(s => s.trim()).filter(Boolean);
-      if (moduleIds.length > 8 || moduleIds.some(s => !/^[\w-]{1,64}$/.test(s))) throw new Error('Maksimal 8 ID modul yang valid.');
+      if (moduleIds.length > 8 || new Set(moduleIds).size !== moduleIds.length || moduleIds.some(s => !/^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)+$/.test(s) || s.length > 180)) throw new Error('Maksimal 8 ID modul yang valid, misalnya house/room.');
       const payload = action === 'create' ? {
         projectId, action, body: text.trim(), moduleIds, kind: format,
         parameters: format === 'typed-parameters' ? typedParameters() : {}
@@ -50,12 +50,12 @@
     <option value="typed-parameters">Parameter bertipe angka</option>
   </select>
   <label for="mcp-request-body">Pesan revisi</label>
-  <textarea id="mcp-request-body" bind:value={text} rows="3" maxlength="2000" placeholder="Contoh: pindahkan bukaan ke sisi utara..." />
+  <textarea id="mcp-request-body" bind:value={text} rows="3" maxlength="2000" placeholder="Contoh: pindahkan bukaan ke sisi utara..."></textarea>
   <label for="mcp-request-modules">ID modul terkait (opsional, pisahkan koma)</label>
-  <input id="mcp-request-modules" bind:value={ids} placeholder="wall-01, window-02" />
+  <input id="mcp-request-modules" bind:value={ids} placeholder="house/living, house/bedroom" />
   {#if format === 'typed-parameters'}
     <label for="mcp-request-params">Parameter angka (satu nama=angka per baris)</label>
-    <textarea id="mcp-request-params" bind:value={paramText} rows="3" placeholder="width=3.5&#10;height=2.8" />
+    <textarea id="mcp-request-params" bind:value={paramText} rows="3" placeholder="width=3.5&#10;height=2.8"></textarea>
   {/if}
   <button type="button" disabled={sending || !text.trim()} onclick={() => void act('create')}>Kirim permintaan revisi</button>
   {#if errorText}<p class="mcp-error" role="alert">{errorText}</p>{/if}
@@ -63,8 +63,6 @@
     {#each requests as item (item.id)}
       <li><span>{item.body}</span><small>{item.status} · {item.moduleIds?.join(', ') ?? 'tanpa modul'}</small>
         {#if item.status === 'open'}<button type="button" disabled={sending} onclick={() => void act('withdraw', item.id)}>Tarik</button>{/if}
-        {#if item.status === 'open'}<button type="button" disabled={sending} onclick={() => void act('mark-read', item.id)}>Tandai dibaca</button>{/if}
-        {#if item.status === 'read'}<button type="button" disabled={sending} onclick={() => void act('mark-addressed', item.id)}>Tandai ditangani</button>{/if}
       </li>
     {/each}
   </ul>

@@ -1,0 +1,8 @@
+{
+  "note": "Baked mesh SHA-256 of G1, G4, and G8 (CP5 bakeModule output); recorded under Bun 1.4.4, must be identical across fresh kernels, Bun, and Node.",
+  "hashes": {
+    "G1": "63aac6fd8651c3f9cce3ac22441b91b2ebe0111a29dcb1975dbe85d3813a170b",
+    "G4": "0ec88fe09436ea1c8300ab58d6f8a55bfea680590cdea0b464ecdbe118bbecc0",
+    "G8": "89441c782db90984e7c65d5b59ddde438792b754fb3b041c6780d273237d2b31"
+  }
+}

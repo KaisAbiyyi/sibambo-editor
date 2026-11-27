@@ -4,13 +4,14 @@ import { makeTinyBomc12 } from '../../../tooling/test-fixtures/tiny-bomc';
 async function holdFileRead(page: Page, fileName: string) {
 	await page.addInitScript((heldName) => {
 		const original = File.prototype.arrayBuffer;
+		let released = false;
 		File.prototype.arrayBuffer = function () {
 			const file = this;
-			if (file.name !== heldName) return original.call(file);
+			if (file.name !== heldName || released) return original.call(file);
 			return new Promise<ArrayBuffer>((resolve, reject) => {
 				Object.defineProperty(window, '__releaseModelTitleFile', {
 					configurable: true,
-					value: () => original.call(file).then(resolve, reject)
+					value: () => { released = true; return original.call(file).then(resolve, reject); }
 				});
 			});
 		};
@@ -28,9 +29,10 @@ async function chooseSourceFile(page: Page, file: { name: string; mimeType: stri
 }
 
 async function replaceSourceInput(page: Page, file: { name: string; mimeType: string; buffer: Buffer }) {
-	const sourceInput = page.locator('input[type="file"]').first();
+  const sourceInput = page.getByLabel('BOMC 1.2 file', { exact: true });
 	await sourceInput.setInputFiles(file);
-	await expect.poll(() => sourceInput.evaluate((input) => (input as HTMLInputElement).files?.[0]?.name ?? null)).toBe(file.name);
+  // stageSource deliberately clears FileList so selecting the same file again still emits change.
+  // Callers assert the delayed read/committed title or rejection, which prove the file was consumed.
 }
 
 async function confirmEditorInteractive(page: Page) {

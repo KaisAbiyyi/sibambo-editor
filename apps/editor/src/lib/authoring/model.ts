@@ -21,6 +21,7 @@ import { constructionGuides } from './construction-guides.js';
 import { assertAffine, meshThrough, normalThrough } from './affine.js';
 import { curvePoints, orderedPath, sweepProfile } from './curves.js';
 import { organization, instanceVisible, structuralDefinitions, validateOrganization, type ModelOrganization } from './organization.js';
+import { validateArchMetadata, type ArchMetadata } from '../arch/metadata.js';
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const SCHEMA = 'sibambo-editor-model-v1';
@@ -30,6 +31,8 @@ export type ModelMetadata = {
 	guides: (Primitive & { kind: 'line' | 'point' })[];
 	looseEdges: Primitive[];
 	organization?: ModelOrganization;
+	/** SIB-MCP-MODELING-001 v2.1 A20: parametric agent modules; validated by arch/metadata.ts. */
+	arch?: ArchMetadata;
 };
 type MutableGraph = Omit<BomcGraph, 'materials' | 'definitions' | 'meshes' | 'instances'> & {
 	materials: BomcGraph['materials'][number][];
@@ -69,10 +72,14 @@ export function modelMetadata(graph: BomcGraph): ModelMetadata {
 		metadata.schema !== SCHEMA ||
 		!Array.isArray(metadata.guides) ||
 		!Array.isArray(metadata.looseEdges) ||
-		!['guides,looseEdges,schema','guides,looseEdges,organization,schema'].includes(Object.keys(metadata).sort().join(','))
+		!['guides,looseEdges,schema','guides,looseEdges,organization,schema','arch,guides,looseEdges,schema','arch,guides,looseEdges,organization,schema'].includes(Object.keys(metadata).sort().join(','))
 	)
 		return fail('Unsupported authoring metadata schema.');
 	if(metadata.organization!==undefined)validateOrganization(metadata.organization,graph);
+	if (metadata.arch !== undefined) {
+		try { validateArchMetadata(metadata.arch, graph); }
+		catch (error) { fail(error instanceof Error ? error.message : 'Unsupported arch metadata.'); }
+	}
 	const ids = new Set<string>();
 	for (const item of [...metadata.guides, ...metadata.looseEdges]) {
 		if (

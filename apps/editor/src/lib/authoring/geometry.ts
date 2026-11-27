@@ -375,7 +375,7 @@ function orientedTriangle(
 	return alignment > 0 ? [...triangle] : [triangle[0], triangle[2], triangle[1]];
 }
 
-function triangulateFaceRings(
+export function triangulateFaceRings(
 	mesh: Mesh,
 	outer: readonly number[],
 	holes: readonly (readonly number[])[],
@@ -609,7 +609,7 @@ function insertionHostFace(previousMesh: Mesh, candidatePoints: readonly Point3[
 	return host;
 }
 
-function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull' | 'split', operationId?: string): string {
+export function v2FaceLabel(faceId: string, operation: 'rectangle' | 'line' | 'push-pull' | 'split', operationId?: string): string {
 	return jsonLabel(operationId === undefined
 		? [SHAPE_SCHEMA_V2, operation, faceId]
 		: [SHAPE_SCHEMA_V2, operation, faceId, operationId]);
@@ -2042,9 +2042,12 @@ function validateTopologyEditableSubset(graph: BomcGraph): EditableSubsetResult 
 				const rings = [face.outer, ...face.holes];
 				const ringVertices = rings.flatMap((ring) => [...ring]);
 				const expectedTriangleCount = ringVertices.length + 2 * face.holes.length - 2;
+				const validTriangleLength = face.holes.length === 0
+					? face.triangles.length === expectedTriangleCount * 3
+					: face.triangles.length >= 3 && face.triangles.length % 3 === 0 && face.triangles.length <= expectedTriangleCount * 3;
 				if (rings.some((ring) => ring.length < 3 || ring.length > 256 || new Set(ring).size !== ring.length)
 					|| new Set(ringVertices).size !== ringVertices.length
-					|| face.triangles.length !== expectedTriangleCount * 3
+					|| !validTriangleLength
 					|| face.triangles.some((vertex) => !ringVertices.includes(vertex))) {
 					return { editable: false, reason: `Face ${face.id} has malformed ring or triangle topology.` };
 				}

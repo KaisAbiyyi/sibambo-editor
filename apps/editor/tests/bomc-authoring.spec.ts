@@ -476,7 +476,7 @@ async function pushPullProjectedFace(page: Page, graph: BomcGraph, faceId: strin
 }
 
 async function uploadBytes(page: Page, bytes: Uint8Array, name: string) {
-	const input = page.locator('input[accept=".bomc,application/octet-stream"]');
+	const input = page.getByLabel('BOMC 1.2 file', { exact: true });
 	await input.setInputFiles({ name, mimeType: 'application/octet-stream', buffer: Buffer.from(bytes) });
 }
 
@@ -484,7 +484,7 @@ async function uploadPinnedS2(page: Page) {
 	const pin = BOMC_PROFILE_FIXTURE_PINS.find((candidate) => candidate.id === 'PROJECT SBOOST 2:EXACT');
 	if (!pin) throw new Error('The immutable S2-current EXACT fixture pin is absent.');
 	const fixture = resolveBomcProfileFixture(pin);
-	await page.locator('input[accept=".bomc,application/octet-stream"]').setInputFiles(fixture.realPath);
+	await page.getByLabel('BOMC 1.2 file', { exact: true }).setInputFiles(fixture.realPath);
 }
 
 test.describe('canonical BOMC authoring through the real Editor page', () => {

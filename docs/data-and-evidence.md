@@ -23,6 +23,10 @@ The page displays an application source fingerprint, and GET /__build.json retur
 
 ## Where data goes
 
+The optional SE-05 live Builder mode receives canonical Module IR and shared geometry projections from the separate authenticated service over WSS. The owner BFF holds the opaque OAuth session in a Secure/HttpOnly cookie; the browser receives only a single-use 30-second attachment ticket. Neither credentials nor draft data go into localStorage/IndexedDB, URL parameters or automatic model logs. Worker validation and atomic frame acknowledgment gate subsequent writes. Request-status messages contain IDs/statuses only; owner request text is a separate bounded volatile inbox.
+
+Live state is retained in the page and in the server's RAM actor/replay buffers. Closing the last connection starts a thirty-minute server idle TTL; losing both page and service loses the unsaved draft. Logout pauses/fences the owner's service channels. A new server epoch cannot silently replace the last canonical draft retained in the page. These source guarantees still require qualification of the actual deployment's logs, process/swap/core-dump policy and external IdP. Live Builder Save/reopen and restart restore are separate milestones; they are not the local authoring Save behavior below.
+
 The selected file, decoded scene, optional provenance, canonical authoring document, and current Editor session are kept in page memory. The app source does not provide a hosted database, model upload endpoint, account sync, or collaborative editing service. Unloading the model or leaving the page clears the session.
 
 **Save view** downloads a PNG. **Save BOMC** writes the acknowledged canonical graph and downloads the resulting BOMC bytes in the browser. A matching successful browser-download dispatch and worker acknowledgment clears dirty state; the file is not uploaded or saved to an application server. Users must retain downloaded BOMC files themselves.

@@ -1,0 +1,8 @@
+{
+  "note": "SHA-256 of every part mesh (partId, Float64 positions, Uint32 triangles, Int32 triTag) in partId order; recorded under Bun, must be identical under Node and Chromium (CP12).",
+  "hashes": {
+    "G1": "efff22ffc92b11d2b0df3a940104136466bcd4c29bbb8ff35a244b17ff9a04e0",
+    "G4": "7e4508b59ad46cdf18ff0da2d4bad5db641ee2bf7bc7875587578addf6844e8b",
+    "G8": "f4cf6e13f35f246f5daa95ba62fce86d4556760d24b6bb62399e74bb9e5615ec"
+  }
+}

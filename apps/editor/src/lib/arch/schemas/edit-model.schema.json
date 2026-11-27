@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sibambo.local/schemas/edit-model.schema.json",
+  "title": "Sibambo edit_model arguments (SIB-MCP-MODELING-001 v2.3 C10)",
+  "description": "Arguments for the architectural edit_model tool. Metres, +Z up, module-local coordinates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["changes"],
+  "properties": {
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "baseRevision": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "$defs": {
+    "coord": { "type": "number", "minimum": -10000, "maximum": 10000 },
+    "vec2": { "type": "array", "prefixItems": [{ "$ref": "#/$defs/coord" }, { "$ref": "#/$defs/coord" }], "minItems": 2, "maxItems": 2, "items": false },
+    "ring": { "type": "array", "minItems": 3, "maxItems": 1024, "items": { "$ref": "#/$defs/vec2" } },
+    "moduleId": { "type": "string", "maxLength": 180, "pattern": "^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)+$" },
+    "elementId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "materialRef": { "type": "string", "pattern": "^(sib-(default|frame|glass|door)|(?!sib-)[a-z][a-z0-9-]{0,63})$" },
+    "transform": { "type": "array", "minItems": 16, "maxItems": 16, "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 } },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialId", "rgba", "opacity"],
+      "properties": {
+        "materialId": { "type": "string", "pattern": "^(?!sib-)[a-z][a-z0-9-]{0,63}$" },
+        "rgba": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "wall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "path", "thickness", "height", "baseElevation"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "wall" },
+        "path": { "type": "array", "minItems": 2, "maxItems": 256, "items": { "$ref": "#/$defs/vec2" } },
+        "closed": { "type": "boolean" },
+        "thickness": { "type": "number", "minimum": 0.01, "maximum": 2 },
+        "height": { "type": "number", "minimum": 0.01, "maximum": 100 },
+        "baseElevation": { "$ref": "#/$defs/coord" },
+        "side": { "enum": ["center", "left", "right"] },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "slab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "outline", "thickness", "topElevation"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "slab" },
+        "outline": { "$ref": "#/$defs/ring" },
+        "holes": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/ring" } },
+        "thickness": { "type": "number", "minimum": 0.01, "maximum": 5 },
+        "topElevation": { "$ref": "#/$defs/coord" },
+        "role": { "enum": ["floor", "ceiling", "roof-flat"] },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "opening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "hostElementId", "along", "width", "height", "sillHeight", "openingType"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "opening" },
+        "hostElementId": { "$ref": "#/$defs/elementId" },
+        "along": { "type": "number", "minimum": 0, "maximum": 100000 },
+        "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "sillHeight": { "type": "number", "minimum": 0, "maximum": 100 },
+        "openingType": { "enum": ["door", "window", "void"] },
+        "swing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hinge", "side"],
+          "properties": { "hinge": { "enum": ["start", "end"] }, "side": { "enum": ["left", "right"] } }
+        },
+        "materialId": { "$ref": "#/$defs/materialRef" }
+      }
+    },
+    "space": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elementId", "kind", "name", "seedPoint"],
+      "properties": {
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "kind": { "const": "space" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "seedPoint": { "$ref": "#/$defs/vec2" }
+      }
+    },
+    "element": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["wall", "slab", "opening", "space"] } },
+      "oneOf": [{ "$ref": "#/$defs/wall" }, { "$ref": "#/$defs/slab" }, { "$ref": "#/$defs/opening" }, { "$ref": "#/$defs/space" }]
+    },
+    "create_module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId"],
+      "properties": {
+        "op": { "const": "create_module" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "name": { "type": "string", "maxLength": 80 },
+        "transform": { "$ref": "#/$defs/transform" },
+        "materials": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/material" } }
+      }
+    },
+    "remove_module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId"],
+      "properties": {
+        "op": { "const": "remove_module" },
+        "moduleId": { "$ref": "#/$defs/moduleId" }
+      }
+    },
+    "set_module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId"],
+      "properties": {
+        "op": { "const": "set_module" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "name": { "type": ["string", "null"], "maxLength": 80 },
+        "transform": { "$ref": "#/$defs/transform" }
+      }
+    },
+    "add": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId", "element"],
+      "properties": {
+        "op": { "const": "add" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "element": { "$ref": "#/$defs/element" }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId", "elementId", "set"],
+      "properties": {
+        "op": { "const": "update" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "set": { "type": "object", "minProperties": 1, "additionalProperties": true }
+      }
+    },
+    "remove": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId", "elementId"],
+      "properties": {
+        "op": { "const": "remove" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "elementId": { "$ref": "#/$defs/elementId" },
+        "cascade": { "type": "boolean" }
+      }
+    },
+    "set_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId", "material"],
+      "properties": {
+        "op": { "const": "set_material" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "material": { "$ref": "#/$defs/material" }
+      }
+    },
+    "remove_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "moduleId", "materialId"],
+      "properties": {
+        "op": { "const": "remove_material" },
+        "moduleId": { "$ref": "#/$defs/moduleId" },
+        "materialId": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "change": {
+      "type": "object",
+      "required": ["op"],
+      "properties": { "op": { "enum": ["create_module", "remove_module", "set_module", "add", "update", "remove", "set_material", "remove_material"] } },
+      "oneOf": [
+        { "$ref": "#/$defs/create_module" },
+        { "$ref": "#/$defs/remove_module" },
+        { "$ref": "#/$defs/set_module" },
+        { "$ref": "#/$defs/add" },
+        { "$ref": "#/$defs/update" },
+        { "$ref": "#/$defs/remove" },
+        { "$ref": "#/$defs/set_material" },
+        { "$ref": "#/$defs/remove_material" }
+      ]
+    }
+  }
+}

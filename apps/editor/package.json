@@ -22,6 +22,7 @@
 		"@sibambo/provenance": "workspace:*",
 		"@sibambo/scene-runtime": "workspace:*",
 		"@sibambo/viewport": "workspace:*",
+		"manifold-3d": "3.5.5",
 		"three": "^0.184.0"
 	},
 	"devDependencies": {

@@ -1,0 +1,830 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sibambo.local/schemas/model-ops.schema.json",
+  "title": "Sibambo model_ops arguments (SIB-MCP-MODELING-001 v2.3 C11)",
+  "description": "Arguments for the freeform model_ops tool mirroring protocol.ts. Coordinates in authoring kernel space.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ops"
+  ],
+  "properties": {
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/modelOp"
+      }
+    },
+    "baseRevision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "$defs": {
+    "coord": {
+      "type": "number",
+      "minimum": -1000000,
+      "maximum": 1000000
+    },
+    "point": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/coord"
+        },
+        {
+          "$ref": "#/$defs/coord"
+        },
+        {
+          "$ref": "#/$defs/coord"
+        }
+      ],
+      "minItems": 3,
+      "maxItems": 3,
+      "items": false
+    },
+    "path": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 180
+      }
+    },
+    "selectionItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "face"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "instance"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "start",
+            "end"
+          ],
+          "properties": {
+            "type": {
+              "const": "edge"
+            },
+            "start": {
+              "$ref": "#/$defs/point"
+            },
+            "end": {
+              "$ref": "#/$defs/point"
+            }
+          }
+        }
+      ]
+    },
+    "selection": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/selectionItem"
+      }
+    },
+    "flatCommand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "first",
+            "opposite"
+          ],
+          "properties": {
+            "kind": {
+              "const": "CREATE_RECTANGLE"
+            },
+            "first": {
+              "$ref": "#/$defs/point"
+            },
+            "opposite": {
+              "$ref": "#/$defs/point"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "points",
+            "normal"
+          ],
+          "properties": {
+            "kind": {
+              "const": "CREATE_RECTANGLE"
+            },
+            "points": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "$ref": "#/$defs/point"
+              }
+            },
+            "normal": {
+              "$ref": "#/$defs/point"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "points",
+            "normal"
+          ],
+          "properties": {
+            "kind": {
+              "const": "CREATE_FACE_LOOP"
+            },
+            "points": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 256,
+              "items": {
+                "$ref": "#/$defs/point"
+              }
+            },
+            "normal": {
+              "$ref": "#/$defs/point"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "faceId",
+            "distance"
+          ],
+          "properties": {
+            "kind": {
+              "const": "PUSH_PULL_FACE"
+            },
+            "faceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "distance": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "entityId",
+            "distance"
+          ],
+          "properties": {
+            "kind": {
+              "const": "EXTRUDE_RECTANGLE"
+            },
+            "entityId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "distance": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        }
+      ]
+    },
+    "modelAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "command"
+          ],
+          "properties": {
+            "type": {
+              "const": "raw"
+            },
+            "command": {
+              "$ref": "#/$defs/flatCommand"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection",
+            "containerKind",
+            "name"
+          ],
+          "properties": {
+            "type": {
+              "const": "group"
+            },
+            "selection": {
+              "$ref": "#/$defs/selection"
+            },
+            "containerKind": {
+              "enum": [
+                "group",
+                "component"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection"
+          ],
+          "properties": {
+            "type": {
+              "const": "erase"
+            },
+            "selection": {
+              "$ref": "#/$defs/selection"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection",
+            "delta",
+            "copy",
+            "count",
+            "spacing",
+            "radial"
+          ],
+          "properties": {
+            "type": {
+              "const": "transform"
+            },
+            "selection": {
+              "$ref": "#/$defs/selection"
+            },
+            "delta": {
+              "$ref": "#/$defs/point"
+            },
+            "copy": {
+              "type": "boolean"
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "spacing": {
+              "enum": [
+                "multiply",
+                "divide"
+              ]
+            },
+            "radial": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "axis",
+                    "pivot",
+                    "angleDegrees"
+                  ],
+                  "properties": {
+                    "axis": {
+                      "enum": [
+                        "x",
+                        "y",
+                        "z"
+                      ]
+                    },
+                    "pivot": {
+                      "$ref": "#/$defs/point"
+                    },
+                    "angleDegrees": {
+                      "type": "number",
+                      "minimum": -360000,
+                      "maximum": 360000
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection",
+            "factors",
+            "pivot",
+            "copy"
+          ],
+          "properties": {
+            "type": {
+              "const": "scale"
+            },
+            "selection": {
+              "$ref": "#/$defs/selection"
+            },
+            "factors": {
+              "$ref": "#/$defs/point"
+            },
+            "pivot": {
+              "$ref": "#/$defs/point"
+            },
+            "copy": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instanceId"
+          ],
+          "properties": {
+            "type": {
+              "const": "unique"
+            },
+            "instanceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instanceId"
+          ],
+          "properties": {
+            "type": {
+              "const": "explode"
+            },
+            "instanceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "faceId",
+            "distance"
+          ],
+          "properties": {
+            "type": {
+              "const": "offset"
+            },
+            "faceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "distance": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "curveKind",
+            "center",
+            "first",
+            "normal",
+            "segments",
+            "sweepDegrees"
+          ],
+          "properties": {
+            "type": {
+              "const": "curve"
+            },
+            "curveKind": {
+              "enum": [
+                "circle",
+                "polygon",
+                "arc"
+              ]
+            },
+            "center": {
+              "$ref": "#/$defs/point"
+            },
+            "first": {
+              "$ref": "#/$defs/point"
+            },
+            "normal": {
+              "$ref": "#/$defs/point"
+            },
+            "segments": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 256
+            },
+            "sweepDegrees": {
+              "type": "number",
+              "minimum": -360000,
+              "maximum": 360000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "faceId",
+            "edges"
+          ],
+          "properties": {
+            "type": {
+              "const": "follow-me"
+            },
+            "faceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "edges": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "start": {
+                    "$ref": "#/$defs/point"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/point"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "name"
+          ],
+          "properties": {
+            "type": {
+              "const": "tag-create"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tagId",
+            "visible"
+          ],
+          "properties": {
+            "type": {
+              "const": "tag-visibility"
+            },
+            "tagId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "visible": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instanceIds",
+            "tagId"
+          ],
+          "properties": {
+            "type": {
+              "const": "tag-assign"
+            },
+            "instanceIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4096,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "tagId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instanceId",
+            "name",
+            "visible"
+          ],
+          "properties": {
+            "type": {
+              "const": "entity-info"
+            },
+            "instanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "visible": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instanceId",
+            "name"
+          ],
+          "properties": {
+            "type": {
+              "const": "asset-create"
+            },
+            "instanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "assetId",
+            "point"
+          ],
+          "properties": {
+            "type": {
+              "const": "asset-insert"
+            },
+            "assetId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "point": {
+              "$ref": "#/$defs/point"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "assetId"
+          ],
+          "properties": {
+            "type": {
+              "const": "asset-delete"
+            },
+            "assetId": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection",
+            "name",
+            "rgba",
+            "opacityU16",
+            "side"
+          ],
+          "properties": {
+            "type": {
+              "const": "paint"
+            },
+            "selection": {
+              "$ref": "#/$defs/selection"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "rgba": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            },
+            "opacityU16": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "side": {
+              "enum": [
+                "front",
+                "back",
+                "both"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "start",
+            "end",
+            "guideKind"
+          ],
+          "properties": {
+            "type": {
+              "const": "guide"
+            },
+            "start": {
+              "$ref": "#/$defs/point"
+            },
+            "end": {
+              "$ref": "#/$defs/point"
+            },
+            "guideKind": {
+              "enum": [
+                "line",
+                "point"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "clear-guides"
+            }
+          }
+        }
+      ]
+    },
+    "modelOp": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/path"
+            },
+            "command": {
+              "$ref": "#/$defs/flatCommand"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/path"
+            },
+            "action": {
+              "$ref": "#/$defs/modelAction"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+

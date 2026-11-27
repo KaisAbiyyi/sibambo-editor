@@ -1,0 +1,20 @@
+describe_element · revision 1 · summary
+test/ground:part  wall  frame module test/ground
+  path (2.000,0.000) (2.000,3.000)  closed false  thickness 0.150  height 2.700  baseElevation 0.000  side "center"  materialId "sib-default"
+  bounds x[1.925,2.075] y[0.000,3.000] z[0.000,2.700]
+  length 3.000
+  junction T at (2.000,0.000) with w1
+  junction T at (2.000,3.000) with w3
+  openings none
+  faces 2  hard-edges 8
+  findings none
+test/ground:w1  wall  frame module test/ground
+  path (0.000,0.000) (4.000,0.000)  closed false  thickness 0.150  height 2.700  baseElevation 0.000  side "center"  materialId "sib-default"
+  bounds x[-0.075,4.075] y[-0.075,0.075] z[0.000,2.700]
+  length 4.000
+  junction L at (0.000,0.000) with w4
+  junction T at (2.000,0.000) with part
+  junction L at (4.000,0.000) with w2
+  openings none
+  faces 3  hard-edges 12
+  findings none
