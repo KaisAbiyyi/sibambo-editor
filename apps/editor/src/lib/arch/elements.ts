@@ -9,6 +9,12 @@ import { canonicalRing, signedArea, type Kernel, type Solid, type Vec2 } from '.
 import { JOIN_TOL, type WallElement, type WallNetwork, type WallSegment } from './walls.js';
 
 const EPS = 1e-9;
+/**
+ * Slab area validity (amendment A22 to C8). The kernel quantises input by up to ≈ 3.5e-9 m, so `section.area()` differs
+ * from the shoelace area of the same ring by ≈ that times the ring perimeter: the tolerance is `base + perMetre × perimeter`.
+ */
+const AREA_TOL_BASE = 1e-9;
+const AREA_TOL_PER_METRE = 2e-8;
 const END_CLEARANCE = 0.05;
 const HEAD_CLEARANCE = 0.05;
 const CUTTER_OVERSHOOT = 0.01;
@@ -60,19 +66,31 @@ export function isSimpleRing(ring: readonly (readonly [number, number])[]): bool
 	return true;
 }
 
+/** `AREA_TOL_BASE + AREA_TOL_PER_METRE × Σ perimeter` of canonical rings. `Math.sqrt`, not `Math.hypot`: engine-independent. */
+function areaTolerance(rings: readonly (readonly Vec2[])[]): number {
+	let perimeter = 0;
+	for (const ring of rings)
+		for (let i = 0; i < ring.length; i++) {
+			const a = ring[i]!, b = ring[(i + 1) % ring.length]!;
+			const dx = b[0] - a[0], dy = b[1] - a[1];
+			perimeter += Math.sqrt(dx * dx + dy * dy);
+		}
+	return AREA_TOL_BASE + AREA_TOL_PER_METRE * perimeter;
+}
+
 /** Normalises orientation, rejects self-intersection and builds the slab prism `[top − thickness, top]`. */
 export function buildSlab(kernel: Kernel, slab: SlabElement, tag: number): Solid {
 	for (const ring of [slab.outline, ...(slab.holes ?? [])]) if (!isSimpleRing(ring)) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
 	const outline = canonicalRing(slab.outline, true);
 	const holes = (slab.holes ?? []).map((h) => canonicalRing(h, false));
 	const areaOf = (ring: readonly Vec2[]) => Math.abs(signedArea(ring));
-	if (Math.abs(kernel.unionArea2d([outline]) - areaOf(outline)) > EPS) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
+	if (Math.abs(kernel.unionArea2d([outline]) - areaOf(outline)) > areaTolerance([outline])) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
 	holes.forEach((hole) => {
-		if (Math.abs(kernel.unionArea2d([hole]) - areaOf(hole)) > EPS) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
+		if (Math.abs(kernel.unionArea2d([hole]) - areaOf(hole)) > areaTolerance([hole])) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
 	});
 	// Holes must lie inside the outline and be disjoint, which is exactly "area with holes = outline − Σ holes".
 	const expected = areaOf(outline) - holes.reduce((sum, h) => sum + areaOf(h), 0);
-	if (Math.abs(kernel.areaWithHoles2d(outline, holes) - expected) > EPS) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
+	if (Math.abs(kernel.areaWithHoles2d(outline, holes) - expected) > areaTolerance([outline, ...holes])) throw invalidGeometry('SLAB_SELF_INTERSECTS', slab.elementId);
 	return kernel.prismWithHoles(outline, holes, slab.topElevation - slab.thickness, slab.topElevation, tag);
 }
 
