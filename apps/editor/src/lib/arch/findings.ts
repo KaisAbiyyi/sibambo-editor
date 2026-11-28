@@ -1,6 +1,7 @@
 /**
  * SIB-MCP-MODELING-001 v2.3 C13 & v2.4 A2 — `arch/findings.ts`: pure architectural model findings
- * and before/after receipt diffing (`edit_model` findings diff). Does not import the geometry kernel.
+ * and before/after receipt diffing (`edit_model` findings diff). Pure and synchronous: it never calls a `Kernel` instance.
+ * It imports `distanceToRings`, `frameWidth` and `windingNumber` from `./elements.js`, which imports the `./kernel.js` module (not an instance).
  */
 import { distanceToRings, frameWidth, windingNumber } from './elements.js';
 import type { EvaluatedModule } from './evaluate.js';
